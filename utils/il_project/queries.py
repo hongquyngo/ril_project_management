@@ -38,8 +38,7 @@ def get_employees() -> List[Dict]:
     """All active employees — for PM / sales / worker dropdowns."""
     return execute_query("""
         SELECT id,
-               CONCAT(first_name, ' ', last_name) AS full_name,
-               employee_code
+               CONCAT(first_name, ' ', last_name) AS full_name
         FROM employees
         WHERE delete_flag = 0
         ORDER BY first_name, last_name
