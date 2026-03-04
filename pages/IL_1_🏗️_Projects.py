@@ -21,6 +21,72 @@ auth = AuthManager()
 
 st.set_page_config(page_title="IL Projects", page_icon="🏗️", layout="wide")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Helper — must be defined before page body calls it
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _render_milestones_tab(project_id: int, uid: str, currs: list):
+    ms_df = get_milestones_df(project_id)
+    if not ms_df.empty:
+        st.dataframe(
+            ms_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'sequence_no':     st.column_config.NumberColumn('#', width=40),
+                'milestone_name':  st.column_config.TextColumn('Milestone'),
+                'milestone_type':  st.column_config.TextColumn('Type'),
+                'billing_percent': st.column_config.NumberColumn('Billing%', format="%.1f%%"),
+                'billing_amount':  st.column_config.NumberColumn('Amount', format="%.0f"),
+                'planned_date':    st.column_config.DateColumn('Planned'),
+                'actual_date':     st.column_config.DateColumn('Actual'),
+                'status':          st.column_config.TextColumn('Status'),
+            }
+        )
+    else:
+        st.info("No milestones yet.")
+
+    with st.expander("➕ Add Milestone"):
+        with st.form(f"ms_form_{project_id}"):
+            mc1, mc2, mc3 = st.columns(3)
+            ms_seq   = mc1.number_input("Sequence #", min_value=1, value=len(ms_df)+1)
+            ms_name  = mc2.text_input("Milestone Name *")
+            ms_types = ['DELIVERY','PAYMENT','ACCEPTANCE','HANDOVER','WARRANTY_START','OTHER']
+            ms_type  = mc3.selectbox("Type", ms_types)
+            md1, md2, md3 = st.columns(3)
+            ms_bpct  = md1.number_input("Billing % (0=none)", min_value=0.0, max_value=100.0, value=0.0)
+            ms_bamt  = md2.number_input("Billing Amount (0=none)", min_value=0.0, value=0.0, format="%.0f")
+            ms_plan  = md3.date_input("Planned Date")
+            ms_stat_opts = ['PENDING','IN_PROGRESS','COMPLETED','INVOICED','PAID','OVERDUE']
+            ms_stat  = st.selectbox("Status", ms_stat_opts)
+            ms_notes = st.text_input("Completion Notes")
+            cur_opts2 = [c['code'] for c in currs]
+            ms_cur   = st.selectbox("Currency", cur_opts2)
+            ms_cur_id= currs[cur_opts2.index(ms_cur)]['id']
+
+            if st.form_submit_button("Add Milestone", type="primary"):
+                if not ms_name:
+                    st.error("Name required.")
+                elif ms_bpct > 0 and ms_bamt > 0:
+                    st.error("Set either Billing % OR Amount, not both.")
+                else:
+                    create_milestone({
+                        'project_id': project_id,
+                        'sequence_no': ms_seq,
+                        'milestone_name': ms_name,
+                        'milestone_type': ms_type,
+                        'billing_percent': ms_bpct if ms_bpct > 0 else None,
+                        'billing_amount': ms_bamt if ms_bamt > 0 else None,
+                        'currency_id': ms_cur_id,
+                        'planned_date': ms_plan,
+                        'actual_date': None,
+                        'status': ms_stat,
+                        'completion_notes': ms_notes or None,
+                    }, uid)
+                    st.success("Milestone added!")
+                    st.rerun()
+
 # ── Auth ───────────────────────────────────────────────────────────────────────
 auth.require_auth()
 user_id    = str(auth.get_user_id())
@@ -340,69 +406,3 @@ if submitted:
         st.rerun()
     except Exception as e:
         st.error(f"Save failed: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Milestones sub-section
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _render_milestones_tab(project_id: int, uid: str, currs: list):
-    ms_df = get_milestones_df(project_id)
-    if not ms_df.empty:
-        st.dataframe(
-            ms_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'sequence_no':     st.column_config.NumberColumn('#', width=40),
-                'milestone_name':  st.column_config.TextColumn('Milestone'),
-                'milestone_type':  st.column_config.TextColumn('Type'),
-                'billing_percent': st.column_config.NumberColumn('Billing%', format="%.1f%%"),
-                'billing_amount':  st.column_config.NumberColumn('Amount', format="%.0f"),
-                'planned_date':    st.column_config.DateColumn('Planned'),
-                'actual_date':     st.column_config.DateColumn('Actual'),
-                'status':          st.column_config.TextColumn('Status'),
-            }
-        )
-    else:
-        st.info("No milestones yet.")
-
-    with st.expander("➕ Add Milestone"):
-        with st.form(f"ms_form_{project_id}"):
-            mc1, mc2, mc3 = st.columns(3)
-            ms_seq   = mc1.number_input("Sequence #", min_value=1, value=len(ms_df)+1)
-            ms_name  = mc2.text_input("Milestone Name *")
-            ms_types = ['DELIVERY','PAYMENT','ACCEPTANCE','HANDOVER','WARRANTY_START','OTHER']
-            ms_type  = mc3.selectbox("Type", ms_types)
-            md1, md2, md3 = st.columns(3)
-            ms_bpct  = md1.number_input("Billing % (0=none)", min_value=0.0, max_value=100.0, value=0.0)
-            ms_bamt  = md2.number_input("Billing Amount (0=none)", min_value=0.0, value=0.0, format="%.0f")
-            ms_plan  = md3.date_input("Planned Date")
-            ms_stat_opts = ['PENDING','IN_PROGRESS','COMPLETED','INVOICED','PAID','OVERDUE']
-            ms_stat  = st.selectbox("Status", ms_stat_opts)
-            ms_notes = st.text_input("Completion Notes")
-            cur_opts2 = [c['code'] for c in currs]
-            ms_cur   = st.selectbox("Currency", cur_opts2)
-            ms_cur_id= currs[cur_opts2.index(ms_cur)]['id']
-
-            if st.form_submit_button("Add Milestone", type="primary"):
-                if not ms_name:
-                    st.error("Name required.")
-                elif ms_bpct > 0 and ms_bamt > 0:
-                    st.error("Set either Billing % OR Amount, not both.")
-                else:
-                    create_milestone({
-                        'project_id': project_id,
-                        'sequence_no': ms_seq,
-                        'milestone_name': ms_name,
-                        'milestone_type': ms_type,
-                        'billing_percent': ms_bpct if ms_bpct > 0 else None,
-                        'billing_amount': ms_bamt if ms_bamt > 0 else None,
-                        'currency_id': ms_cur_id,
-                        'planned_date': ms_plan,
-                        'actual_date': None,
-                        'status': ms_stat,
-                        'completion_notes': ms_notes or None,
-                    }, uid)
-                    st.success("Milestone added!")
-                    st.rerun()
