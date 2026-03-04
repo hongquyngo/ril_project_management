@@ -278,85 +278,109 @@ with st.form("il_project_form", clear_on_submit=False):
 
     # Project code: auto-generated for new, read-only for edit
     if is_create:
-        auto_code = generate_project_code()
+        auto_code = generate_project_code(auth.get_user_id())
         fc1.text_input("Project Code", value=auto_code, disabled=True,
-                       help="Auto-generated, cannot be changed")
+                       help="Auto-generated: IL-YYYY-{user_id}-NNN")
         project_code = auto_code
     else:
         fc1.text_input("Project Code", value=proj.get('project_code', ''), disabled=True,
                        help="System-generated, read-only")
         project_code = proj.get('project_code', '')
 
-    contract_num = fc2.text_input("Contract Number", value=proj.get('contract_number') or '')
-    project_name = fc3.text_input("Project Name *", value=proj.get('project_name',''))
+    contract_num = fc2.text_input("Contract Number", value=proj.get('contract_number') or '',
+                                   help="Số hợp đồng chính thức từ khách hàng. Có thể khác Project Code. Ví dụ: HĐ-2025-FOXCONN-001")
+    project_name = fc3.text_input("Project Name *", value=proj.get('project_name',''),
+                                   help="Tên dự án đầy đủ, mô tả rõ scope. Ví dụ: AMR Transport System — Foxconn Bắc Giang Line 3")
 
     ft1, ft2, ft3 = st.columns(3)
     type_options  = [f"[{t['code']}] {t['name']}" for t in proj_types]
     current_type  = type_map.get(proj.get('project_type_id',''))
     type_idx      = type_options.index(current_type) if current_type in type_options else 0
-    type_sel      = ft1.selectbox("Project Type", type_options, index=type_idx)
+    type_sel      = ft1.selectbox("Project Type", type_options, index=type_idx,
+                                   help="Loại dự án intralogistics. Ảnh hưởng đến hệ số α/β/γ mặc định và benchmark man-days.")
     type_id_sel   = proj_types[[t['code'] for t in proj_types].index(type_sel.split("]")[0][1:])]['id']
 
     billing_types = ['LUMP_SUM','MILESTONE','TIME_MATERIAL','MIXED']
     billing_idx   = billing_types.index(proj['billing_type']) if proj.get('billing_type') in billing_types else 0
-    billing_sel   = ft2.selectbox("Billing Type", billing_types, index=billing_idx)
+    billing_sel   = ft2.selectbox("Billing Type", billing_types, index=billing_idx,
+                                   help="LUMP_SUM: thanh toán 1 lần hoặc theo % cố định.\nMILESTONE: thanh toán theo từng mốc nghiệm thu.\nTIME_MATERIAL: tính theo man-days + vật tư thực tế.\nMIXED: kết hợp nhiều hình thức.")
 
     statuses   = ['DRAFT','ESTIMATING','PROPOSAL_SENT','GO','CONDITIONAL','NO_GO',
                   'CONTRACTED','IN_PROGRESS','COMMISSIONING','COMPLETED','WARRANTY','CLOSED','CANCELLED']
     status_idx = statuses.index(proj['status']) if proj.get('status') in statuses else 0
-    status_sel = ft3.selectbox("Status", statuses, index=status_idx)
+    status_sel = ft3.selectbox("Status", statuses, index=status_idx,
+                                help="DRAFT: mới tạo, chưa estimate.\nESTIMATING: đang tính COGS/GP.\nPROPOSAL_SENT: đã gửi đề xuất.\nGO/CONDITIONAL/NO_GO: kết quả Go/No-Go.\nCONTRACTED: đã ký HĐ.\nIN_PROGRESS: đang triển khai.\nCOMMISSIONING: đang chạy thử.\nCOMPLETED: đã bàn giao.\nWARRANTY: trong bảo hành.\nCLOSED: đã đóng sổ.")
 
     st.markdown("**Customer**")
     cc1, cc2 = st.columns([2,2])
     company_opts  = ["(Not in system)"] + [c['name'] for c in companies]
     company_idx   = next((i+1 for i,c in enumerate(companies) if c['id']==proj.get('customer_id')), 0)
-    company_sel   = cc1.selectbox("Customer (Companies)", company_opts, index=company_idx)
+    company_sel   = cc1.selectbox("Customer (Companies)", company_opts, index=company_idx,
+                                   help="Chọn từ danh sách công ty đã có trong hệ thống.\nNếu chưa có, chọn '(Not in system)' và điền tên bên dưới.")
     customer_id   = companies[company_opts.index(company_sel)-1]['id'] if company_sel != "(Not in system)" else None
-    end_cust_name = cc2.text_input("Customer Name (free text)", value=proj.get('end_customer_name') or '')
+    end_cust_name = cc2.text_input("Customer Name (free text)", value=proj.get('end_customer_name') or '',
+                                    help="Điền tên khách hàng nếu chưa có trong hệ thống, hoặc tên end-customer khác với bên ký HĐ.")
 
     st.markdown("**Financial**")
     fm1, fm2, fm3, fm4 = st.columns(4)
-    contract_val  = fm1.number_input("Contract Value", value=float(proj.get('contract_value') or 0), min_value=0.0, format="%.0f")
-    amended_val   = fm2.number_input("Amended Value (0=none)", value=float(proj.get('amended_contract_value') or 0), min_value=0.0, format="%.0f")
+    contract_val  = fm1.number_input("Contract Value", value=float(proj.get('contract_value') or 0), min_value=0.0, format="%.0f",
+                                      help="Giá trị hợp đồng ban đầu (theo đồng tiền HĐ). Chưa bao gồm amendment/variation order.")
+    amended_val   = fm2.number_input("Amended Value (0=none)", value=float(proj.get('amended_contract_value') or 0), min_value=0.0, format="%.0f",
+                                      help="Giá trị sau khi có Variation Order / Amendment. Để 0 nếu không có thay đổi.\nHệ thống sẽ dùng giá trị này cho tính toán GP thực tế.")
     cur_opts      = [c['code'] for c in currencies]
     cur_idx       = next((i for i,c in enumerate(currencies) if c['id']==proj.get('currency_id')), 0)
-    cur_sel       = fm3.selectbox("Currency", cur_opts, index=cur_idx)
+    cur_sel       = fm3.selectbox("Currency", cur_opts, index=cur_idx,
+                                   help="Đồng tiền trong hợp đồng với khách hàng.")
     currency_id   = currencies[cur_opts.index(cur_sel)]['id']
-    exc_rate      = fm4.number_input("Exchange Rate", value=float(proj.get('exchange_rate') or 1.0), format="%.4f")
+    exc_rate      = fm4.number_input("Exchange Rate", value=float(proj.get('exchange_rate') or 1.0), format="%.4f",
+                                      help="Tỷ giá quy đổi sang VND tại thời điểm ký HĐ.\nVí dụ: USD → VND = 25,000. VND = 1.")
 
     st.markdown("**Location & Environment**")
     fl1, fl2, fl3, fl4 = st.columns(4)
-    location      = fl1.text_input("Location", value=proj.get('location') or '')
+    location      = fl1.text_input("Location", value=proj.get('location') or '',
+                                    help="Địa chỉ / tỉnh thành triển khai dự án. Ví dụ: KCN Vân Trung, Bắc Giang")
     dist_opts     = ['LOCAL','NEARBY','FAR','OVERSEAS']
     dist_idx      = dist_opts.index(proj['site_distance_category']) if proj.get('site_distance_category') in dist_opts else 1
-    dist_sel      = fl2.selectbox("Distance", dist_opts, index=dist_idx)
+    dist_sel      = fl2.selectbox("Distance", dist_opts, index=dist_idx,
+                                   help="LOCAL: nội thành Hà Nội (di chuyển trong ngày).\nNEARBY: < 100km, ví dụ Hà Nam, Hưng Yên.\nFAR: > 100km, ví dụ Hải Phòng, Bình Dương.\nOVERSEAS: ngoài Việt Nam.\n→ Ảnh hưởng đến hệ số β (Travel & Site OH).")
     env_opts      = ['CLEAN','NORMAL','HARSH']
     env_idx       = env_opts.index(proj['environment_category']) if proj.get('environment_category') in env_opts else 1
-    env_sel       = fl3.selectbox("Environment", env_opts, index=env_idx)
+    env_sel       = fl3.selectbox("Environment", env_opts, index=env_idx,
+                                   help="CLEAN: văn phòng, cleanroom, ít rủi ro hỏng hóc.\nNORMAL: nhà máy thông thường.\nHARSH: môi trường bụi, ẩm, hóa chất, nhiệt độ cao.\n→ Ảnh hưởng đến hệ số γ (Warranty Reserve).")
     imp_opts      = ['DOMESTIC','IMPORTED','MIXED']
     imp_idx       = imp_opts.index(proj['import_category']) if proj.get('import_category') in imp_opts else 1
-    imp_sel       = fl4.selectbox("Import Category", imp_opts, index=imp_idx)
+    imp_sel       = fl4.selectbox("Import Category", imp_opts, index=imp_idx,
+                                   help="DOMESTIC: thiết bị mua trong nước, không có chi phí nhập khẩu.\nIMPORTED: nhập khẩu hoàn toàn (freight + insurance + thuế NK + customs).\nMIXED: vừa mua nội địa vừa nhập khẩu.\n→ Ảnh hưởng đến hệ số α (Logistics & Import).")
 
     st.markdown("**Timeline**")
     fd1, fd2, fd3, fd4 = st.columns(4)
-    est_start = fd1.date_input("Est. Start", value=proj.get('estimated_start_date') or None)
-    est_end   = fd2.date_input("Est. End",   value=proj.get('estimated_end_date')   or None)
-    act_start = fd3.date_input("Act. Start", value=proj.get('actual_start_date')    or None)
-    act_end   = fd4.date_input("Act. End",   value=proj.get('actual_end_date')      or None)
+    est_start = fd1.date_input("Est. Start", value=proj.get('estimated_start_date') or None,
+                                help="Ngày dự kiến bắt đầu triển khai (sau khi ký HĐ).")
+    est_end   = fd2.date_input("Est. End",   value=proj.get('estimated_end_date') or None,
+                                help="Ngày dự kiến bàn giao hệ thống (trước bảo hành).")
+    act_start = fd3.date_input("Act. Start", value=proj.get('actual_start_date') or None,
+                                help="Ngày thực tế bắt đầu. Cập nhật khi dự án chính thức khởi động.")
+    act_end   = fd4.date_input("Act. End",   value=proj.get('actual_end_date') or None,
+                                help="Ngày thực tế bàn giao / nghiệm thu xong. Cập nhật khi hoàn thành.")
 
     st.markdown("**Team & Warranty**")
     fw1, fw2, fw3, fw4 = st.columns(4)
     emp_opts    = [e['full_name'] for e in employees]
     pm_idx      = next((i for i,e in enumerate(employees) if e['id']==proj.get('pm_employee_id')), 0)
-    pm_sel      = fw1.selectbox("Project Manager", emp_opts, index=pm_idx)
+    pm_sel      = fw1.selectbox("Project Manager", emp_opts, index=pm_idx,
+                                 help="PM chịu trách nhiệm triển khai và báo cáo tiến độ dự án.")
     sales_idx   = next((i for i,e in enumerate(employees) if e['id']==proj.get('sales_employee_id')), 0)
-    sales_sel   = fw2.selectbox("Sales", emp_opts, index=sales_idx)
-    war_months  = fw3.number_input("Warranty (months)", value=int(proj.get('warranty_months') or 12), min_value=0)
+    sales_sel   = fw2.selectbox("Sales", emp_opts, index=sales_idx,
+                                 help="Sales phụ trách deal này — dùng để tính commission và track pre-sales cost.")
+    war_months  = fw3.number_input("Warranty (months)", value=int(proj.get('warranty_months') or 12), min_value=0,
+                                    help="Thời gian bảo hành tính bằng tháng kể từ ngày nghiệm thu.\nThông thường: AMR 12 tháng, WMS 12-24 tháng.")
     war_types   = ['PARTS_ONLY','LABOR_INCLUDED','FULL_SERVICE']
     war_type_idx= war_types.index(proj['warranty_type']) if proj.get('warranty_type') in war_types else 0
-    war_type_sel= fw4.selectbox("Warranty Type", war_types, index=war_type_idx)
+    war_type_sel= fw4.selectbox("Warranty Type", war_types, index=war_type_idx,
+                                 help="PARTS_ONLY: chỉ bao gồm linh kiện thay thế.\nLABOR_INCLUDED: linh kiện + công kỹ thuật đến site.\nFULL_SERVICE: toàn diện, bao gồm cả phòng ngừa định kỳ.\n→ Ảnh hưởng đến chi phí dự phòng bảo hành (F).")
 
-    decision_notes = st.text_area("Decision Notes", value=proj.get('decision_notes') or '', height=80)
+    decision_notes = st.text_area("Decision Notes", value=proj.get('decision_notes') or '', height=80,
+                                   help="Ghi chú về quyết định Go/No-Go, điều kiện đặc biệt, hoặc lý do điều chỉnh scope/giá.")
 
     sub_col1, sub_col2 = st.columns([1,3])
     submitted = sub_col1.form_submit_button("💾 Save", type="primary", use_container_width=True)
