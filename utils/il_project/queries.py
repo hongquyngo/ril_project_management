@@ -63,20 +63,22 @@ def get_currencies() -> List[Dict]:
     """)
 
 
-def generate_project_code() -> str:
+def generate_project_code(user_id: int) -> str:
     """
-    Generate next unique project code: IL-YYYY-NNN
-    Finds the highest NNN for current year and increments.
+    Generate next unique project code: IL-YYYY-{user_id}-NNN
+    e.g. IL-2025-3-001
+    Finds the highest NNN for current year + user_id and increments.
     """
     from datetime import date
     year = date.today().year
+    prefix = f'IL-{year}-{user_id:03d}-'
     rows = execute_query("""
         SELECT project_code
         FROM il_projects
         WHERE project_code LIKE :pattern
         ORDER BY project_code DESC
         LIMIT 1
-    """, {'pattern': f'IL-{year}-%'})
+    """, {'pattern': f'{prefix}%'})
 
     if rows:
         try:
@@ -86,7 +88,7 @@ def generate_project_code() -> str:
     else:
         last_seq = 0
 
-    return f"IL-{year}-{last_seq + 1:03d}"
+    return f"{prefix}{last_seq + 1:03d}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
