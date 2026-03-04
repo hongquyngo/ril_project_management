@@ -12,7 +12,7 @@ from utils.auth import AuthManager
 from utils.il_project import (
     get_projects_df, get_project, create_project, update_project, soft_delete_project,
     get_project_types, get_employees, get_companies, get_currencies, get_milestones_df,
-    create_milestone, update_milestone,
+    create_milestone, update_milestone, generate_project_code,
     fmt_vnd, fmt_percent, STATUS_COLORS,
 )
 
@@ -275,7 +275,18 @@ st.subheader("➕ New Project" if is_create else "✏️ Edit Project")
 with st.form("il_project_form", clear_on_submit=False):
     st.markdown("**Basic Information**")
     fc1, fc2, fc3 = st.columns(3)
-    project_code = fc1.text_input("Project Code *", value=proj.get('project_code',''), placeholder="IL-2025-001")
+
+    # Project code: auto-generated for new, read-only for edit
+    if is_create:
+        auto_code = generate_project_code()
+        fc1.text_input("Project Code", value=auto_code, disabled=True,
+                       help="Auto-generated, cannot be changed")
+        project_code = auto_code
+    else:
+        fc1.text_input("Project Code", value=proj.get('project_code', ''), disabled=True,
+                       help="System-generated, read-only")
+        project_code = proj.get('project_code', '')
+
     contract_num = fc2.text_input("Contract Number", value=proj.get('contract_number') or '')
     project_name = fc3.text_input("Project Name *", value=proj.get('project_name',''))
 
@@ -354,8 +365,8 @@ with st.form("il_project_form", clear_on_submit=False):
         st.rerun()
 
 if submitted:
-    if not project_code or not project_name:
-        st.error("Project Code and Name are required.")
+    if not project_name:
+        st.error("Project Name is required.")
         st.stop()
 
     pm_id    = employees[emp_opts.index(pm_sel)]['id']

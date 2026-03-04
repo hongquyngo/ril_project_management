@@ -9,6 +9,7 @@ from .queries import (
     get_employees,
     get_companies,
     get_currencies,
+    generate_project_code,
     # Projects
     get_projects_df,
     get_project,
@@ -67,7 +68,7 @@ from .helpers import (
 from .s3_il import ILProjectS3Manager
 
 __all__ = [
-    'get_project_types', 'get_employees', 'get_companies', 'get_currencies',
+    'get_project_types', 'get_employees', 'get_companies', 'get_currencies', 'generate_project_code',
     'get_projects_df', 'get_project', 'create_project', 'update_project', 'soft_delete_project',
     'get_estimates', 'get_active_estimate', 'create_estimate', 'update_estimate', 'activate_estimate',
     'get_labor_logs_df', 'create_labor_log', 'update_labor_log', 'approve_labor_log', 'soft_delete_labor_log',

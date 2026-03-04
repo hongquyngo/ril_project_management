@@ -47,7 +47,7 @@ def get_employees() -> List[Dict]:
 
 def get_companies() -> List[Dict]:
     return execute_query("""
-        SELECT id, english_name AS name, short_name
+        SELECT id, english_name AS name, company_code
         FROM companies
         WHERE delete_flag = 0
         ORDER BY english_name
@@ -61,6 +61,32 @@ def get_currencies() -> List[Dict]:
         WHERE delete_flag = 0
         ORDER BY code
     """)
+
+
+def generate_project_code() -> str:
+    """
+    Generate next unique project code: IL-YYYY-NNN
+    Finds the highest NNN for current year and increments.
+    """
+    from datetime import date
+    year = date.today().year
+    rows = execute_query("""
+        SELECT project_code
+        FROM il_projects
+        WHERE project_code LIKE :pattern
+        ORDER BY project_code DESC
+        LIMIT 1
+    """, {'pattern': f'IL-{year}-%'})
+
+    if rows:
+        try:
+            last_seq = int(rows[0]['project_code'].split('-')[-1])
+        except (ValueError, IndexError):
+            last_seq = 0
+    else:
+        last_seq = 0
+
+    return f"IL-{year}-{last_seq + 1:03d}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
