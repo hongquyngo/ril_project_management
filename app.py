@@ -1,6 +1,6 @@
 # app.py
 """
-Rizitek Intralogistic Management App - Main Entry Point
+Rozitek Intralogistic Management App - Main Entry Point
 
 Version: 2.0.0
 """
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== PAGE CONFIGURATION ====================
 
-APP_NAME = "Rizitek Intralogistic Management"
+APP_NAME = "Rozitek Intralogistic Management"
 APP_ICON = "🏭"
 APP_VERSION = "2.0.0"
 
@@ -194,7 +194,7 @@ def show_main_app():
     <div class="welcome-box">
         <div class="welcome-title">Welcome, {auth.get_user_display_name()}! 👋</div>
         <div class="welcome-subtitle">
-            Rizitek Intralogistic Management — warehouse operations, logistics workflows, and inventory control.
+            Rozitek Intralogistic Management — warehouse operations, logistics workflows, and inventory control.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -223,7 +223,7 @@ def show_main_app():
     # ── Footer ────────────────────────────────────────────────
     st.markdown(f"""
     <div class="footer">
-        <strong>{APP_NAME}</strong> v{APP_VERSION} | Part of iSCM System | © 2025 ProsTech
+        <strong>{APP_NAME}</strong> v{APP_VERSION} | © 2025 Rozitek Intralogistic Solution Co., Ltd
     </div>
     """, unsafe_allow_html=True)
 
