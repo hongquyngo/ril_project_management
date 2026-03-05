@@ -70,7 +70,7 @@ from .db import (
 
 # S3 - Optional import (may not exist in all deployments)
 try:
-    from .s3_utils import (
+    from .s3_utils import (  # type: ignore[import]
         S3Manager,
         get_s3_manager,
         reset_s3_manager,

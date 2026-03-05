@@ -142,6 +142,34 @@ class ILProjectS3Manager:
             logger.error(f"list_project_files error: {e}")
             return []
 
+    def upload_expense_attachment(self, content: bytes, filename: str, project_id: int, expense_id: int) -> Tuple[bool, str]:
+        """
+        Upload expense attachment (invoice, receipt, etc.).
+        Key: il-project-file/<project_id>/expenses/<expense_id>/<timestamp_ms>_<filename>
+        """
+        ts = int(datetime.now().timestamp() * 1000)
+        safe = filename.replace(" ", "_")
+        s3_key = f"{S3_FOLDER}{project_id}/expenses/{expense_id}/{ts}_{safe}"
+        return self.upload_file(content, s3_key, self._content_type(filename))
+
+    def upload_labor_attachment(self, content: bytes, filename: str, project_id: int, log_id: int) -> Tuple[bool, str]:
+        """
+        Upload labor log attachment (timesheet, confirmation email, etc.).
+        Key: il-project-file/<project_id>/labor/<log_id>/<timestamp_ms>_<filename>
+        """
+        ts = int(datetime.now().timestamp() * 1000)
+        safe = filename.replace(" ", "_")
+        s3_key = f"{S3_FOLDER}{project_id}/labor/{log_id}/{ts}_{safe}"
+        return self.upload_file(content, s3_key, self._content_type(filename))
+
+    def delete_expense_attachment(self, s3_key: str) -> bool:
+        """Delete an expense attachment. Key must be inside il-project-file/."""
+        return self.delete_file(s3_key)
+
+    def delete_labor_attachment(self, s3_key: str) -> bool:
+        """Delete a labor log attachment. Key must be inside il-project-file/."""
+        return self.delete_file(s3_key)
+
     @staticmethod
     def _content_type(filename: str) -> str:
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""

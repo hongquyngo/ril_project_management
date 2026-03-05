@@ -31,8 +31,11 @@ from .queries import (
     # Expenses
     get_expenses_df,
     create_expense,
+    update_expense,
     approve_expense,
     soft_delete_expense,
+    update_expense_attachment,
+    update_labor_attachment,
     # Pre-sales
     get_presales_costs_df,
     create_presales_cost,
@@ -72,7 +75,8 @@ __all__ = [
     'get_projects_df', 'get_project', 'create_project', 'update_project', 'soft_delete_project',
     'get_estimates', 'get_active_estimate', 'create_estimate', 'update_estimate', 'activate_estimate',
     'get_labor_logs_df', 'create_labor_log', 'update_labor_log', 'approve_labor_log', 'soft_delete_labor_log',
-    'get_expenses_df', 'create_expense', 'approve_expense', 'soft_delete_expense',
+    'get_expenses_df', 'create_expense', 'update_expense', 'approve_expense', 'soft_delete_expense',
+    'update_expense_attachment', 'update_labor_attachment',
     'get_presales_costs_df', 'create_presales_cost', 'bulk_update_presales_allocation',
     'get_cogs_actual', 'sync_cogs_actual', 'update_cogs_actual_fields', 'finalize_cogs_actual',
     'get_milestones_df', 'create_milestone', 'update_milestone',
