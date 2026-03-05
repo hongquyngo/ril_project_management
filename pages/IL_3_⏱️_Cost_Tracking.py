@@ -22,6 +22,7 @@ from utils.il_project import (
 from utils.il_project.helpers import (
     EXPENSE_CATEGORIES, PRESALES_CATEGORIES_L1, PRESALES_CATEGORIES_L2,
     EMPLOYEE_LEVELS, DEFAULT_RATES_BY_LEVEL,
+    get_vendor_companies,
 )
 from utils.il_project.s3_il import ILProjectS3Manager
 from utils.il_project.currency import get_rate_to_vnd, rate_status, fmt_rate
@@ -39,9 +40,9 @@ is_pm      = st.session_state.get('user_role') in ('admin', 'manager')
 # ── Lookups (cached) ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load():
-    return get_projects_df(), get_employees(), get_currencies()
+    return get_projects_df(), get_employees(), get_currencies(), get_vendor_companies()
 
-proj_df, employees, currencies = _load()
+proj_df, employees, currencies, vendors = _load()
 emp_map = {e['id']: e['full_name'] for e in employees}
 cur_map = {c['id']: c['code'] for c in currencies}
 
@@ -54,6 +55,45 @@ def _get_s3():
     except Exception as e:
         logger.warning(f"S3 not available: {e}")
         return None
+
+
+# ── Vendor selector helper ─────────────────────────────────────────────────────
+
+def _vendor_selector(col, current_name: str = "", key_suffix: str = "") -> str:
+    """
+    Dropdown vendor từ companies table (type=Vendor).
+    Option '— Enter manually —' cho vendor/cá nhân không có trong hệ thống.
+    Returns vendor name string.
+    """
+    vendor_names = [v['name'] for v in vendors]
+    options = ["(None)"] + vendor_names + ["— Enter manually —"]
+
+    if current_name in vendor_names:
+        default_idx = options.index(current_name)
+    elif current_name:
+        default_idx = options.index("— Enter manually —")
+    else:
+        default_idx = 0
+
+    sel = col.selectbox(
+        "Vendor",
+        options,
+        index=default_idx,
+        key=f"vendor_sel_{key_suffix}",
+        help="Chọn từ danh sách Vendor trong hệ thống, hoặc nhập thủ công",
+    )
+
+    if sel == "— Enter manually —":
+        return st.text_input(
+            "Vendor Name (manual)",
+            value=current_name if current_name not in vendor_names else "",
+            key=f"vendor_manual_{key_suffix}",
+            placeholder="Tên vendor / cá nhân tự do",
+        )
+    elif sel == "(None)":
+        return ""
+    else:
+        return sel
 
 
 # ── Page header ───────────────────────────────────────────────────────────────
@@ -229,10 +269,11 @@ def _dialog_edit_labor(log: dict, project_id: int):
 @st.dialog("🧾 Add Expense", width="large")
 def _dialog_add_expense(project_id: int):
     # ── Currency selector OUTSIDE form → reruns dialog on change ─────────────
-    cur_opts   = [c['code'] for c in currencies]
+    cur_opts    = [c['code'] for c in currencies]
     _r1, _r2, _r3 = st.columns([2, 2, 2])
-    exp_cur    = _r1.selectbox("Currency", cur_opts, key="dlg_add_exp_cur")
-    exp_cur_id = currencies[cur_opts.index(exp_cur)]['id']
+    _vnd_idx    = cur_opts.index('VND') if 'VND' in cur_opts else 0
+    exp_cur     = _r1.selectbox("Currency", cur_opts, index=_vnd_idx, key="dlg_add_exp_cur")
+    exp_cur_id  = currencies[cur_opts.index(exp_cur)]['id']
 
     # Auto-fetch exchange rate to VND
     _rate_result = get_rate_to_vnd(exp_cur)
@@ -273,7 +314,7 @@ def _dialog_add_expense(project_id: int):
             st.caption(f"💱 Converted: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
-        exp_vendor  = ec1.text_input("Vendor Name")
+        exp_vendor  = _vendor_selector(ec1, key_suffix="add")
         exp_receipt = ec2.text_input("Receipt Number")
         exp_desc    = st.text_input("Description")
 
@@ -380,7 +421,7 @@ def _dialog_edit_expense(exp: dict, project_id: int):
             st.caption(f"💱 Converted: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
-        exp_vendor  = ec1.text_input("Vendor Name",    value=exp.get('vendor_name') or '')
+        exp_vendor  = _vendor_selector(ec1, current_name=exp.get('vendor_name') or '', key_suffix="edit")
         exp_receipt = ec2.text_input("Receipt Number", value=exp.get('receipt_number') or '')
         exp_desc    = st.text_input("Description",     value=exp.get('description') or '')
 

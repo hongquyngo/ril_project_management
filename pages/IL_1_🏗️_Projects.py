@@ -432,9 +432,12 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
     sel = event.selection.rows
     if sel:
         pid = int(df.iloc[sel[0]]['project_id'])
-        # Set flag and full rerun so dialog opens at page level
-        st.session_state["open_view_pid"] = pid
-        st.rerun()
+        # Guard: only trigger if this pid hasn't just been opened.
+        # Without this, the fragment reruns after full page rerun while
+        # the dataframe still holds the same selection → infinite loop.
+        if st.session_state.get("_last_dialog_pid") != pid:
+            st.session_state["open_view_pid"] = pid
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -475,12 +478,15 @@ _project_table(status_filter, type_filter_id, pm_filter_id, f_search)
 
 # ── Dialog triggers — processed after fragment renders ────────────────────────
 if st.session_state.pop("open_create", False):
+    st.session_state.pop("_last_dialog_pid", None)
     _dialog_create_project()
 
 if "open_view_pid" in st.session_state:
     pid = st.session_state.pop("open_view_pid")
+    st.session_state["_last_dialog_pid"] = pid   # remember → prevents re-trigger
     _dialog_view_project(pid)
 
 if "open_edit_pid" in st.session_state:
     pid = st.session_state.pop("open_edit_pid")
+    st.session_state["_last_dialog_pid"] = pid
     _dialog_edit_project(pid)
