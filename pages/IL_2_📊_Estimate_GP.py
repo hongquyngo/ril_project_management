@@ -132,7 +132,7 @@ with tab_new:
             f_manual = fc2.number_input("F Override (0 = use formula)", value=0.0, min_value=0.0, format="%.0f")
 
             assessment_notes = st.text_area("Assessment Notes", height=80)
-            submitted = st.form_submit_button("💾 Save & Activate", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("💾 Save & Activate", type="primary", width="stretch")
 
     # ── Live preview (updates as user types) ──────────────────────────────────
     with col_result:
@@ -164,7 +164,7 @@ with tab_new:
         cogs_df = pd.DataFrame(cogs_rows)
         st.dataframe(
             cogs_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 'Item':        st.column_config.TextColumn('Item'),
@@ -261,7 +261,7 @@ with tab_active:
     total_row  = pd.DataFrame([{'Item': '**TOTAL COGS**', 'Estimate (VND)': active_est['total_cogs']}])
     summary_df = pd.concat([summary_df, total_row], ignore_index=True)
 
-    st.dataframe(summary_df, use_container_width=True, hide_index=True,
+    st.dataframe(summary_df, width="stretch", hide_index=True,
                  column_config={'Estimate (VND)': st.column_config.NumberColumn(format="%.0f")})
 
     mc1, mc2, mc3 = st.columns(3)
@@ -295,7 +295,7 @@ with tab_history:
 
     st.dataframe(
         hist_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             'Total COGS': st.column_config.NumberColumn(format="%.0f"),

@@ -214,8 +214,8 @@ def _dialog_create_project():
     with st.form("create_project_form"):
         data = _project_form_fields({}, is_create=True)
         col_save, col_cancel = st.columns(2)
-        submitted = col_save.form_submit_button("💾 Create", type="primary", use_container_width=True)
-        cancelled = col_cancel.form_submit_button("✖ Cancel", use_container_width=True)
+        submitted = col_save.form_submit_button("💾 Create", type="primary", width="stretch")
+        cancelled = col_cancel.form_submit_button("✖ Cancel", width="stretch")
 
     if cancelled:
         st.rerun()
@@ -239,8 +239,8 @@ def _dialog_edit_project(project_id: int):
     with st.form("edit_project_form"):
         data = _project_form_fields(proj, is_create=False)
         col_save, col_cancel = st.columns(2)
-        submitted = col_save.form_submit_button("💾 Save", type="primary", use_container_width=True)
-        cancelled = col_cancel.form_submit_button("✖ Cancel", use_container_width=True)
+        submitted = col_save.form_submit_button("💾 Save", type="primary", width="stretch")
+        cancelled = col_cancel.form_submit_button("✖ Cancel", width="stretch")
 
     if cancelled:
         st.session_state["open_view_pid"] = project_id
@@ -270,11 +270,11 @@ def _dialog_view_project(project_id: int):
     hcol1, hcol2, hcol3 = st.columns([4, 1, 1])
     hcol1.subheader(f"{STATUS_COLORS.get(proj['status'], '⚪')} {proj['project_code']} — {proj['project_name']}")
 
-    if hcol2.button("✏️ Edit", use_container_width=True, type="primary"):
+    if hcol2.button("✏️ Edit", width="stretch", type="primary"):
         st.session_state["open_edit_pid"] = project_id
         st.rerun()
 
-    if is_admin and hcol3.button("🗑 Delete", use_container_width=True):
+    if is_admin and hcol3.button("🗑 Delete", width="stretch"):
         if soft_delete_project(project_id, user_id):
             st.success("Project deleted.")
             st.cache_data.clear()
@@ -313,7 +313,7 @@ def _milestone_panel(project_id: int, proj: dict):
     ms_df = get_milestones_df(project_id)
     if not ms_df.empty:
         st.dataframe(
-            ms_df, use_container_width=True, hide_index=True,
+            ms_df, width="stretch", hide_index=True,
             column_config={
                 'sequence_no':     st.column_config.NumberColumn('#', width=40),
                 'milestone_name':  st.column_config.TextColumn('Milestone'),
@@ -408,7 +408,7 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
 
     event = st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -432,10 +432,11 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
     sel = event.selection.rows
     if sel:
         pid = int(df.iloc[sel[0]]['project_id'])
-        # Guard: only trigger if this pid hasn't just been opened.
-        # Without this, the fragment reruns after full page rerun while
-        # the dataframe still holds the same selection → infinite loop.
+        # FIX: _last_dialog_pid PHẢI set tại đây (trong fragment), TRƯỚC st.rerun().
+        # Fragment chạy TRƯỚC page-level code nên nếu set ở page level thì fragment
+        # luôn thấy giá trị cũ → guard vô tác dụng → infinite loop.
         if st.session_state.get("_last_dialog_pid") != pid:
+            st.session_state["_last_dialog_pid"] = pid  # ← set trước khi rerun
             st.session_state["open_view_pid"] = pid
             st.rerun()
 
@@ -458,7 +459,7 @@ with st.sidebar:
     f_pm     = st.selectbox("PM", ["All"] + [e['full_name'] for e in employees])
 
     st.divider()
-    if st.button("➕ New Project", use_container_width=True, type="primary"):
+    if st.button("➕ New Project", width="stretch", type="primary"):
         st.session_state["open_create"] = True
 
 # ── Resolve filters ───────────────────────────────────────────────────────────
@@ -477,16 +478,28 @@ if f_pm != "All":
 _project_table(status_filter, type_filter_id, pm_filter_id, f_search)
 
 # ── Dialog triggers — processed after fragment renders ────────────────────────
+# State flow:
+#   fragment sets _last_dialog_pid + open_view_pid → st.rerun()
+#   next run: fragment sees _last_dialog_pid==pid → skips → dialog opens here
+#   dialog closes → _dialog_was_open=True carried to next run → guard cleared
+#   → user can click same row again normally
+
+_dialog_was_open = st.session_state.pop("_dialog_was_open", False)
+
 if st.session_state.pop("open_create", False):
     st.session_state.pop("_last_dialog_pid", None)
     _dialog_create_project()
 
-if "open_view_pid" in st.session_state:
+elif "open_view_pid" in st.session_state:
     pid = st.session_state.pop("open_view_pid")
-    st.session_state["_last_dialog_pid"] = pid   # remember → prevents re-trigger
     _dialog_view_project(pid)
+    st.session_state["_dialog_was_open"] = True
 
-if "open_edit_pid" in st.session_state:
+elif "open_edit_pid" in st.session_state:
     pid = st.session_state.pop("open_edit_pid")
-    st.session_state["_last_dialog_pid"] = pid
     _dialog_edit_project(pid)
+    st.session_state["_dialog_was_open"] = True
+
+elif _dialog_was_open:
+    # Dialog đã đóng ở run trước → xóa guard để row đó có thể click lại được
+    st.session_state.pop("_last_dialog_pid", None)

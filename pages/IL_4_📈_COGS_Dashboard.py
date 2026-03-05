@@ -89,7 +89,7 @@ def _dialog_cogs_manual(project_id: int, actual: dict):
                                    value=float(actual.get('f_warranty_released') or 0), format="%.0f")
         f_n    = st.text_input("Notes F", value=actual.get('f_notes') or '')
 
-        submitted = st.form_submit_button("💾 Save", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save", type="primary", width="stretch")
 
     if submitted:
         ok = update_cogs_actual_fields(project_id, {
@@ -134,7 +134,7 @@ def _dialog_variance(project_id: int):
             c_act_v = vc2.number_input("Coefficient Actual",      value=0.0, format="%.4f")
             c_rec   = vc3.number_input("Coefficient Recommended", value=0.0, format="%.4f")
 
-        submitted = st.form_submit_button("💾 Save", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save", type="primary", width="stretch")
 
     if submitted:
         ok = upsert_variance_row(
@@ -198,7 +198,7 @@ def _dialog_benchmark(project_id: int):
         risks   = st.text_area("Key Risk Factors", height=60)
         recs    = st.text_area("Recommendations",  height=60)
 
-        submitted = st.form_submit_button("💾 Save Benchmark", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save Benchmark", type="primary", width="stretch")
 
     if submitted:
         try:
@@ -236,7 +236,7 @@ def _actual_cogs_tab(project_id: int):
     # ── Sync / Finalize toolbar ───────────────────────────────────────────────
     ac1, ac2, ac3, ac4 = st.columns([2, 2, 2, 1])
 
-    if ac2.button("🔄 Sync from Timesheets & Expenses", type="primary", use_container_width=True):
+    if ac2.button("🔄 Sync from Timesheets & Expenses", type="primary", width="stretch"):
         with st.spinner("Syncing..."):
             try:
                 sync_cogs_actual(project_id, user_id)
@@ -246,7 +246,7 @@ def _actual_cogs_tab(project_id: int):
                 st.error(f"Sync failed: {e}")
 
     if is_pm:
-        if ac3.button("✏️ Manual Entry (A/B/C/F)", use_container_width=True):
+        if ac3.button("✏️ Manual Entry (A/B/C/F)", width="stretch"):
             _dialog_cogs_manual(project_id, actual or {})
         if actual and not actual.get('is_finalized'):
             if ac4.button("🔒 Finalize"):
@@ -314,7 +314,7 @@ def _actual_cogs_tab(project_id: int):
     })
 
     st.dataframe(
-        pd.DataFrame(rows), use_container_width=True, hide_index=True,
+        pd.DataFrame(rows), width="stretch", hide_index=True,
         column_config={
             'Item':      st.column_config.TextColumn('Item'),
             'Estimated': st.column_config.NumberColumn('Estimated (VND)', format="%.0f"),
@@ -345,7 +345,7 @@ def _actual_cogs_tab(project_id: int):
 @st.fragment
 def _variance_tab(project_id: int):
     vh1, vh2 = st.columns([5, 1])
-    if vh2.button("➕ Add", type="primary", use_container_width=True):
+    if vh2.button("➕ Add", type="primary", width="stretch"):
         _dialog_variance(project_id)
 
     var_df = get_variance_df(project_id)
@@ -354,7 +354,7 @@ def _variance_tab(project_id: int):
         display_df = var_df.copy()
         display_df.insert(0, '●', display_df['variance_percent'].map(impact_color))
         st.dataframe(
-            display_df, use_container_width=True, hide_index=True,
+            display_df, width="stretch", hide_index=True,
             column_config={
                 '●':                       st.column_config.TextColumn('', width=30),
                 'cogs_category':           st.column_config.TextColumn('Category'),
@@ -388,14 +388,14 @@ def _benchmark_tab(project_id: int):
         hit  = next((t for t in proj_types if t['code'] == code), None)
         type_filter = hit['id'] if hit else None
 
-    if bh3.button("➕ Add", type="primary", use_container_width=True):
+    if bh3.button("➕ Add", type="primary", width="stretch"):
         _dialog_benchmark(project_id)
 
     bench_df = get_benchmarks_df(type_filter)
 
     if not bench_df.empty:
         st.dataframe(
-            bench_df, use_container_width=True, hide_index=True,
+            bench_df, width="stretch", hide_index=True,
             column_config={
                 'project_type':         st.column_config.TextColumn('Type'),
                 'source_project':       st.column_config.TextColumn('Source Project'),

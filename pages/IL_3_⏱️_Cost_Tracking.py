@@ -163,7 +163,7 @@ def _dialog_add_labor(project_id: int):
             help="Timesheet, confirmation email, or related document",
         )
 
-        submitted = st.form_submit_button("✅ Save entry", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✅ Save entry", type="primary", width="stretch")
 
     if submitted:
         if is_subcon and not subcon_name:
@@ -234,8 +234,8 @@ def _dialog_edit_labor(log: dict, project_id: int):
         description_v = st.text_input("Description", value=log.get('description') or '')
 
         col_save, col_del = st.columns(2)
-        save   = col_save.form_submit_button("💾 Update",  type="primary", use_container_width=True)
-        delete = col_del.form_submit_button("🗑 Delete", use_container_width=True)
+        save   = col_save.form_submit_button("💾 Update",  type="primary", width="stretch")
+        delete = col_del.form_submit_button("🗑 Delete", width="stretch")
 
     if save:
         ok = update_labor_log(log_id, {
@@ -325,7 +325,7 @@ def _dialog_add_expense(project_id: int):
             help="Recommended: attach supporting documents for expense settlement",
         )
 
-        submitted = st.form_submit_button("✅ Save expense", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✅ Save expense", type="primary", width="stretch")
 
     if submitted:
         if exp_amount <= 0:
@@ -435,8 +435,8 @@ def _dialog_edit_expense(exp: dict, project_id: int):
         )
 
         col_save, col_del = st.columns(2)
-        save   = col_save.form_submit_button("💾 Update",  type="primary", use_container_width=True)
-        delete = col_del.form_submit_button("🗑 Delete", use_container_width=True)
+        save   = col_save.form_submit_button("💾 Update",  type="primary", width="stretch")
+        delete = col_del.form_submit_button("🗑 Delete", width="stretch")
 
     if save:
         ok = update_expense(exp_id, {
@@ -488,7 +488,7 @@ def _dialog_view_attachment(s3_key: str, filename: str):
     st.markdown(f"**File:** `{filename}`")
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     if ext in ('jpg', 'jpeg', 'png'):
-        st.image(url, use_container_width=True)
+        st.image(url, width="stretch")
     elif ext == 'pdf':
         st.markdown(f"[📄 Open PDF in new tab]({url})")
         st.components.v1.iframe(url, height=600, scrolling=True)
@@ -557,7 +557,7 @@ def _dialog_add_presales(project_id: int):
         ps_alloc      = st.selectbox("Allocation", alloc_opts, index=alloc_opts.index(default_alloc))
         ps_desc       = st.text_input("Description")
 
-        submitted = st.form_submit_button("✅ Save", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✅ Save", type="primary", width="stretch")
 
     if submitted:
         if ps_amount <= 0:
@@ -595,7 +595,7 @@ def _labor_tab(project_id: int):
     fc1, fc2, fc3 = st.columns([2, 2, 1])
     lf_phase  = fc1.selectbox("Filter Phase",    ["All"] + list(PHASE_LABELS.keys()), key="lf_phase")
     lf_status = fc2.selectbox("Filter Approval", ["All", "PENDING", "APPROVED", "REJECTED"], key="lf_status")
-    if fc3.button("➕ Log Labor", type="primary", use_container_width=True):
+    if fc3.button("➕ Log Labor", type="primary", width="stretch"):
         _dialog_add_labor(project_id)
 
     labor_df = get_labor_logs_df(
@@ -635,7 +635,7 @@ def _labor_tab(project_id: int):
         col_config['📎'] = st.column_config.TextColumn('', width=30)
 
     event = st.dataframe(
-        display_df, use_container_width=True, hide_index=True,
+        display_df, width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row",
         column_config=col_config,
     )
@@ -670,7 +670,7 @@ def _expense_tab(project_id: int):
     ef1, ef2, ef3 = st.columns([2, 2, 1])
     ef_phase  = ef1.selectbox("Filter Phase",    ["All"] + list(PHASE_LABELS.keys()), key="ef_phase")
     ef_status = ef2.selectbox("Filter Approval", ["All", "PENDING", "APPROVED", "REJECTED"], key="ef_status")
-    if ef3.button("➕ Add Expense", type="primary", use_container_width=True):
+    if ef3.button("➕ Add Expense", type="primary", width="stretch"):
         _dialog_add_expense(project_id)
 
     exp_df = get_expenses_df(
@@ -710,7 +710,7 @@ def _expense_tab(project_id: int):
         col_config['📎'] = st.column_config.TextColumn('', width=30)
 
     event = st.dataframe(
-        display_df, use_container_width=True, hide_index=True,
+        display_df, width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row",
         column_config=col_config,
     )
@@ -743,7 +743,7 @@ def _expense_tab(project_id: int):
 @st.fragment
 def _presales_tab(project_id: int):
     ps_h1, ps_h2 = st.columns([5, 1])
-    if ps_h2.button("➕ Add", type="primary", use_container_width=True):
+    if ps_h2.button("➕ Add", type="primary", width="stretch"):
         _dialog_add_presales(project_id)
 
     ps_df = get_presales_costs_df(project_id)
@@ -762,7 +762,7 @@ def _presales_tab(project_id: int):
             lambda a: {'SGA': '🔵', 'COGS': '🟢', 'PENDING': '⚪'}.get(a, '⚪')
         ))
         st.dataframe(
-            display_df, use_container_width=True, hide_index=True,
+            display_df, width="stretch", hide_index=True,
             column_config={
                 '●':           st.column_config.TextColumn('', width=30),
                 'cost_layer':  st.column_config.TextColumn('Layer'),
