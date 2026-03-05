@@ -15,6 +15,7 @@ from utils.il_project import (
     get_project_types, get_employees, get_companies, get_currencies, get_milestones_df,
     create_milestone, update_milestone, generate_project_code,
     fmt_vnd, fmt_percent, STATUS_COLORS,
+    get_rate_to_vnd, rate_status, fmt_rate,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,16 +112,46 @@ def _project_form_fields(proj: dict, is_create: bool):
 
     # ── Financial tab ─────────────────────────────────────────────────────────
     with tab_financial:
-        fm1, fm2, fm3, fm4 = st.columns(4)
-        contract_val = fm1.number_input("Contract Value", value=float(proj.get('contract_value') or 0),
+        fm1, fm2 = st.columns(2)
+        contract_val = fm1.number_input("Contract Value",
+                                         value=float(proj.get('contract_value') or 0),
                                          min_value=0.0, format="%.0f")
-        amended_val  = fm2.number_input("Amended Value (0=none)", value=float(proj.get('amended_contract_value') or 0),
+        amended_val  = fm2.number_input("Amended Value (0=none)",
+                                         value=float(proj.get('amended_contract_value') or 0),
                                          min_value=0.0, format="%.0f")
-        cur_opts     = [c['code'] for c in currencies]
-        cur_idx      = next((i for i, c in enumerate(currencies) if c['id'] == proj.get('currency_id')), 0)
-        cur_sel      = fm3.selectbox("Currency", cur_opts, index=cur_idx)
-        currency_id  = currencies[cur_opts.index(cur_sel)]['id']
-        exc_rate     = fm4.number_input("Exchange Rate", value=float(proj.get('exchange_rate') or 1.0), format="%.4f")
+
+        cur_opts    = [c['code'] for c in currencies]
+        cur_idx     = next((i for i, c in enumerate(currencies) if c['id'] == proj.get('currency_id')), 0)
+        cur_sel     = st.selectbox("Contract Currency", cur_opts, index=cur_idx,
+                                    help="Đồng tiền trong hợp đồng với khách hàng.")
+        currency_id = currencies[cur_opts.index(cur_sel)]['id']
+
+        # Auto-fetch rate (runs at form render time; inside form so no per-keystroke rerun)
+        _rate_res   = get_rate_to_vnd(cur_sel)
+        _icon, _msg = rate_status(_rate_res)
+        saved_rate  = float(proj.get('exchange_rate') or 0)
+
+        if cur_sel == 'VND':
+            st.info("ℹ️ VND — tỷ giá = 1")
+        elif _rate_res.ok:
+            # Show info banner if saved rate differs from live rate by >1%
+            if saved_rate > 0 and abs(_rate_res.rate - saved_rate) / saved_rate > 0.01:
+                st.info(
+                    f"💡 Tỷ giá thị trường hiện tại: **{fmt_rate(_rate_res.rate)}** VND "
+                    f"(đang lưu: {fmt_rate(saved_rate)})"
+                )
+            else:
+                st.success(f"{_icon} {_msg}")
+        else:
+            st.warning(f"{_icon} {_msg}")
+
+        default_rate = saved_rate if saved_rate > 0 else _rate_res.rate
+        exc_rate = st.number_input(
+            f"Exchange Rate (1 {cur_sel} = ? VND)",
+            value=default_rate if default_rate > 0 else 1.0,
+            min_value=0.0, format="%.4f",
+            help="Tỷ giá quy đổi sang VND tại thời điểm ký HĐ. Auto-fetch từ API khi khả dụng.",
+        )
 
     # ── Timeline tab ──────────────────────────────────────────────────────────
     with tab_timeline:

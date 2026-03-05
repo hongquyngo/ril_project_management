@@ -70,6 +70,17 @@ from .helpers import (
 
 from .s3_il import ILProjectS3Manager
 
+from .currency import (
+    get_rate,
+    get_rate_to_vnd,
+    convert_to_vnd,
+    fmt_rate,
+    rate_status,
+    get_currency_list,
+    RateResult,
+    clear_rate_cache,
+)
+
 __all__ = [
     'get_project_types', 'get_employees', 'get_companies', 'get_currencies', 'generate_project_code',
     'get_projects_df', 'get_project', 'create_project', 'update_project', 'soft_delete_project',
@@ -85,4 +96,8 @@ __all__ = [
     'calculate_estimate', 'get_go_no_go', 'fmt_vnd', 'fmt_percent', 'pct_change',
     'COGS_LABELS', 'PHASE_LABELS', 'STATUS_COLORS',
     'ILProjectS3Manager',
+    # Currency
+    'get_rate', 'get_rate_to_vnd', 'convert_to_vnd',
+    'fmt_rate', 'rate_status', 'get_currency_list',
+    'RateResult', 'clear_rate_cache',
 ]

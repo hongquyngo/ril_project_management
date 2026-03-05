@@ -1,0 +1,426 @@
+# utils/il_project/currency.py
+"""
+Currency utilities for IL Project Management.
+Hoàn toàn độc lập — không import từ vendor_invoice hay module khác.
+
+Priority chain khi lấy tỷ giá:
+  1. In-memory cache  (TTL 1 giờ)
+  2. exchangeratesapi.io  (hoặc bất kỳ provider nào qua EXCHANGE_RATE_API_KEY)
+  3. Bảng exchange_rates trong DB  (fallback)
+  4. Hardcoded fallback            (last resort, cảnh báo rõ)
+
+Target mặc định: VND — mọi COGS trong IL project đều quy đổi sang VND.
+
+Public API:
+    get_rate(from_ccy, to_ccy)        → RateResult
+    get_rate_to_vnd(ccy)              → RateResult
+    convert_to_vnd(amount, ccy)       → Optional[float]
+    fmt_rate(rate)                    → str           (e.g. "25,300.00")
+    rate_status(result)               → tuple[str, str]  (icon, message)
+    get_currency_list()               → list[dict]     (id, code, name)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Optional
+
+import requests
+from sqlalchemy import text
+
+from ..db import get_db_engine
+
+logger = logging.getLogger(__name__)
+
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+TARGET_CURRENCY = "VND"
+
+CACHE_TTL_SECONDS = 3600  # 1 giờ
+
+# Fallback rates (cập nhật định kỳ) — chỉ dùng khi cả API lẫn DB đều thất bại
+_FALLBACK_RATES_TO_VND: dict[str, float] = {
+    "USD": 25_300.0,
+    "EUR": 27_500.0,
+    "SGD": 19_000.0,
+    "CNY":  3_500.0,
+    "JPY":    175.0,
+    "KRW":     19.0,
+    "GBP": 32_000.0,
+    "AUD": 16_500.0,
+    "THB":    700.0,
+    "MYR":  5_600.0,
+}
+
+# API provider
+_API_URL = "http://api.exchangeratesapi.io/v1/convert"
+
+
+# ── RateResult ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class RateResult:
+    """
+    Kết quả lấy tỷ giá.
+
+    Attributes:
+        from_currency:  Đồng tiền nguồn
+        to_currency:    Đồng tiền đích
+        rate:           Tỷ giá (1 from = rate × to)
+        source:         Nguồn lấy: 'same', 'cache', 'api', 'db', 'fallback'
+        fetched_at:     Thời điểm lấy
+        ok:             True nếu rate đáng tin cậy (api/db/same)
+        warning:        Message cảnh báo nếu dùng fallback
+    """
+    from_currency: str
+    to_currency:   str
+    rate:          float
+    source:        str                   # 'same' | 'cache' | 'api' | 'db' | 'fallback'
+    fetched_at:    datetime = field(default_factory=datetime.now)
+    ok:            bool = True
+    warning:       Optional[str] = None
+
+    @property
+    def is_live(self) -> bool:
+        """True nếu rate lấy từ API hoặc DB (không phải fallback)."""
+        return self.source in ("same", "cache", "api", "db")
+
+    def __str__(self) -> str:
+        return f"1 {self.from_currency} = {fmt_rate(self.rate)} {self.to_currency} [{self.source}]"
+
+
+# ── In-memory cache ────────────────────────────────────────────────────────────
+
+@dataclass
+class _CacheEntry:
+    result: RateResult
+    expires_at: datetime
+
+
+_cache: dict[str, _CacheEntry] = {}
+
+
+def _cache_get(key: str) -> Optional[RateResult]:
+    entry = _cache.get(key)
+    if entry and entry.expires_at > datetime.now():
+        return entry.result
+    _cache.pop(key, None)
+    return None
+
+
+def _cache_set(key: str, result: RateResult, ttl_seconds: int = CACHE_TTL_SECONDS) -> None:
+    _cache[key] = _CacheEntry(result=result, expires_at=datetime.now() + timedelta(seconds=ttl_seconds))
+
+
+def clear_cache() -> None:
+    """Xóa toàn bộ cache tỷ giá. Dùng khi cần force-refresh."""
+    _cache.clear()
+    logger.info("Exchange rate cache cleared.")
+
+
+# ── Core rate-fetch logic ─────────────────────────────────────────────────────
+
+def get_rate(from_currency: str, to_currency: str) -> RateResult:
+    """
+    Lấy tỷ giá từ from_currency → to_currency.
+    Áp dụng chain: cache → API → DB → fallback.
+
+    Ví dụ:
+        result = get_rate("USD", "VND")
+        print(result.rate)      # 25300.0
+        print(result.source)    # 'api'
+        print(result.ok)        # True
+    """
+    from_currency = from_currency.upper().strip()
+    to_currency   = to_currency.upper().strip()
+
+    # Cùng đơn vị
+    if from_currency == to_currency:
+        return RateResult(from_currency, to_currency, 1.0, "same")
+
+    cache_key = f"{from_currency}-{to_currency}"
+
+    # 1. Cache
+    cached = _cache_get(cache_key)
+    if cached:
+        logger.debug(f"Cache hit: {cache_key}")
+        return cached
+
+    # 2. API
+    result = _fetch_from_api(from_currency, to_currency)
+    if result:
+        _cache_set(cache_key, result)
+        _persist_to_db(result)
+        return result
+
+    # 3. DB
+    result = _fetch_from_db(from_currency, to_currency)
+    if result:
+        _cache_set(cache_key, result)
+        return result
+
+    # 4. Fallback
+    return _make_fallback(from_currency, to_currency)
+
+
+def get_rate_to_vnd(currency: str) -> RateResult:
+    """
+    Convenience: lấy tỷ giá currency → VND.
+    Đây là hàm chính dùng trong IL project.
+
+    Ví dụ:
+        r = get_rate_to_vnd("USD")
+        # r.rate = 25300.0
+        # r.source = 'api'
+    """
+    return get_rate(currency, TARGET_CURRENCY)
+
+
+def convert_to_vnd(amount: float, currency: str) -> Optional[float]:
+    """
+    Quy đổi amount sang VND.
+    Trả về None nếu tỷ giá không khả dụng (chỉ khi cả 4 nguồn đều fail).
+
+    Ví dụ:
+        vnd = convert_to_vnd(1000, "USD")   # → 25_300_000.0
+    """
+    if currency == TARGET_CURRENCY:
+        return float(amount)
+    result = get_rate_to_vnd(currency)
+    if result.rate <= 0:
+        return None
+    return round(float(amount) * result.rate, 0)
+
+
+# ── API fetch ─────────────────────────────────────────────────────────────────
+
+def _fetch_from_api(from_ccy: str, to_ccy: str) -> Optional[RateResult]:
+    api_key = os.getenv("EXCHANGE_RATE_API_KEY")
+    if not api_key:
+        logger.debug("No EXCHANGE_RATE_API_KEY — skipping API fetch.")
+        return None
+
+    try:
+        resp = requests.get(
+            _API_URL,
+            params={"access_key": api_key, "from": from_ccy, "to": to_ccy, "amount": 1},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("success"):
+            rate = data.get("result")
+            if rate is not None and float(rate) > 0:
+                logger.info(f"API rate {from_ccy}/{to_ccy}: {rate}")
+                return RateResult(from_ccy, to_ccy, float(rate), "api")
+            logger.warning(f"API returned invalid rate: {rate}")
+        else:
+            err_info = data.get("error", {}).get("info", "unknown")
+            logger.warning(f"API error for {from_ccy}/{to_ccy}: {err_info}")
+
+    except requests.Timeout:
+        logger.warning(f"API timeout for {from_ccy}/{to_ccy}")
+    except Exception as e:
+        logger.error(f"API fetch error {from_ccy}/{to_ccy}: {e}")
+
+    return None
+
+
+# ── DB fetch ──────────────────────────────────────────────────────────────────
+
+def _fetch_from_db(from_ccy: str, to_ccy: str) -> Optional[RateResult]:
+    """Lấy tỷ giá từ bảng exchange_rates trong DB."""
+    try:
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            # Direct rate
+            row = conn.execute(text("""
+                SELECT rate_value, rate_date
+                FROM exchange_rates
+                WHERE from_currency_code = :from_ccy
+                  AND to_currency_code   = :to_ccy
+                  AND delete_flag = 0
+                ORDER BY rate_date DESC, created_date DESC
+                LIMIT 1
+            """), {"from_ccy": from_ccy, "to_ccy": to_ccy}).fetchone()
+
+            if row and row[0] and float(row[0]) > 0:
+                logger.info(f"DB rate {from_ccy}/{to_ccy}: {row[0]} (date: {row[1]})")
+                return RateResult(from_ccy, to_ccy, float(row[0]), "db")
+
+            # Inverse rate
+            row_inv = conn.execute(text("""
+                SELECT rate_value, rate_date
+                FROM exchange_rates
+                WHERE from_currency_code = :to_ccy
+                  AND to_currency_code   = :from_ccy
+                  AND delete_flag = 0
+                ORDER BY rate_date DESC, created_date DESC
+                LIMIT 1
+            """), {"from_ccy": from_ccy, "to_ccy": to_ccy}).fetchone()
+
+            if row_inv and row_inv[0] and float(row_inv[0]) > 0:
+                rate = 1.0 / float(row_inv[0])
+                logger.info(f"DB inverse rate {from_ccy}/{to_ccy}: {rate}")
+                return RateResult(from_ccy, to_ccy, rate, "db")
+
+    except Exception as e:
+        logger.error(f"DB fetch error {from_ccy}/{to_ccy}: {e}")
+
+    return None
+
+
+# ── Persist to DB ──────────────────────────────────────────────────────────────
+
+def _persist_to_db(result: RateResult) -> None:
+    """
+    Lưu rate vừa fetch từ API vào exchange_rates để làm cache DB.
+    Dùng INSERT ... ON DUPLICATE KEY UPDATE nếu bảng có unique key (from, to, date).
+    Silent fail nếu không lưu được.
+    """
+    try:
+        engine = get_db_engine()
+        today  = result.fetched_at.date()
+        with engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO exchange_rates
+                    (from_currency_code, to_currency_code, rate_value, rate_date, source, delete_flag)
+                VALUES
+                    (:from_ccy, :to_ccy, :rate, :date, 'API_AUTO', 0)
+                ON DUPLICATE KEY UPDATE
+                    rate_value = :rate,
+                    source     = 'API_AUTO'
+            """), {
+                "from_ccy": result.from_currency,
+                "to_ccy":   result.to_currency,
+                "rate":     result.rate,
+                "date":     today,
+            })
+            conn.commit()
+            logger.debug(f"Persisted rate {result.from_currency}/{result.to_currency} to DB.")
+    except Exception as e:
+        logger.debug(f"Could not persist rate to DB (non-critical): {e}")
+
+
+# ── Fallback ──────────────────────────────────────────────────────────────────
+
+def _make_fallback(from_ccy: str, to_ccy: str) -> RateResult:
+    """
+    Last resort: dùng hardcoded fallback.
+    Chỉ hỗ trợ chuyển đổi qua VND (from → VND hoặc from → to qua VND).
+    """
+    rate: Optional[float] = None
+
+    # Direct fallback (X → VND)
+    if to_ccy == TARGET_CURRENCY:
+        rate = _FALLBACK_RATES_TO_VND.get(from_ccy)
+
+    # Cross via VND (X → VND → Y)
+    elif from_ccy in _FALLBACK_RATES_TO_VND and to_ccy in _FALLBACK_RATES_TO_VND:
+        rate = _FALLBACK_RATES_TO_VND[from_ccy] / _FALLBACK_RATES_TO_VND[to_ccy]
+
+    if rate is not None:
+        warn = (
+            f"Không lấy được tỷ giá {from_ccy}/{to_ccy} từ API/DB. "
+            f"Đang dùng tỷ giá tham chiếu ({rate:,.2f}). Vui lòng kiểm tra lại."
+        )
+        logger.warning(warn)
+        return RateResult(from_ccy, to_ccy, rate, "fallback", ok=False, warning=warn)
+
+    # Total failure
+    warn = f"Không có tỷ giá {from_ccy}/{to_ccy} — trả về 0."
+    logger.error(warn)
+    return RateResult(from_ccy, to_ccy, 0.0, "fallback", ok=False, warning=warn)
+
+
+# ── Formatting ─────────────────────────────────────────────────────────────────
+
+def fmt_rate(rate: Optional[float]) -> str:
+    """
+    Format tỷ giá cho display.
+    Tự động chọn số chữ số thập phân phù hợp.
+
+    Ví dụ:
+        fmt_rate(25300.0)    → "25,300.00"
+        fmt_rate(0.000039)   → "0.000039"
+        fmt_rate(None)       → "N/A"
+    """
+    if rate is None:
+        return "N/A"
+    if rate >= 1_000:
+        return f"{rate:,.2f}"
+    if rate >= 10:
+        return f"{rate:,.4f}"
+    if rate >= 1:
+        return f"{rate:,.6f}"
+    # Tiny rates: tìm số chữ số cần thiết
+    decimals = 2
+    tmp = rate
+    while tmp < 0.1 and decimals < 10:
+        tmp *= 10
+        decimals += 1
+    return f"{rate:.{decimals + 2}f}"
+
+
+def rate_status(result: RateResult) -> tuple[str, str]:
+    """
+    Trả về (icon, message) để hiển thị badge trên UI.
+    Không import Streamlit — caller tự dùng icon+message theo framework.
+
+    Ví dụ:
+        icon, msg = rate_status(result)
+        st.success(f"{icon} {msg}")   # nếu ok
+        st.warning(f"{icon} {msg}")   # nếu fallback
+    """
+    from_ccy = result.from_currency
+    to_ccy   = result.to_currency
+
+    if result.source == "same":
+        return "ℹ️", f"{from_ccy} — không cần quy đổi"
+
+    if not result.ok or result.source == "fallback":
+        return "⚠️", (
+            result.warning
+            or f"Dùng tỷ giá tham chiếu: 1 {from_ccy} ≈ {fmt_rate(result.rate)} {to_ccy}"
+        )
+
+    source_label = {"api": "API trực tiếp", "db": "DB cached", "cache": "bộ nhớ"}.get(result.source, result.source)
+    age_min = int((datetime.now() - result.fetched_at).total_seconds() / 60)
+    age_str = f"{age_min} phút trước" if age_min > 0 else "vừa xong"
+    return "✅", f"1 {from_ccy} = {fmt_rate(result.rate)} {to_ccy}  ({source_label}, {age_str})"
+
+
+# ── Currency list ─────────────────────────────────────────────────────────────
+
+def get_currency_list() -> list[dict]:
+    """
+    Trả về danh sách currency từ DB: [{id, code, name}, ...].
+    Sắp xếp: VND, USD, EUR, SGD lên đầu.
+    Thread-safe; không dùng @st.cache_data để tránh dependency vào Streamlit.
+    Caller có thể tự cache bằng @st.cache_data(ttl=300) ở page level.
+
+    Ví dụ:
+        currencies = get_currency_list()
+        codes = [c['code'] for c in currencies]   # ['VND', 'USD', 'EUR', ...]
+    """
+    _priority = {"VND": 1, "USD": 2, "EUR": 3, "SGD": 4, "CNY": 5}
+    try:
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT id, code, name
+                FROM currencies
+                WHERE delete_flag = 0 AND code IS NOT NULL
+                ORDER BY code
+            """)).fetchall()
+        result = [{"id": r[0], "code": r[1], "name": r[2]} for r in rows]
+        result.sort(key=lambda c: (_priority.get(c["code"], 99), c["code"]))
+        return result
+    except Exception as e:
+        logger.error(f"get_currency_list failed: {e}")
+        return []

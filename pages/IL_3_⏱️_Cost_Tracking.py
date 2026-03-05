@@ -24,6 +24,7 @@ from utils.il_project.helpers import (
     EMPLOYEE_LEVELS, DEFAULT_RATES_BY_LEVEL,
 )
 from utils.il_project.s3_il import ILProjectS3Manager
+from utils.il_project.currency import get_rate_to_vnd, rate_status, fmt_rate
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -227,6 +228,24 @@ def _dialog_edit_labor(log: dict, project_id: int):
 
 @st.dialog("🧾 Add Expense", width="large")
 def _dialog_add_expense(project_id: int):
+    # ── Currency selector OUTSIDE form → reruns dialog on change ─────────────
+    cur_opts   = [c['code'] for c in currencies]
+    _r1, _r2, _r3 = st.columns([2, 2, 2])
+    exp_cur    = _r1.selectbox("Currency", cur_opts, key="dlg_add_exp_cur")
+    exp_cur_id = currencies[cur_opts.index(exp_cur)]['id']
+
+    # Auto-fetch exchange rate to VND
+    _rate_result = get_rate_to_vnd(exp_cur)
+    fetched_rate, rate_ok, rate_src = _rate_result.rate, _rate_result.ok, _rate_result.source
+    _icon, _msg = rate_status(_rate_result)
+    if rate_ok:
+        _r2.success(f"{_icon} {_msg}")
+    else:
+        _r2.warning(f"{_icon} {_msg}")
+
+    st.divider()
+
+    # ── Main form ─────────────────────────────────────────────────────────────
     with st.form("expense_add_form", clear_on_submit=True):
         ea1, ea2, ea3 = st.columns(3)
         exp_date  = ea1.date_input("Date", value=date.today())
@@ -236,16 +255,22 @@ def _dialog_add_expense(project_id: int):
             index=list(PHASE_LABELS.keys()).index('IMPLEMENTATION'),
         )
 
-        eb1, eb2, eb3, eb4 = st.columns(4)
+        eb1, eb2 = st.columns(2)
         emp_opts   = [e['full_name'] for e in employees]
         exp_emp    = eb1.selectbox("Employee", emp_opts)
         exp_emp_id = employees[emp_opts.index(exp_emp)]['id']
         exp_amount = eb2.number_input("Amount", value=0.0, min_value=0.0, format="%.0f")
-        cur_opts   = [c['code'] for c in currencies]
-        exp_cur    = eb3.selectbox("Currency", cur_opts)
-        exp_cur_id = currencies[cur_opts.index(exp_cur)]['id']
-        is_vnd     = (exp_cur == 'VND')
-        exp_rate   = eb4.number_input("Exchange Rate", value=1.0 if is_vnd else 25_000.0, format="%.2f")
+
+        # Exchange rate — pre-filled from API, still editable
+        exp_rate = st.number_input(
+            f"Exchange Rate (1 {exp_cur} = ? VND)",
+            value=fetched_rate,
+            min_value=0.0,
+            format="%.2f",
+            help="Tỷ giá đã tự động lấy từ API. Có thể chỉnh sửa nếu cần dùng tỷ giá khác.",
+        )
+        if exp_amount > 0 and exp_rate > 0:
+            st.caption(f"💱 Quy đổi: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
         exp_vendor  = ec1.text_input("Vendor Name")
@@ -300,6 +325,30 @@ def _dialog_add_expense(project_id: int):
 @st.dialog("🧾 Edit Expense", width="large")
 def _dialog_edit_expense(exp: dict, project_id: int):
     exp_id = exp['id']
+
+    # ── Currency selector OUTSIDE form ────────────────────────────────────────
+    cur_opts   = [c['code'] for c in currencies]
+    cur_code   = exp.get('currency', 'VND')
+    cur_idx    = cur_opts.index(cur_code) if cur_code in cur_opts else 0
+    _r1, _r2   = st.columns(2)
+    exp_cur    = _r1.selectbox("Currency", cur_opts, index=cur_idx, key="dlg_edit_exp_cur")
+    exp_cur_id = currencies[cur_opts.index(exp_cur)]['id']
+
+    # Auto-fetch rate — only re-fetch if currency changed from saved value
+    _rate_result  = get_rate_to_vnd(exp_cur)
+    fetched_rate  = _rate_result.rate
+    rate_ok       = _rate_result.ok
+    saved_rate    = float(exp.get('exchange_rate') or fetched_rate)
+    default_rate  = saved_rate if exp_cur == cur_code else fetched_rate
+
+    _icon, _msg = rate_status(_rate_result)
+    if rate_ok:
+        _r2.success(f"{_icon} {_msg}")
+    else:
+        _r2.warning(f"{_icon} {_msg}")
+
+    st.divider()
+
     with st.form("expense_edit_form"):
         ea1, ea2, ea3 = st.columns(3)
         exp_date  = ea1.date_input(
@@ -312,19 +361,23 @@ def _dialog_edit_expense(exp: dict, project_id: int):
         phase_idx  = phase_keys.index(exp['phase']) if exp.get('phase') in phase_keys else 0
         exp_phase  = ea3.selectbox("Phase", phase_keys, index=phase_idx)
 
-        eb1, eb2, eb3, eb4 = st.columns(4)
+        eb1, eb2 = st.columns(2)
         emp_opts   = [e['full_name'] for e in employees]
         cur_emp_nm = exp.get('employee_name', emp_opts[0])
         cur_emp_i  = emp_opts.index(cur_emp_nm) if cur_emp_nm in emp_opts else 0
         exp_emp    = eb1.selectbox("Employee", emp_opts, index=cur_emp_i)
         exp_emp_id = employees[emp_opts.index(exp_emp)]['id']
         exp_amount = eb2.number_input("Amount", value=float(exp.get('amount', 0)), min_value=0.0, format="%.0f")
-        cur_opts   = [c['code'] for c in currencies]
-        cur_code   = exp.get('currency', 'VND')
-        cur_idx    = cur_opts.index(cur_code) if cur_code in cur_opts else 0
-        exp_cur    = eb3.selectbox("Currency", cur_opts, index=cur_idx)
-        exp_cur_id = currencies[cur_opts.index(exp_cur)]['id']
-        exp_rate   = eb4.number_input("Exchange Rate", value=float(exp.get('exchange_rate', 1)), format="%.2f")
+
+        exp_rate = st.number_input(
+            f"Exchange Rate (1 {exp_cur} = ? VND)",
+            value=default_rate,
+            min_value=0.0,
+            format="%.2f",
+            help="Tỷ giá tự động từ API. Có thể chỉnh nếu cần dùng tỷ giá khác.",
+        )
+        if exp_amount > 0 and exp_rate > 0:
+            st.caption(f"💱 Quy đổi: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
         exp_vendor  = ec1.text_input("Vendor Name",    value=exp.get('vendor_name') or '')
@@ -409,17 +462,33 @@ def _dialog_view_attachment(s3_key: str, filename: str):
 
 @st.dialog("🔍 Add Pre-sales Cost", width="large")
 def _dialog_add_presales(project_id: int):
-    with st.form("presales_add_form", clear_on_submit=True):
-        pa1, pa2    = st.columns(2)
-        ps_layer_lb = pa1.radio(
-            "Layer",
-            ["STANDARD (Layer 1 → SGA)", "SPECIAL (Layer 2 → COGS if win)"],
-            horizontal=True,
-        )
-        ps_layer_v  = "STANDARD" if "STANDARD" in ps_layer_lb else "SPECIAL"
-        cat_list    = PRESALES_CATEGORIES_L1 if ps_layer_v == "STANDARD" else PRESALES_CATEGORIES_L2
-        ps_cat      = pa2.selectbox("Category", cat_list)
+    pa1, pa2    = st.columns(2)
+    ps_layer_lb = pa1.radio(
+        "Layer",
+        ["STANDARD (Layer 1 → SGA)", "SPECIAL (Layer 2 → COGS if win)"],
+        horizontal=True, key="dlg_ps_layer",
+    )
+    ps_layer_v  = "STANDARD" if "STANDARD" in ps_layer_lb else "SPECIAL"
+    cat_list    = PRESALES_CATEGORIES_L1 if ps_layer_v == "STANDARD" else PRESALES_CATEGORIES_L2
+    ps_cat      = pa2.selectbox("Category", cat_list, key="dlg_ps_cat")
 
+    # Currency selector OUTSIDE form
+    ps_cur_opts = [c['code'] for c in currencies]
+    _pc1, _pc2  = st.columns(2)
+    ps_cur      = _pc1.selectbox("Currency", ps_cur_opts, key="dlg_ps_cur")
+    ps_cur_id   = currencies[ps_cur_opts.index(ps_cur)]['id']
+
+    _ps_rate_result = get_rate_to_vnd(ps_cur)
+    fetched_rate    = _ps_rate_result.rate
+    _icon, _msg     = rate_status(_ps_rate_result)
+    if _ps_rate_result.ok:
+        _pc2.success(f"{_icon} {_msg}")
+    else:
+        _pc2.warning(f"{_icon} {_msg}")
+
+    st.divider()
+
+    with st.form("presales_add_form", clear_on_submit=True):
         pb1, pb2      = st.columns(2)
         is_ps_subcon  = pb1.checkbox("External worker", value=False)
         if not is_ps_subcon:
@@ -431,14 +500,16 @@ def _dialog_add_presales(project_id: int):
             ps_emp_id   = None
             ps_subcon   = pb2.text_input("Subcontractor Name *")
 
-        pc1, pc2, pc3, pc4 = st.columns(4)
-        ps_amount   = pc1.number_input("Amount", value=0.0, min_value=0.0, format="%.0f")
-        ps_cur_opts = [c['code'] for c in currencies]
-        ps_cur      = pc2.selectbox("Currency", ps_cur_opts)
-        ps_cur_id   = currencies[ps_cur_opts.index(ps_cur)]['id']
-        is_vnd_ps   = (ps_cur == 'VND')
-        ps_rate     = pc3.number_input("Exchange Rate", value=1.0 if is_vnd_ps else 25_000.0, format="%.2f")
-        ps_days     = pc4.number_input("Man-Days (optional)", value=0.0, min_value=0.0, format="%.1f")
+        pc1, pc2, pc3 = st.columns(3)
+        ps_amount = pc1.number_input("Amount", value=0.0, min_value=0.0, format="%.0f")
+        ps_rate   = pc2.number_input(
+            f"Exchange Rate (1 {ps_cur} = ? VND)",
+            value=fetched_rate, min_value=0.0, format="%.2f",
+        )
+        ps_days   = pc3.number_input("Man-Days (optional)", value=0.0, min_value=0.0, format="%.1f")
+
+        if ps_amount > 0 and ps_rate > 0:
+            st.caption(f"💱 {ps_amount:,.0f} {ps_cur} × {ps_rate:,.2f} = **{ps_amount * ps_rate:,.0f} VND**")
 
         alloc_opts    = ['PENDING', 'SGA', 'COGS']
         default_alloc = 'SGA' if ps_layer_v == 'STANDARD' else 'PENDING'
