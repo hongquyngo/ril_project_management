@@ -322,7 +322,9 @@ with tab_bench:
             type_opts = [f"[{t['code']}] {t['name']}" for t in proj_types]
             bt1, bt2, bt3 = st.columns(3)
             bm_type    = bt1.selectbox("Project Type", type_opts)
-            bm_type_id = proj_types[[t['code'] for t in proj_types].index(bm_type.split("]")[0][1:])]['id']
+            _bm_code   = bm_type.split("]")[0][1:]
+            _bm_matched = next((t for t in proj_types if t['code'] == _bm_code), proj_types[0])
+            bm_type_id = _bm_matched['id']
             bm_date    = bt2.date_input("Benchmark Date")
 
             src_opts   = ["(None)"] + [f"{r.project_code}" for r in proj_df.itertuples()]

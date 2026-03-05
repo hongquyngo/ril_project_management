@@ -298,7 +298,9 @@ with st.form("il_project_form", clear_on_submit=False):
     type_idx      = type_options.index(current_type) if current_type in type_options else 0
     type_sel      = ft1.selectbox("Project Type", type_options, index=type_idx,
                                    help="Loại dự án intralogistics. Ảnh hưởng đến hệ số α/β/γ mặc định và benchmark man-days.")
-    type_id_sel   = proj_types[[t['code'] for t in proj_types].index(type_sel.split("]")[0][1:])]['id']
+    _type_code    = type_sel.split("]")[0][1:]
+    _matched_type = next((t for t in proj_types if t['code'] == _type_code), proj_types[0])
+    type_id_sel   = _matched_type['id']
 
     billing_types = ['LUMP_SUM','MILESTONE','TIME_MATERIAL','MIXED']
     billing_idx   = billing_types.index(proj['billing_type']) if proj.get('billing_type') in billing_types else 0

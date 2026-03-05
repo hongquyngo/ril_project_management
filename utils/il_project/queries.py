@@ -394,20 +394,21 @@ def create_labor_log(data: Dict, created_by: str) -> int:
         INSERT INTO il_project_labor_logs (
             project_id, employee_id, employee_level,
             subcontractor_name, subcontractor_company,
-            work_date, man_days, daily_rate, phase,
+            work_date, man_days, daily_rate, amount, phase,
             description, is_on_site, presales_allocation,
             approval_status, created_by
         ) VALUES (
             :project_id, :employee_id, :employee_level,
             :subcontractor_name, :subcontractor_company,
-            :work_date, :man_days, :daily_rate, :phase,
+            :work_date, :man_days, :daily_rate, :amount, :phase,
             :description, :is_on_site, :presales_allocation,
             'PENDING', :created_by
         )
     """
+    amount = float(data.get('man_days', 0) or 0) * float(data.get('daily_rate', 0) or 0)
     engine = _get_engine()
     with engine.connect() as conn:
-        result = conn.execute(text(sql), {**data, 'created_by': created_by})
+        result = conn.execute(text(sql), {**data, 'amount': amount, 'created_by': created_by})
         conn.commit()
         return result.lastrowid
 
@@ -416,12 +417,14 @@ def update_labor_log(log_id: int, data: Dict, modified_by: str) -> bool:
     sql = """
         UPDATE il_project_labor_logs SET
             work_date = :work_date, man_days = :man_days, daily_rate = :daily_rate,
+            amount = :amount,
             phase = :phase, description = :description, is_on_site = :is_on_site,
             employee_level = :employee_level, presales_allocation = :presales_allocation,
             modified_by = :modified_by, version = version + 1
         WHERE id = :id AND delete_flag = 0 AND approval_status = 'PENDING'
     """
-    rows = execute_update(sql, {**data, 'id': log_id, 'modified_by': modified_by})
+    amount = float(data.get('man_days', 0) or 0) * float(data.get('daily_rate', 0) or 0)
+    rows = execute_update(sql, {**data, 'amount': amount, 'id': log_id, 'modified_by': modified_by})
     return rows > 0
 
 
@@ -480,19 +483,20 @@ def create_expense(data: Dict, created_by: str) -> int:
     sql = """
         INSERT INTO il_project_expenses (
             project_id, employee_id, expense_date, category, phase,
-            amount, currency_id, exchange_rate,
+            amount, currency_id, exchange_rate, amount_vnd,
             description, vendor_name, receipt_number,
             approval_status, created_by
         ) VALUES (
             :project_id, :employee_id, :expense_date, :category, :phase,
-            :amount, :currency_id, :exchange_rate,
+            :amount, :currency_id, :exchange_rate, :amount_vnd,
             :description, :vendor_name, :receipt_number,
             'PENDING', :created_by
         )
     """
+    amount_vnd = float(data.get('amount', 0) or 0) * float(data.get('exchange_rate', 1) or 1)
     engine = _get_engine()
     with engine.connect() as conn:
-        result = conn.execute(text(sql), {**data, 'created_by': created_by})
+        result = conn.execute(text(sql), {**data, 'amount_vnd': amount_vnd, 'created_by': created_by})
         conn.commit()
         return result.lastrowid
 
@@ -737,6 +741,9 @@ def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
                     'gp': actual_gp, 'gp_pct': round(gp_pct, 2),
                 })
             else:
+                total_cogs_new = total_d_cost + e_travel + e_presales
+                actual_gp_new  = sales_val - total_cogs_new
+                gp_pct_new     = round((actual_gp_new / sales_val * 100) if sales_val > 0 else 0, 2)
                 conn.execute(text("""
                     INSERT INTO il_project_cogs_actual (
                         project_id,
@@ -756,7 +763,8 @@ def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
                     'd_labor': d_labor, 'd_presales': d_presales,
                     'd_days': total_d_days, 'd_rate': d_actual_rate,
                     'e_travel': e_travel, 'e_presales': e_presales,
-                    'total': 0, 'sales': sales_val, 'gp': 0, 'gp_pct': 0,
+                    'total': total_cogs_new, 'sales': sales_val,
+                    'gp': actual_gp_new, 'gp_pct': gp_pct_new,
                 })
 
             # Sync actual_gp_percent to il_projects

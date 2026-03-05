@@ -137,21 +137,20 @@ with tab_new:
     # ── Live preview (updates as user types) ──────────────────────────────────
     with col_result:
         st.markdown("### 📐 Live Estimate")
-        # Use current form values via session state trick — recalc on every run
         result = calculate_estimate(
-            a_equipment=a_cost if 'a_cost' in dir() else 0,
-            alpha=alpha if 'alpha' in dir() else def_alpha,
-            c_fabrication=c_cost if 'c_cost' in dir() else 0,
-            man_days=man_days if 'man_days' in dir() else 0,
-            man_day_rate=day_rate if 'day_rate' in dir() else 0,
-            team_size=team_size if 'team_size' in dir() else 1,
-            beta=beta if 'beta' in dir() else def_beta,
-            gamma=gamma if 'gamma' in dir() else def_gamma,
-            sales_value=sales_value if 'sales_value' in dir() else 0,
-            b_override=b_manual if 'b_manual' in dir() and b_manual > 0 else None,
-            d_override=d_manual if 'd_manual' in dir() and d_manual > 0 else None,
-            e_override=e_manual if 'e_manual' in dir() and e_manual > 0 else None,
-            f_override=f_manual if 'f_manual' in dir() and f_manual > 0 else None,
+            a_equipment=a_cost,
+            alpha=alpha,
+            c_fabrication=c_cost,
+            man_days=man_days,
+            man_day_rate=day_rate,
+            team_size=team_size,
+            beta=beta,
+            gamma=gamma,
+            sales_value=sales_value,
+            b_override=b_manual if b_manual > 0 else None,
+            d_override=d_manual if d_manual > 0 else None,
+            e_override=e_manual if e_manual > 0 else None,
+            f_override=f_manual if f_manual > 0 else None,
         )
 
         # COGS breakdown table
