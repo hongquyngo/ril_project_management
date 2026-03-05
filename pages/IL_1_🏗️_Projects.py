@@ -123,7 +123,7 @@ def _project_form_fields(proj: dict, is_create: bool):
         cur_opts    = [c['code'] for c in currencies]
         cur_idx     = next((i for i, c in enumerate(currencies) if c['id'] == proj.get('currency_id')), 0)
         cur_sel     = st.selectbox("Contract Currency", cur_opts, index=cur_idx,
-                                    help="Đồng tiền trong hợp đồng với khách hàng.")
+                                    help="Contract currency with customer.")
         currency_id = currencies[cur_opts.index(cur_sel)]['id']
 
         # Auto-fetch rate (runs at form render time; inside form so no per-keystroke rerun)
@@ -132,13 +132,12 @@ def _project_form_fields(proj: dict, is_create: bool):
         saved_rate  = float(proj.get('exchange_rate') or 0)
 
         if cur_sel == 'VND':
-            st.info("ℹ️ VND — tỷ giá = 1")
+            st.info("ℹ️ VND — rate = 1")
         elif _rate_res.ok:
             # Show info banner if saved rate differs from live rate by >1%
             if saved_rate > 0 and abs(_rate_res.rate - saved_rate) / saved_rate > 0.01:
                 st.info(
-                    f"💡 Tỷ giá thị trường hiện tại: **{fmt_rate(_rate_res.rate)}** VND "
-                    f"(đang lưu: {fmt_rate(saved_rate)})"
+                    f"💡 Live market rate: **{fmt_rate(_rate_res.rate)}** VND (saved: {fmt_rate(saved_rate)})"
                 )
             else:
                 st.success(f"{_icon} {_msg}")
@@ -150,7 +149,7 @@ def _project_form_fields(proj: dict, is_create: bool):
             f"Exchange Rate (1 {cur_sel} = ? VND)",
             value=default_rate if default_rate > 0 else 1.0,
             min_value=0.0, format="%.4f",
-            help="Tỷ giá quy đổi sang VND tại thời điểm ký HĐ. Auto-fetch từ API khi khả dụng.",
+            help="Exchange rate to VND at contract signing date. Auto-fetched from API when available.",
         )
 
     # ── Timeline tab ──────────────────────────────────────────────────────────

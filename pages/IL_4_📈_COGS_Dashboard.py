@@ -62,7 +62,7 @@ st.caption(f"**{project['project_code']}** | {project.get('customer_name', '—'
 
 @st.dialog("✏️ Manual Entry — A / B / C / F", width="large")
 def _dialog_cogs_manual(project_id: int, actual: dict):
-    st.caption("Nhập từ chứng từ gốc: PI, B/L, invoice subcon. Sau khi lưu nhấn 🔄 Sync để tính lại.")
+    st.caption("Enter from source documents: PI, B/L, subcontractor invoice. After saving, click 🔄 Sync to recalculate.")
     with st.form("cogs_manual_form"):
         ma1, ma2 = st.columns(2)
         a_act = ma1.number_input("A: Equipment (from PI)",
@@ -89,7 +89,7 @@ def _dialog_cogs_manual(project_id: int, actual: dict):
                                    value=float(actual.get('f_warranty_released') or 0), format="%.0f")
         f_n    = st.text_input("Notes F", value=actual.get('f_notes') or '')
 
-        submitted = st.form_submit_button("💾 Lưu", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save", type="primary", use_container_width=True)
 
     if submitted:
         ok = update_cogs_actual_fields(project_id, {
@@ -101,10 +101,10 @@ def _dialog_cogs_manual(project_id: int, actual: dict):
             'f_warranty_released':    f_rel,  'f_notes': f_n or None,
         }, user_id)
         if ok:
-            st.success("✅ Đã lưu. Nhấn 🔄 Sync để cập nhật tổng COGS.")
+            st.success("✅ Saved. Click 🔄 Sync to update COGS totals.")
             st.rerun()
         else:
-            st.warning("Không tìm thấy record — thử Sync trước để khởi tạo.")
+            st.warning("Record not found — run Sync first to initialize.")
 
 
 @st.dialog("📉 Record Variance Analysis", width="large")
@@ -134,7 +134,7 @@ def _dialog_variance(project_id: int):
             c_act_v = vc2.number_input("Coefficient Actual",      value=0.0, format="%.4f")
             c_rec   = vc3.number_input("Coefficient Recommended", value=0.0, format="%.4f")
 
-        submitted = st.form_submit_button("💾 Lưu", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save", type="primary", use_container_width=True)
 
     if submitted:
         ok = upsert_variance_row(

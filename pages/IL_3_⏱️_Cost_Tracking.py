@@ -1,7 +1,7 @@
 # pages/IL_3_⏱️_Cost_Tracking.py
 """
 Cost Tracking — Labor Logs / Expenses / Pre-sales Costs
-UX: @st.dialog cho CRUD forms | @st.fragment cho tables | S3 cho chứng từ đính kèm
+UX: @st.dialog for CRUD forms | @st.fragment for tables | S3 for document attachments
 """
 
 import streamlit as st
@@ -118,12 +118,12 @@ def _dialog_add_labor(project_id: int):
 
         st.divider()
         uploaded_file = st.file_uploader(
-            "📎 Đính kèm chứng từ (tùy chọn)",
+            "📎 Attach document (optional)",
             type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx"],
-            help="Timesheet, email xác nhận, hoặc chứng từ liên quan",
+            help="Timesheet, confirmation email, or related document",
         )
 
-        submitted = st.form_submit_button("✅ Lưu entry", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✅ Save entry", type="primary", use_container_width=True)
 
     if submitted:
         if is_subcon and not subcon_name:
@@ -154,12 +154,12 @@ def _dialog_add_labor(project_id: int):
                     if ok:
                         update_labor_attachment(log_id, s3_key, uploaded_file.name, user_id)
                     else:
-                        st.warning(f"Entry đã lưu nhưng upload file thất bại: {s3_key}")
+                        st.warning(f"Entry saved but file upload failed: {s3_key}")
 
             st.success("✅ Labor entry added!")
             st.rerun()
         except Exception as e:
-            st.error(f"Lỗi: {e}")
+            st.error(f"Error: {e}")
 
 
 @st.dialog("👷 Edit Labor Entry", width="large")
@@ -267,10 +267,10 @@ def _dialog_add_expense(project_id: int):
             value=fetched_rate,
             min_value=0.0,
             format="%.2f",
-            help="Tỷ giá đã tự động lấy từ API. Có thể chỉnh sửa nếu cần dùng tỷ giá khác.",
+            help="Rate auto-fetched from API. You can override if needed.",
         )
         if exp_amount > 0 and exp_rate > 0:
-            st.caption(f"💱 Quy đổi: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
+            st.caption(f"💱 Converted: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
         exp_vendor  = ec1.text_input("Vendor Name")
@@ -279,12 +279,12 @@ def _dialog_add_expense(project_id: int):
 
         st.divider()
         uploaded_file = st.file_uploader(
-            "📎 Đính kèm chứng từ (hóa đơn, receipt...)",
+            "📎 Attach document (invoice, receipt...)",
             type=["pdf", "jpg", "jpeg", "png", "xlsx"],
-            help="Khuyến nghị đính kèm đầy đủ để phục vụ quyết toán",
+            help="Recommended: attach supporting documents for expense settlement",
         )
 
-        submitted = st.form_submit_button("✅ Lưu expense", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✅ Save expense", type="primary", use_container_width=True)
 
     if submitted:
         if exp_amount <= 0:
@@ -314,12 +314,12 @@ def _dialog_add_expense(project_id: int):
                     if ok:
                         update_expense_attachment(expense_id, s3_key, uploaded_file.name, user_id)
                     else:
-                        st.warning(f"Expense đã lưu nhưng upload file thất bại: {s3_key}")
+                        st.warning(f"Expense saved but file upload failed: {s3_key}")
 
             st.success("✅ Expense added!")
             st.rerun()
         except Exception as e:
-            st.error(f"Lỗi: {e}")
+            st.error(f"Error: {e}")
 
 
 @st.dialog("🧾 Edit Expense", width="large")
@@ -374,10 +374,10 @@ def _dialog_edit_expense(exp: dict, project_id: int):
             value=default_rate,
             min_value=0.0,
             format="%.2f",
-            help="Tỷ giá tự động từ API. Có thể chỉnh nếu cần dùng tỷ giá khác.",
+            help="Rate auto-fetched from API. You can override if needed.",
         )
         if exp_amount > 0 and exp_rate > 0:
-            st.caption(f"💱 Quy đổi: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
+            st.caption(f"💱 Converted: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
         exp_vendor  = ec1.text_input("Vendor Name",    value=exp.get('vendor_name') or '')
@@ -387,9 +387,9 @@ def _dialog_edit_expense(exp: dict, project_id: int):
         st.divider()
         cur_attachment = exp.get('attachment_filename')
         if cur_attachment:
-            st.info(f"📎 Chứng từ hiện tại: **{cur_attachment}**")
+            st.info(f"📎 Current attachment: **{cur_attachment}**")
         new_file = st.file_uploader(
-            "📎 Thay thế chứng từ (để trống = giữ nguyên)",
+            "📎 Replace attachment (leave empty to keep current)",
             type=["pdf", "jpg", "jpeg", "png", "xlsx"],
         )
 
@@ -432,16 +432,16 @@ def _dialog_edit_expense(exp: dict, project_id: int):
             st.error("Delete failed.")
 
 
-@st.dialog("📎 Xem chứng từ", width="large")
+@st.dialog("📎 View Attachment", width="large")
 def _dialog_view_attachment(s3_key: str, filename: str):
     s3 = _get_s3()
     if not s3:
-        st.error("S3 không khả dụng.")
+        st.error("S3 is not available.")
         return
-    with st.spinner("Đang tạo link xem file..."):
+    with st.spinner("Generating download link..."):
         url = s3.get_presigned_url(s3_key, expiration=600)
     if not url:
-        st.error("Không thể tạo URL — kiểm tra lại cấu hình S3.")
+        st.error("Could not generate URL — check S3 configuration.")
         return
 
     st.markdown(f"**File:** `{filename}`")
@@ -449,11 +449,11 @@ def _dialog_view_attachment(s3_key: str, filename: str):
     if ext in ('jpg', 'jpeg', 'png'):
         st.image(url, use_container_width=True)
     elif ext == 'pdf':
-        st.markdown(f"[📄 Mở PDF trong tab mới]({url})")
+        st.markdown(f"[📄 Open PDF in new tab]({url})")
         st.components.v1.iframe(url, height=600, scrolling=True)
     else:
-        st.markdown(f"[⬇️ Tải về `{filename}`]({url})")
-    st.caption("Link hết hạn sau 10 phút.")
+        st.markdown(f"[⬇️ Download `{filename}`]({url}")
+    st.caption("Link expires after 10 minutes.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -509,14 +509,14 @@ def _dialog_add_presales(project_id: int):
         ps_days   = pc3.number_input("Man-Days (optional)", value=0.0, min_value=0.0, format="%.1f")
 
         if ps_amount > 0 and ps_rate > 0:
-            st.caption(f"💱 {ps_amount:,.0f} {ps_cur} × {ps_rate:,.2f} = **{ps_amount * ps_rate:,.0f} VND**")
+            st.caption(f"💱 Converted: {ps_amount:,.0f} {ps_cur} × {ps_rate:,.2f} = **{ps_amount * ps_rate:,.0f} VND**")
 
         alloc_opts    = ['PENDING', 'SGA', 'COGS']
         default_alloc = 'SGA' if ps_layer_v == 'STANDARD' else 'PENDING'
         ps_alloc      = st.selectbox("Allocation", alloc_opts, index=alloc_opts.index(default_alloc))
         ps_desc       = st.text_input("Description")
 
-        submitted = st.form_submit_button("✅ Lưu", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✅ Save", type="primary", use_container_width=True)
 
     if submitted:
         if ps_amount <= 0:
@@ -542,7 +542,7 @@ def _dialog_add_presales(project_id: int):
             st.success("✅ Pre-sales cost added!")
             st.rerun()
         except Exception as e:
-            st.error(f"Lỗi: {e}")
+            st.error(f"Error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -570,7 +570,7 @@ def _labor_tab(project_id: int):
     k3.metric("Pending", int((labor_df['approval_status'] == 'PENDING').sum()) if not labor_df.empty else 0)
 
     if labor_df.empty:
-        st.info("Chưa có labor log nào.")
+        st.info("No labor entries yet.")
         return
 
     has_att    = 'attachment_filename' in labor_df.columns
@@ -607,7 +607,7 @@ def _labor_tab(project_id: int):
             if col_edit.button("✏️ Edit selected", key="labor_edit_btn"):
                 _dialog_edit_labor(row, project_id)
         if has_att and row.get('attachment_s3_key'):
-            if col_att.button("📎 Xem chứng từ", key="labor_att_btn"):
+            if col_att.button("📎 View attachment", key="labor_att_btn"):
                 _dialog_view_attachment(row['attachment_s3_key'], row['attachment_filename'])
 
     if is_pm:
@@ -645,7 +645,7 @@ def _expense_tab(project_id: int):
     ek3.metric("Pending", int((exp_df['approval_status'] == 'PENDING').sum()) if not exp_df.empty else 0)
 
     if exp_df.empty:
-        st.info("Chưa có expense nào.")
+        st.info("No expenses yet.")
         return
 
     has_att    = 'attachment_filename' in exp_df.columns
@@ -682,7 +682,7 @@ def _expense_tab(project_id: int):
             if col_edit.button("✏️ Edit selected", key="exp_edit_btn"):
                 _dialog_edit_expense(row, project_id)
         if has_att and row.get('attachment_s3_key'):
-            if col_att.button("📎 Xem chứng từ", key="exp_att_btn"):
+            if col_att.button("📎 View attachment", key="exp_att_btn"):
                 _dialog_view_attachment(row['attachment_s3_key'], row['attachment_filename'])
 
     if is_pm:
@@ -736,7 +736,7 @@ def _presales_tab(project_id: int):
             },
         )
     else:
-        st.info("Chưa có pre-sales cost nào.")
+        st.info("No pre-sales costs yet.")
 
     if is_pm:
         st.divider()
