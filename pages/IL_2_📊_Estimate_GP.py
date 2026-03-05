@@ -258,7 +258,7 @@ with tab_active:
         rows.append({'Item': label, 'Estimate (VND)': amt})
 
     summary_df = pd.DataFrame(rows)
-    total_row  = pd.DataFrame([{'Item': '**TOTAL COGS**', 'Estimate (VND)': active_est['total_cogs']}])
+    total_row  = pd.DataFrame([{'Item': '**TOTAL COGS**', 'Estimate (VND)': float(active_est['total_cogs'] or 0)}])
     summary_df = pd.concat([summary_df, total_row], ignore_index=True)
 
     st.dataframe(summary_df, width="stretch", hide_index=True,

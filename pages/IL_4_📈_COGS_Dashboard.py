@@ -345,7 +345,7 @@ def _actual_cogs_tab(project_id: int):
 @st.fragment
 def _variance_tab(project_id: int):
     vh1, vh2 = st.columns([5, 1])
-    if vh2.button("➕ Add", type="primary", width="stretch"):
+    if vh2.button("➕ Add", type="primary", width="stretch", key="btn_add_variance"):
         _dialog_variance(project_id)
 
     var_df = get_variance_df(project_id)
@@ -388,7 +388,7 @@ def _benchmark_tab(project_id: int):
         hit  = next((t for t in proj_types if t['code'] == code), None)
         type_filter = hit['id'] if hit else None
 
-    if bh3.button("➕ Add", type="primary", width="stretch"):
+    if bh3.button("➕ Add", type="primary", width="stretch", key="btn_add_benchmark"):
         _dialog_benchmark(project_id)
 
     bench_df = get_benchmarks_df(type_filter)

@@ -408,6 +408,7 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
 
     event = st.dataframe(
         display_df,
+        key=f"proj_table_{st.session_state.get('_df_key', 0)}",
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -436,7 +437,8 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
         # Fragment chạy TRƯỚC page-level code nên nếu set ở page level thì fragment
         # luôn thấy giá trị cũ → guard vô tác dụng → infinite loop.
         if st.session_state.get("_last_dialog_pid") != pid:
-            st.session_state["_last_dialog_pid"] = pid  # ← set trước khi rerun
+            st.session_state["_last_dialog_pid"] = pid
+            st.session_state["_df_key"] = st.session_state.get("_df_key", 0) + 1
             st.session_state["open_view_pid"] = pid
             st.rerun()
 
@@ -477,29 +479,15 @@ if f_pm != "All":
 # ── Project table (fragment) ──────────────────────────────────────────────────
 _project_table(status_filter, type_filter_id, pm_filter_id, f_search)
 
-# ── Dialog triggers — processed after fragment renders ────────────────────────
-# State flow:
-#   fragment sets _last_dialog_pid + open_view_pid → st.rerun()
-#   next run: fragment sees _last_dialog_pid==pid → skips → dialog opens here
-#   dialog closes → _dialog_was_open=True carried to next run → guard cleared
-#   → user can click same row again normally
-
-_dialog_was_open = st.session_state.pop("_dialog_was_open", False)
-
+# ── Dialog triggers ───────────────────────────────────────────────────────────
 if st.session_state.pop("open_create", False):
     st.session_state.pop("_last_dialog_pid", None)
     _dialog_create_project()
 
-elif "open_view_pid" in st.session_state:
+if "open_view_pid" in st.session_state:
     pid = st.session_state.pop("open_view_pid")
     _dialog_view_project(pid)
-    st.session_state["_dialog_was_open"] = True
 
-elif "open_edit_pid" in st.session_state:
+if "open_edit_pid" in st.session_state:
     pid = st.session_state.pop("open_edit_pid")
     _dialog_edit_project(pid)
-    st.session_state["_dialog_was_open"] = True
-
-elif _dialog_was_open:
-    # Dialog đã đóng ở run trước → xóa guard để row đó có thể click lại được
-    st.session_state.pop("_last_dialog_pid", None)
