@@ -78,7 +78,7 @@ from .currency import (
     rate_status,
     get_currency_list,
     RateResult,
-    clear_rate_cache,
+    clear_cache as clear_rate_cache,
 )
 
 __all__ = [
