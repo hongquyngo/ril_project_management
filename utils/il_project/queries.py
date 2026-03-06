@@ -775,6 +775,12 @@ def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
                     'gp': actual_gp, 'gp_pct': round(gp_pct, 2),
                 })
             else:
+                # New record: A=B=C=F=0 (manually entered later),
+                # so total_cogs = D + E only for initial sync.
+                total_cogs_init = total_d_cost + e_travel + e_presales
+                actual_gp_init  = sales_val - total_cogs_init
+                gp_pct_init     = (actual_gp_init / sales_val * 100) if sales_val > 0 else 0
+
                 conn.execute(text("""
                     INSERT INTO il_project_cogs_actual (
                         project_id,
@@ -794,7 +800,8 @@ def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
                     'd_labor': d_labor, 'd_presales': d_presales,
                     'd_days': total_d_days, 'd_rate': d_actual_rate,
                     'e_travel': e_travel, 'e_presales': e_presales,
-                    'total': 0, 'sales': sales_val, 'gp': 0, 'gp_pct': 0,
+                    'total': total_cogs_init, 'sales': sales_val,
+                    'gp': actual_gp_init, 'gp_pct': round(gp_pct_init, 2),
                 })
 
             # Sync actual_gp_percent to il_projects
