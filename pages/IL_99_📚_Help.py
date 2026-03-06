@@ -29,12 +29,13 @@ QUICK_REF = {
         ("CANCELLED", "❌", "Đã hủy", "Lưu hồ sơ"),
     ],
     "💰 Công thức COGS A→F": [
-        ("A", "Equipment Cost", "Nhập thủ công", "Chi phí thiết bị, máy móc"),
-        ("B", "Logistics & Import", "B = A × α", "Vận chuyển, nhập khẩu, thuế"),
-        ("C", "Custom Fabrication", "Nhập thủ công", "Gia công, chế tạo tùy chỉnh"),
-        ("D", "Direct Labor", "D = Man-days × Rate × Team", "Nhân công trực tiếp (từ Labor Logs APPROVED)"),
-        ("E", "Travel & Site OH", "E = D × β", "Đi lại, chi phí hiện trường (từ Expenses APPROVED)"),
-        ("F", "Warranty Reserve", "F = (A + C) × γ", "Dự phòng bảo hành"),
+        # (code, name, formula_estimate, source_actual, desc)
+        ("A", "Equipment Cost",    "Nhập thủ công",              "Nhập thủ công từ invoice supplier",           "Chi phí thiết bị, máy móc"),
+        ("B", "Logistics & Import","B = A × α",                  "Nhập thủ công từ invoice forwarder",          "Vận chuyển, nhập khẩu, thuế"),
+        ("C", "Custom Fabrication","Nhập thủ công",              "Nhập thủ công từ PO subcontractor",           "Gia công, chế tạo tùy chỉnh"),
+        ("D", "Direct Labor",      "D = Man-days × Rate × Team", "Tự động: Labor Logs APPROVED (phase ≠ PRE_SALES, hoặc PRE_SALES + allocation=COGS)", "Nhân công trực tiếp"),
+        ("E", "Travel & Site OH",  "E = D × β",                  "Tự động: Expenses APPROVED (phase ≠ PRE_SALES và ≠ WARRANTY) + Pre-sales costs SPECIAL/COGS (category hợp lệ)", "Đi lại, chi phí hiện trường"),
+        ("F", "Warranty Reserve",  "F = (A + C) × γ",            "Nhập thủ công: provision / actual_used / released. F_net = provision − released", "Dự phòng bảo hành"),
     ],
 }
 
@@ -51,7 +52,7 @@ SOP_STEPS = {
         ("1", "Vào module Labor Logs của dự án", ""),
         ("2", "Điền Work Date, Phase đúng giai đoạn thực tế", "KHÔNG dùng PRE_SALES cho công việc sau khi ký hợp đồng"),
         ("3", "Chọn Worker (nội bộ) hoặc nhập subcontractor_name", ""),
-        ("4", "Nhập Man-days (0.5 = nửa ngày), Daily Rate, tick Is On-site", ""),
+        ("4", "Nhập Man-days (0.5 = nửa ngày, tối đa 3.0 mỗi entry), Daily Rate, tick Is On-site", "Cần ghi > 3 ngày: tạo nhiều entry (VD: 3 + 2). Daily Rate tự gợi ý theo Level chọn ở trên"),
         ("5", "Nếu Phase = PRE_SALES: chọn Presales Allocation (COGS/SGA)", "Dự án GO → COGS | NO_GO → SGA"),
         ("6", "Đính kèm timesheet / email xác nhận", ""),
         ("7", "Submit → Manager Approve → log vào COGS khi sync", "Log PENDING không được tính vào COGS"),
@@ -149,7 +150,7 @@ QA_DATA = [
             "**Log 2**: phase = IMPLEMENTATION, man_days = số ngày lắp đặt, is_on_site = ✅.",
             "Nếu cùng 1 ngày làm 2 việc: mỗi log dùng man_days = 0.5.",
         ],
-        "note": "PRE_SALES allocation COGS → vào D-presales khi sync. IMPLEMENTATION → vào D-direct. Hai khoản được theo dõi riêng.",
+        "note": "PRE_SALES allocation COGS → vào D-presales khi sync. IMPLEMENTATION → vào D-direct. Hai khoản được theo dõi riêng.\n\n**Lưu ý với Pre-sales Costs (không phải Labor Log):** chỉ các category DEMO_TRANSPORT, TRAVEL_SPECIAL, POC_EXECUTION, WIFI_SURVEY, ENGINEERING_STUDY, CUSTOM_SAMPLE, OTHER mới được tổng hợp vào E-presales khi Sync. PROTOTYPE và CUSTOM_DEMO không được đưa vào COGS Actual.",
         "warning": "",
     },
     {
@@ -179,7 +180,7 @@ QA_DATA = [
             "Expenses phase WARRANTY được tách ra khỏi khoản E — theo dõi riêng để đối chiếu với F.",
             "**Cập nhật COGS Actual thủ công**: f_warranty_actual_used = tổng chi phí bảo hành đã dùng.",
         ],
-        "note": "F_net = f_warranty_provision - f_warranty_released. Chi phí bảo hành thấp hơn dự phòng → GP% thực tế tốt hơn kế hoạch.",
+        "note": "**f_warranty_actual_used chỉ để theo dõi**, không tham gia tính total_cogs. Công thức tính F_net = f_warranty_provision − f_warranty_released. Muốn GP% phản ánh chi phí bảo hành thực tế: cập nhật f_warranty_released (phần dự phòng đã giải phóng) và Sync lại.",
         "warning": "",
     },
     {
@@ -188,11 +189,12 @@ QA_DATA = [
         "question": "Kỹ sư nhập sai man_days (5 ngày thay vì 3 ngày), đã bị approve rồi, xử lý thế nào?",
         "situation": "Labor log đã APPROVED với man_days = 5, thực tế chỉ có 3 ngày.",
         "sop": [
-            "**Phương án 1 (ưu tiên)**: Liên hệ Manager/Admin để **Reject** log về PENDING → sửa man_days = 3 → submit lại để approve.",
-            "**Phương án 2** (nếu không reject được): Tạo Labor Log mới, man_days = **-2** (âm để bù trừ), description = `Điều chỉnh sai sót log #[ID]`.",
+            "**Phương án duy nhất qua UI**: Tạo Labor Log mới với man_days = **-2** (âm để bù trừ), description = `Điều chỉnh sai sót log #[ID]`, cùng phase và work_date với log gốc.",
+            "Log bù trừ cũng cần được **Approve** để có hiệu lực trong Sync COGS.",
+            "**Nếu có quyền Admin DB**: Reject log gốc về PENDING → sửa man_days = 3 → submit lại để Approve. Đây là cách sạch hơn nhưng cần truy cập trực tiếp DB.",
         ],
         "note": "",
-        "warning": "Hệ thống chỉ cho sửa/xóa khi approval_status = PENDING. Sau APPROVED, dữ liệu bị khóa để đảm bảo audit trail.",
+        "warning": "Hệ thống chỉ cho sửa/xóa khi approval_status = PENDING. Sau APPROVED, UI bị khóa để đảm bảo audit trail. Chức năng Reject qua UI hiện chưa có — chỉ Admin DB mới thực hiện được.",
     },
     {
         "id": "Q9",
@@ -285,27 +287,27 @@ with tab_quickref:
 
     st.divider()
     st.subheader("Công thức COGS A→F")
+    st.caption("Mỗi khoản có 2 context: **Estimate** (nhập tay khi lập dự toán) và **COGS Actual** (nguồn dữ liệu thực tế khi Sync).")
 
     cogs_rows = QUICK_REF["💰 Công thức COGS A→F"]
-    c1, c2 = st.columns([3, 2])
 
-    for code, name, formula, desc in cogs_rows:
-        with c1:
-            st.markdown(f"""
-            <div style="background:#EEF4FB;border-left:4px solid #2E75B6;
-                        padding:8px 14px;margin-bottom:6px;border-radius:4px;">
-                <span style="font-size:18px;font-weight:700;color:#1F4E79">{code}</span>
-                <span style="font-weight:600;margin-left:8px">{name}</span>
-                <code style="float:right;background:#DEF;padding:2px 8px;
-                              border-radius:4px;font-size:12px">{formula}</code>
+    for code, name, formula_est, source_actual, desc in cogs_rows:
+        st.markdown(f"""
+        <div style="background:#EEF4FB;border-left:4px solid #2E75B6;
+                    padding:8px 14px;margin-bottom:6px;border-radius:4px;">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+                <span style="font-size:18px;font-weight:700;color:#1F4E79;min-width:20px">{code}</span>
+                <span style="font-weight:600">{name}</span>
+                <span style="font-size:12px;color:#555;flex:1">{desc}</span>
             </div>
-            """, unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"""
-            <div style="padding:8px 0;margin-bottom:6px;font-size:14px;color:#444">
-                {desc}
+            <div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap;">
+                <span style="font-size:12px"><b>Estimate:</b>
+                    <code style="background:#DEF;padding:1px 6px;border-radius:3px">{formula_est}</code>
+                </span>
+                <span style="font-size:12px;color:#444"><b>Actual nguồn:</b> {source_actual}</span>
             </div>
-            """, unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
     st.divider()
     ca, cb, cc = st.columns(3)
@@ -368,6 +370,7 @@ with tab_sop:
         col_a, col_b = st.columns(2)
         col_a.warning("**D (tự động)** = Tổng Labor Logs APPROVED\n- Phase ≠ PRE_SALES: vào D-direct\n- Phase = PRE_SALES + allocation COGS: vào D-presales")
         col_b.warning("**E (tự động)** = Tổng Expenses APPROVED\n- Phase ≠ PRE_SALES và ≠ WARRANTY: vào E-travel\n- Pre-sales costs Layer 2 allocation COGS: vào E-presales")
+        st.info("**⚠️ E-presales chỉ tính các category:** DEMO_TRANSPORT, TRAVEL_SPECIAL, POC_EXECUTION, WIFI_SURVEY, ENGINEERING_STUDY, CUSTOM_SAMPLE, OTHER.\n\nCác category **PROTOTYPE** và **CUSTOM_DEMO** (dù là SPECIAL/COGS) **không** được đưa vào E-presales khi Sync.")
 
     elif sop_choice == "✅ Đóng dự án & Benchmark":
         st.divider()
