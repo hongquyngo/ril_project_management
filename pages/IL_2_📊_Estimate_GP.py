@@ -159,7 +159,11 @@ with tab_new:
             label = COGS_LABELS.get(key.upper(), key.upper())
             val   = result.get(key, 0)
             pct   = (val / result['total_cogs'] * 100) if result['total_cogs'] > 0 else 0
-            cogs_rows.append({'Item': label, 'Amount (VND)': val, '% COGS': pct})
+            cogs_rows.append({
+                'Item':         label,
+                'Amount (VND)': f"{val:,.0f}",
+                '% COGS':       f"{pct:.1f}%",
+            })
 
         cogs_df = pd.DataFrame(cogs_rows)
         st.dataframe(
@@ -167,9 +171,9 @@ with tab_new:
             width="stretch",
             hide_index=True,
             column_config={
-                'Item':        st.column_config.TextColumn('Item'),
-                'Amount (VND)': st.column_config.NumberColumn('Amount (VND)', format="%.0f"),
-                '% COGS':      st.column_config.NumberColumn('% COGS', format="%.1f%%"),
+                'Item':         st.column_config.TextColumn('Item'),
+                'Amount (VND)': st.column_config.TextColumn('Amount (VND)'),
+                '% COGS':       st.column_config.TextColumn('% COGS', width=80),
             }
         )
 
@@ -255,14 +259,14 @@ with tab_active:
                        else f'{key}_direct_labor' if key == 'd'
                        else f'{key}_travel_site_oh' if key == 'e'
                        else f'{key}_warranty_reserve', 0) or 0)
-        rows.append({'Item': label, 'Estimate (VND)': amt})
+        rows.append({'Item': label, 'Estimate (VND)': f"{amt:,.0f}"})
 
     summary_df = pd.DataFrame(rows)
-    total_row  = pd.DataFrame([{'Item': '**TOTAL COGS**', 'Estimate (VND)': float(active_est['total_cogs'] or 0)}])
+    total_row  = pd.DataFrame([{'Item': '**TOTAL COGS**', 'Estimate (VND)': f"{float(active_est['total_cogs'] or 0):,.0f}"}])
     summary_df = pd.concat([summary_df, total_row], ignore_index=True)
 
     st.dataframe(summary_df, width="stretch", hide_index=True,
-                 column_config={'Estimate (VND)': st.column_config.NumberColumn(format="%.0f")})
+                 column_config={'Estimate (VND)': st.column_config.TextColumn('Estimate (VND)')})
 
     mc1, mc2, mc3 = st.columns(3)
     mc1.metric("Sales Value",  fmt_vnd(active_est['sales_value']))
@@ -286,9 +290,9 @@ with tab_history:
         'Label':       e.get('estimate_label',''),
         'Type':        e.get('estimate_type',''),
         'Active':      '✅' if e.get('is_active') else '',
-        'Total COGS':  float(e.get('total_cogs', 0)),
-        'Sales':       float(e.get('sales_value', 0)),
-        'GP%':         float(e.get('estimated_gp_percent', 0)),
+        'Total COGS':  f"{float(e.get('total_cogs', 0)):,.0f}",
+        'Sales':       f"{float(e.get('sales_value', 0)):,.0f}",
+        'GP%':         fmt_percent(e.get('estimated_gp_percent')),
         'Go/No-Go':    e.get('go_no_go_result','—'),
         'Created':     e.get('created_date'),
     } for e in all_estimates])
@@ -298,9 +302,9 @@ with tab_history:
         width="stretch",
         hide_index=True,
         column_config={
-            'Total COGS': st.column_config.NumberColumn(format="%.0f"),
-            'Sales':      st.column_config.NumberColumn(format="%.0f"),
-            'GP%':        st.column_config.NumberColumn(format="%.1f%%"),
+            'Total COGS': st.column_config.TextColumn('Total COGS'),
+            'Sales':      st.column_config.TextColumn('Sales'),
+            'GP%':        st.column_config.TextColumn('GP%', width=80),
         }
     )
 

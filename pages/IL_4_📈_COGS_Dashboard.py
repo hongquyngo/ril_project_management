@@ -313,15 +313,27 @@ def _actual_cogs_tab(project_id: int):
         '': impact_color(tot_pct),
     })
 
+    cogs_display_rows = []
+    for r in rows:
+        var_p = r['Var %']
+        cogs_display_rows.append({
+            'Item':      r['Item'],
+            'Estimated': f"{r['Estimated']:,.0f}",
+            'Actual':    f"{r['Actual']:,.0f}",
+            'Variance':  f"{r['Variance']:+,.0f}",
+            'Var %':     f"{var_p:+.1f}%" if var_p is not None else '—',
+            '':          r[''],
+        })
+
     st.dataframe(
-        pd.DataFrame(rows), width="stretch", hide_index=True,
+        pd.DataFrame(cogs_display_rows), width="stretch", hide_index=True,
         column_config={
             'Item':      st.column_config.TextColumn('Item'),
-            'Estimated': st.column_config.NumberColumn('Estimated (VND)', format="%.0f"),
-            'Actual':    st.column_config.NumberColumn('Actual (VND)',    format="%.0f"),
-            'Variance':  st.column_config.NumberColumn('Variance (VND)',  format="+%.0f"),
-            'Var %':     st.column_config.NumberColumn('Var %',           format="+%.1f%%"),
-            '':          st.column_config.TextColumn('',                  width=30),
+            'Estimated': st.column_config.TextColumn('Estimated (VND)'),
+            'Actual':    st.column_config.TextColumn('Actual (VND)'),
+            'Variance':  st.column_config.TextColumn('Variance (VND)'),
+            'Var %':     st.column_config.TextColumn('Var %', width=80),
+            '':          st.column_config.TextColumn('', width=30),
         },
     )
 
@@ -353,20 +365,37 @@ def _variance_tab(project_id: int):
     if not var_df.empty:
         display_df = var_df.copy()
         display_df.insert(0, '●', display_df['variance_percent'].map(impact_color))
+        display_df['estimated_amount_fmt'] = display_df['estimated_amount'].apply(
+            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+        )
+        display_df['actual_amount_fmt'] = display_df['actual_amount'].apply(
+            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+        )
+        display_df['variance_amount_fmt'] = display_df['variance_amount'].apply(
+            lambda v: f"{v:+,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+        )
+        display_df['variance_percent_fmt'] = display_df['variance_percent'].apply(
+            lambda v: f"{v:+.1f}%" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+        )
         st.dataframe(
             display_df, width="stretch", hide_index=True,
             column_config={
                 '●':                       st.column_config.TextColumn('', width=30),
                 'cogs_category':           st.column_config.TextColumn('Category'),
-                'estimated_amount':        st.column_config.NumberColumn('Estimated', format="%.0f"),
-                'actual_amount':           st.column_config.NumberColumn('Actual',    format="%.0f"),
-                'variance_amount':         st.column_config.NumberColumn('Variance',  format="+%.0f"),
-                'variance_percent':        st.column_config.NumberColumn('Var %',     format="+%.1f%%"),
+                'estimated_amount_fmt':    st.column_config.TextColumn('Estimated'),
+                'actual_amount_fmt':       st.column_config.TextColumn('Actual'),
+                'variance_amount_fmt':     st.column_config.TextColumn('Variance'),
+                'variance_percent_fmt':    st.column_config.TextColumn('Var %', width=80),
                 'impact_assessment':       st.column_config.TextColumn('Impact'),
-                'coefficient_used':        st.column_config.NumberColumn('Coeff Used',  format="%.4f"),
+                'coefficient_used':        st.column_config.NumberColumn('Coeff Used',   format="%.4f"),
                 'coefficient_actual':      st.column_config.NumberColumn('Coeff Actual', format="%.4f"),
-                'coefficient_recommended': st.column_config.NumberColumn('Coeff Rec.',  format="%.4f"),
+                'coefficient_recommended': st.column_config.NumberColumn('Coeff Rec.',   format="%.4f"),
                 'root_cause':              st.column_config.TextColumn('Root Cause'),
+                # hide raw columns
+                'estimated_amount':        None,
+                'actual_amount':           None,
+                'variance_amount':         None,
+                'variance_percent':        None,
             },
         )
     else:

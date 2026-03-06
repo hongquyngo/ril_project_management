@@ -616,6 +616,12 @@ def _labor_tab(project_id: int):
 
     has_att    = 'attachment_filename' in labor_df.columns
     display_df = labor_df.copy()
+    display_df['daily_rate_fmt'] = display_df['daily_rate'].apply(
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+    )
+    display_df['amount_fmt'] = display_df['amount'].apply(
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+    )
     col_config = {
         'id':                  st.column_config.NumberColumn('ID', width=55),
         'work_date':           st.column_config.DateColumn('Date'),
@@ -623,12 +629,15 @@ def _labor_tab(project_id: int):
         'worker':              st.column_config.TextColumn('Worker'),
         'employee_level':      st.column_config.TextColumn('Level'),
         'man_days':            st.column_config.NumberColumn('Days', format="%.1f"),
-        'daily_rate':          st.column_config.NumberColumn('Rate', format="%.0f"),
-        'amount':              st.column_config.NumberColumn('Amount', format="%.0f"),
+        'daily_rate_fmt':      st.column_config.TextColumn('Rate'),
+        'amount_fmt':          st.column_config.TextColumn('Amount'),
         'is_on_site':          st.column_config.CheckboxColumn('On-site'),
         'presales_allocation': st.column_config.TextColumn('Pre-sales'),
         'approval_status':     st.column_config.TextColumn('Status'),
         'description':         st.column_config.TextColumn('Description'),
+        # hide raw columns
+        'daily_rate':          None,
+        'amount':              None,
     }
     if has_att:
         display_df.insert(0, '📎', display_df['attachment_filename'].apply(lambda x: '📎' if x else ''))
@@ -691,19 +700,28 @@ def _expense_tab(project_id: int):
 
     has_att    = 'attachment_filename' in exp_df.columns
     display_df = exp_df.copy()
+    display_df['amount_fmt'] = display_df['amount'].apply(
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+    )
+    display_df['amount_vnd_fmt'] = display_df['amount_vnd'].apply(
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+    )
     col_config = {
         'id':              st.column_config.NumberColumn('ID', width=55),
         'expense_date':    st.column_config.DateColumn('Date'),
         'category':        st.column_config.TextColumn('Category'),
         'phase':           st.column_config.TextColumn('Phase'),
         'employee_name':   st.column_config.TextColumn('Employee'),
-        'amount':          st.column_config.NumberColumn('Amount', format="%.0f"),
+        'amount_fmt':      st.column_config.TextColumn('Amount'),
         'currency':        st.column_config.TextColumn('CCY', width=50),
-        'amount_vnd':      st.column_config.NumberColumn('VND', format="%.0f"),
+        'amount_vnd_fmt':  st.column_config.TextColumn('VND'),
         'vendor_name':     st.column_config.TextColumn('Vendor'),
         'receipt_number':  st.column_config.TextColumn('Receipt#'),
         'approval_status': st.column_config.TextColumn('Status'),
         'description':     st.column_config.TextColumn('Description'),
+        # hide raw columns
+        'amount':          None,
+        'amount_vnd':      None,
     }
     if has_att:
         display_df.insert(0, '📎', display_df['attachment_filename'].apply(lambda x: '📎' if x else ''))
@@ -758,22 +776,31 @@ def _presales_tab(project_id: int):
         pk3.metric("Layer 2 → COGS",  fmt_vnd(l2_cogs))
 
         display_df = ps_df.copy()
+        display_df['amount_fmt'] = display_df['amount'].apply(
+            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+        )
+        display_df['amount_vnd_fmt'] = display_df['amount_vnd'].apply(
+            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+        )
         display_df.insert(0, '●', display_df['allocation'].map(
             lambda a: {'SGA': '🔵', 'COGS': '🟢', 'PENDING': '⚪'}.get(a, '⚪')
         ))
         st.dataframe(
             display_df, width="stretch", hide_index=True,
             column_config={
-                '●':           st.column_config.TextColumn('', width=30),
-                'cost_layer':  st.column_config.TextColumn('Layer'),
-                'category':    st.column_config.TextColumn('Category'),
-                'worker':      st.column_config.TextColumn('Worker'),
-                'amount':      st.column_config.NumberColumn('Amount', format="%.0f"),
-                'currency':    st.column_config.TextColumn('CCY', width=50),
-                'amount_vnd':  st.column_config.NumberColumn('VND', format="%.0f"),
-                'man_days':    st.column_config.NumberColumn('Man-Days', format="%.1f"),
-                'allocation':  st.column_config.TextColumn('Allocation'),
-                'description': st.column_config.TextColumn('Description'),
+                '●':             st.column_config.TextColumn('', width=30),
+                'cost_layer':    st.column_config.TextColumn('Layer'),
+                'category':      st.column_config.TextColumn('Category'),
+                'worker':        st.column_config.TextColumn('Worker'),
+                'amount_fmt':    st.column_config.TextColumn('Amount'),
+                'currency':      st.column_config.TextColumn('CCY', width=50),
+                'amount_vnd_fmt':st.column_config.TextColumn('VND'),
+                'man_days':      st.column_config.NumberColumn('Man-Days', format="%.1f"),
+                'allocation':    st.column_config.TextColumn('Allocation'),
+                'description':   st.column_config.TextColumn('Description'),
+                # hide raw columns
+                'amount':        None,
+                'amount_vnd':    None,
             },
         )
     else:

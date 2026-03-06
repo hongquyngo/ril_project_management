@@ -406,6 +406,13 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
     ]].copy()
     display_df.insert(0, '●', display_df['status'].map(lambda s: STATUS_COLORS.get(s, '⚪')))
 
+    # Format numbers as display strings — handles None/NaN gracefully
+    display_df['contract_value_fmt'] = display_df['effective_contract_value'].apply(
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
+    )
+    display_df['est_gp_fmt'] = display_df['estimated_gp_percent'].apply(fmt_percent)
+    display_df['act_gp_fmt'] = display_df['actual_gp_percent'].apply(fmt_percent)
+
     event = st.dataframe(
         display_df,
         key=f"proj_table_{st.session_state.get('_df_key', 0)}",
@@ -421,12 +428,16 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
             'customer_name':            st.column_config.TextColumn('Customer'),
             'status':                   st.column_config.TextColumn('Status'),
             'pm_name':                  st.column_config.TextColumn('PM'),
-            'effective_contract_value': st.column_config.NumberColumn('Contract Value', format="%.0f"),
+            'contract_value_fmt':       st.column_config.TextColumn('Contract Value'),
             'currency_code':            st.column_config.TextColumn('CCY', width=50),
-            'estimated_gp_percent':     st.column_config.NumberColumn('Est. GP%', format="%.1f%%"),
-            'actual_gp_percent':        st.column_config.NumberColumn('Act. GP%', format="%.1f%%"),
+            'est_gp_fmt':               st.column_config.TextColumn('Est. GP%', width=90),
+            'act_gp_fmt':               st.column_config.TextColumn('Act. GP%', width=90),
             'estimated_start_date':     st.column_config.DateColumn('Start'),
             'estimated_end_date':       st.column_config.DateColumn('End'),
+            # Hide raw numeric columns
+            'effective_contract_value': None,
+            'estimated_gp_percent':     None,
+            'actual_gp_percent':        None,
         },
     )
 
