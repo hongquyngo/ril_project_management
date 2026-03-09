@@ -79,6 +79,9 @@ def _remove_item(idx):
     if 0 <= idx < len(st.session_state["_est_items"]):
         st.session_state["_est_items"].pop(idx)
 def _clear_items(): st.session_state["_est_items"] = []
+def _update_item(idx, item):
+    if 0 <= idx < len(st.session_state["_est_items"]):
+        st.session_state["_est_items"][idx] = item
 def _items_total(cat=None):
     items = st.session_state["_est_items"]
     if cat: items = [i for i in items if i.get('cogs_category') == cat]
@@ -89,12 +92,11 @@ def _items_sell_total():
 # ── Dialog: Add Product ──────────────────────────────────────────────────────
 @st.dialog("🔍 Add Product from Catalog", width="large")
 def _dialog_add_product(category):
-    search = st.text_input("🔍 Search product", key="prod_search", placeholder="AMR, charging, rack...")
     is_svc = category == 'SERVICE'
-    products = search_products(search, is_service=is_svc if is_svc else None, limit=30)
+    products = search_products('', is_service=is_svc if is_svc else None, limit=99999)
     if not products: st.info("No products found."); return
     prod_opts = [f"{p['pt_code']} — {p['name']} [{p.get('brand_name','')}]" for p in products]
-    sel_prod = st.selectbox("Select Product", prod_opts)
+    sel_prod = st.selectbox("🔍 Select Product", prod_opts)
     product = products[prod_opts.index(sel_prod)]
     st.caption(f"UOM: {product.get('uom','—')} | Brand: {product.get('brand_name','—')}")
     st.divider()
@@ -124,7 +126,11 @@ def _dialog_add_product(category):
     cost_rate = qc2.number_input(f"Cost Rate ({cost_cur}→VND)", value=default_rate, format="%.2f")
     sell_price = float(sel_qd['selling_unit_price'] if sel_qd else 0)
     sell_cur = sel_qd['currency_code'] if sel_qd else 'VND'
-    sell_rate = qc3.number_input(f"Sell Rate ({sell_cur}→VND)", value=default_rate, format="%.2f")
+    sell_default_rate = 1.0
+    if sel_qd:
+        r_sell = get_rate_to_vnd(sell_cur)
+        sell_default_rate = r_sell.rate if r_sell.ok else 1.0
+    sell_rate = qc3.number_input(f"Sell Rate ({sell_cur}→VND)", value=sell_default_rate, format="%.2f")
     if not cb:
         mc1, mc2 = st.columns(2)
         cost_price = mc1.number_input("Manual Cost", value=0.0, format="%.2f")
@@ -195,6 +201,65 @@ def _dialog_import_costbook(category):
                 'quantity': 1, 'uom': p.get('uom','Pcs'), 'notes': None})
         st.success(f"✅ Imported {len(products)} items!"); st.rerun()
 
+# ── Dialog: Edit Line Item ───────────────────────────────────────────────────
+@st.dialog("✏️ Edit Line Item", width="large")
+def _dialog_edit_item(idx):
+    items = st.session_state["_est_items"]
+    if idx < 0 or idx >= len(items):
+        st.error("Item not found."); return
+    it = items[idx].copy()
+
+    st.markdown(f"**{it.get('item_description', '—')}**")
+    if it.get('pt_code'):
+        st.caption(f"Code: {it['pt_code']} | Brand: {it.get('brand_name', '—')}")
+
+    ec1, ec2 = st.columns(2)
+    cat_opts = ['A', 'C', 'SERVICE']
+    cat_idx = cat_opts.index(it.get('cogs_category', 'A')) if it.get('cogs_category') in cat_opts else 0
+    new_cat = ec1.selectbox("Category", cat_opts, index=cat_idx, key="edit_cat")
+    new_desc = ec2.text_input("Description", value=it.get('item_description', ''), key="edit_desc")
+
+    eq1, eq2, eq3 = st.columns(3)
+    new_qty = eq1.number_input("Quantity", value=float(it.get('quantity', 1)), min_value=0.01, format="%.2f", key="edit_qty")
+    new_cost = eq2.number_input("Unit Cost", value=float(it.get('unit_cost', 0)), format="%.2f", key="edit_cost")
+    new_ccy = eq3.text_input("Cost Currency", value=it.get('cost_currency_code', 'VND'), key="edit_ccy")
+
+    er1, er2 = st.columns(2)
+    new_cost_rate = er1.number_input("Cost Rate (→VND)", value=float(it.get('cost_exchange_rate', 1)), format="%.2f", key="edit_cost_rate")
+    new_vendor = er2.text_input("Vendor", value=it.get('vendor_name', '') or '', key="edit_vendor")
+
+    st.divider()
+    es1, es2 = st.columns(2)
+    new_sell = es1.number_input("Unit Sell", value=float(it.get('unit_sell', 0)), format="%.2f", key="edit_sell")
+    new_sell_rate = es2.number_input("Sell Rate (→VND)", value=float(it.get('sell_exchange_rate', 1)), format="%.2f", key="edit_sell_rate")
+
+    new_notes = st.text_input("Notes", value=it.get('notes', '') or '', key="edit_notes")
+
+    cost_vnd = new_qty * new_cost * new_cost_rate
+    sell_vnd = new_qty * new_sell * new_sell_rate
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Cost VND", fmt_vnd(cost_vnd))
+    mc2.metric("Sell VND", fmt_vnd(sell_vnd) if sell_vnd > 0 else '—')
+    mc3.metric("Item GP%", f"{(sell_vnd - cost_vnd) / sell_vnd * 100:.1f}%" if sell_vnd > 0 else '—')
+
+    bc1, bc2 = st.columns(2)
+    if bc1.button("💾 Save Changes", type="primary", use_container_width=True, key="edit_save"):
+        it['cogs_category'] = new_cat
+        it['item_description'] = new_desc
+        it['quantity'] = new_qty
+        it['unit_cost'] = new_cost
+        it['cost_currency_code'] = new_ccy
+        it['cost_exchange_rate'] = new_cost_rate
+        it['vendor_name'] = new_vendor
+        it['unit_sell'] = new_sell
+        it['sell_exchange_rate'] = new_sell_rate
+        it['notes'] = new_notes or None
+        _update_item(idx, it)
+        st.success("✅ Updated!")
+        st.rerun()
+    if bc2.button("✖ Cancel", use_container_width=True, key="edit_cancel"):
+        st.rerun()
+
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 tab_new, tab_active, tab_history = st.tabs(["📝 New Estimate", "✅ Active Estimate", "🗂 History"])
 
@@ -237,10 +302,12 @@ with tab_new:
                     'Cat': st.column_config.TextColumn('', width=30), 'Qty': st.column_config.NumberColumn('Qty', format="%.1f", width=55)})
             sel = event.selection.rows
             if sel:
-                sc1, sc2 = st.columns(2)
-                if sc1.button("🗑 Remove", use_container_width=True):
+                sc1, sc2, sc3 = st.columns(3)
+                if sc1.button("✏️ Edit", type="primary", use_container_width=True):
+                    _dialog_edit_item(sel[0])
+                if sc2.button("🗑 Remove", use_container_width=True):
                     _remove_item(sel[0]); st.session_state["_li_key"] = st.session_state.get("_li_key",0)+1; st.rerun()
-                if sc2.button("✖ Deselect", use_container_width=True):
+                if sc3.button("✖ Deselect", use_container_width=True):
                     st.session_state["_li_key"] = st.session_state.get("_li_key",0)+1; st.rerun()
             a_total = _items_total('A'); c_total = _items_total('C')
             st.markdown(f"**A: {a_total:,.0f}** | **C: {c_total:,.0f}** | **Sell: {_items_sell_total():,.0f}**")
