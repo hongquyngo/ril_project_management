@@ -267,18 +267,12 @@ def _dialog_view_project(project_id: int):
         return
 
     # Header
-    hcol1, hcol2, hcol3 = st.columns([4, 1, 1])
+    hcol1, hcol2 = st.columns([5, 1])
     hcol1.subheader(f"{STATUS_COLORS.get(proj['status'], '⚪')} {proj['project_code']} — {proj['project_name']}")
 
-    if hcol2.button("✏️ Edit", width="stretch", type="primary"):
+    if hcol2.button("✏️ Edit", use_container_width=True, type="primary"):
         st.session_state["open_edit_pid"] = project_id
         st.rerun()
-
-    if is_admin and hcol3.button("🗑 Delete", width="stretch"):
-        if soft_delete_project(project_id, user_id):
-            st.success("Project deleted.")
-            st.cache_data.clear()
-            st.rerun()
 
     # KPIs
     m1, m2, m3, m4 = st.columns(4)
@@ -370,11 +364,11 @@ def _milestone_panel(project_id: int, proj: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FRAGMENT — Project table
+# PROJECT TABLE + ACTION BAR (no @st.fragment — avoids dialog timing issues)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.fragment
-def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
+def _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search):
+    """Render project table. Returns selected project_id or None."""
     df = get_projects_df(
         status=status_filter,
         type_id=type_filter_id,
@@ -395,7 +389,7 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
 
     if df.empty:
         st.info("No projects found.")
-        return
+        return None
 
     display_df = df[[
         'project_code', 'project_name', 'project_type', 'customer_name',
@@ -406,7 +400,6 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
     ]].copy()
     display_df.insert(0, '●', display_df['status'].map(lambda s: STATUS_COLORS.get(s, '⚪')))
 
-    # Format numbers as display strings — handles None/NaN gracefully
     display_df['contract_value_fmt'] = display_df['effective_contract_value'].apply(
         lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
     )
@@ -415,7 +408,7 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
 
     event = st.dataframe(
         display_df,
-        key=f"proj_table_{st.session_state.get('_df_key', 0)}",
+        key="proj_table",
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -434,7 +427,6 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
             'act_gp_fmt':               st.column_config.TextColumn('Act. GP%', width=90),
             'estimated_start_date':     st.column_config.DateColumn('Start'),
             'estimated_end_date':       st.column_config.DateColumn('End'),
-            # Hide raw numeric columns
             'effective_contract_value': None,
             'estimated_gp_percent':     None,
             'actual_gp_percent':        None,
@@ -443,15 +435,8 @@ def _project_table(status_filter, type_filter_id, pm_filter_id, f_search):
 
     sel = event.selection.rows
     if sel:
-        pid = int(df.iloc[sel[0]]['project_id'])
-        # FIX: _last_dialog_pid PHẢI set tại đây (trong fragment), TRƯỚC st.rerun().
-        # Fragment chạy TRƯỚC page-level code nên nếu set ở page level thì fragment
-        # luôn thấy giá trị cũ → guard vô tác dụng → infinite loop.
-        if st.session_state.get("_last_dialog_pid") != pid:
-            st.session_state["_last_dialog_pid"] = pid
-            st.session_state["_df_key"] = st.session_state.get("_df_key", 0) + 1
-            st.session_state["open_view_pid"] = pid
-            st.rerun()
+        return int(df.iloc[sel[0]]['project_id'])
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -487,12 +472,33 @@ if f_pm != "All":
     hit  = next((e for e in employees if e['full_name'] == f_pm), None)
     pm_filter_id = hit['id'] if hit else None
 
-# ── Project table (fragment) ──────────────────────────────────────────────────
-_project_table(status_filter, type_filter_id, pm_filter_id, f_search)
+# ── Project table ─────────────────────────────────────────────────────────────
+selected_pid = _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search)
 
-# ── Dialog triggers ───────────────────────────────────────────────────────────
+# ── Action bar (shown when row selected) ─────────────────────────────────────
+if selected_pid:
+    proj_info = get_project(selected_pid)
+    if proj_info:
+        st.markdown(
+            f"**Selected:** `{proj_info['project_code']}` — {proj_info['project_name']} "
+            f"({STATUS_COLORS.get(proj_info['status'], '⚪')} {proj_info['status']})"
+        )
+        ab1, ab2, ab3, _ = st.columns([1, 1, 1, 4])
+        if ab1.button("👁️ View", type="primary", use_container_width=True):
+            st.session_state["open_view_pid"] = selected_pid
+            st.rerun()
+        if ab2.button("✏️ Edit", use_container_width=True):
+            st.session_state["open_edit_pid"] = selected_pid
+            st.rerun()
+        if is_admin:
+            if ab3.button("🗑 Delete", use_container_width=True):
+                if soft_delete_project(selected_pid, user_id):
+                    st.success("Project deleted.")
+                    st.cache_data.clear()
+                    st.rerun()
+
+# ── Dialog triggers (only via explicit button click) ──────────────────────────
 if st.session_state.pop("open_create", False):
-    st.session_state.pop("_last_dialog_pid", None)
     _dialog_create_project()
 
 if "open_view_pid" in st.session_state:

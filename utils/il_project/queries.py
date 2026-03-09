@@ -520,6 +520,7 @@ def update_expense(expense_id: int, data: Dict, modified_by: str) -> bool:
     sql = """
         UPDATE il_project_expenses SET
             expense_date = :expense_date, category = :category, phase = :phase,
+            employee_id = :employee_id,
             amount = :amount, currency_id = :currency_id, exchange_rate = :exchange_rate,
             amount_vnd = :amount_vnd,
             description = :description, vendor_name = :vendor_name, receipt_number = :receipt_number,
