@@ -87,20 +87,23 @@ SOP_STEPS = {
         ("5", "Dùng Date Range filter để xem cost theo tháng / quý", "Tick 'Filter by date range' ở sidebar"),
     ],
     "🔄 Sync COGS Actual": [
-        ("1", "Đảm bảo tất cả Labor Logs & Expenses đã được Approve", "Log/Expense PENDING bị bỏ qua hoàn toàn"),
-        ("2", "Nhập thủ công A, B, C (nếu đã có hóa đơn từ supplier/forwarder)", "B bao gồm: freight + thuế nhập khẩu + phí thông quan"),
-        ("3", "Nhấn 🔄 Sync COGS Actual", "D và E tự tổng hợp từ approved records"),
-        ("4", "Kiểm tra actual_gp_percent so với estimated_gp_percent", "Lệch >5%: phân tích nguyên nhân ngay"),
-        ("5", "KHÔNG Finalize cho đến khi dự án 100% kết thúc", "Finalize = khóa vĩnh viễn"),
+        ("1", "Vào COGS Dashboard → Sidebar chọn Project cụ thể", "Mặc định 'All Projects' hiện portfolio overview — chọn project để vào chi tiết"),
+        ("2", "Đảm bảo tất cả Labor Logs & Expenses đã được Approve", "Log/Expense PENDING bị bỏ qua hoàn toàn"),
+        ("3", "Nhập thủ công A, B, C: nhấn ✏️ Manual Entry (A/B/C/F)", "B bao gồm: freight + thuế nhập khẩu + phí thông quan"),
+        ("4", "Nhấn 🔄 Sync from Timesheets & Expenses", "D và E tự tổng hợp từ approved records. A/B/C/F giữ nguyên"),
+        ("5", "Kiểm tra **Budget progress bar**: Actual / Estimated COGS", "⚠️ >90%: cảnh báo vàng | 🔴 >100%: over budget"),
+        ("6", "Xem GP comparison: Est GP% vs Act GP% (có delta)", "Lệch >5%: cần phân tích nguyên nhân"),
+        ("7", "KHÔNG Finalize cho đến khi dự án 100% kết thúc", "Finalize = khóa vĩnh viễn, không thể hoàn tác"),
     ],
     "✅ Đóng dự án & Benchmark": [
-        ("1", "Đảm bảo tất cả Labor Logs & Expenses cuối cùng đã Approve", ""),
+        ("1", "Đảm bảo tất cả Labor Logs & Expenses cuối cùng đã Approve", "Vào Cost Tracking → All Projects → Pending Approvals để kiểm tra"),
         ("2", "Nhập đủ A, B, C, F vào COGS Actual", "F: điền f_warranty_actual_used sau khi hết thời gian bảo hành"),
-        ("3", "Sync COGS Actual lần cuối", ""),
-        ("4", "Điền Variance: root_cause và corrective_action cho khoản lệch >5%", ""),
-        ("5", "Finalize COGS Actual", "Không thể hoàn tác sau bước này"),
-        ("6", "Chuyển Status dự án → CLOSED", ""),
-        ("7", "Tạo Benchmark: điền hệ số thực tế α/β/γ và lessons learned", "Benchmark giúp cải thiện estimate cho dự án tương lai"),
+        ("3", "Sync COGS Actual lần cuối", "Kiểm tra budget bar = final consumption %"),
+        ("4", "Tab Variance: nhấn ⚡ Generate All Variance", "Auto-tạo 7 rows (A–F + TOTAL) từ Estimate vs Actual"),
+        ("5", "Bổ sung Root Cause + Corrective Action cho khoản lệch >5%", "Hệ thống highlight categories cần nhập Root Cause"),
+        ("6", "Finalize COGS Actual", "Không thể hoàn tác sau bước này"),
+        ("7", "Chuyển Status dự án → CLOSED", ""),
+        ("8", "Tab Benchmarks: nhấn ➕ Add → hệ thống auto-fill α/β/γ + man-days + GP%", "Chỉ cần nhập Lessons Learned, Key Risks, Recommendations"),
     ],
 }
 
@@ -327,7 +330,67 @@ QA_DATA = [
             "**Cách 2**: Tick vào dòng khác để thay đổi selection.",
             "**Action bar** hiện ra khi có dòng được chọn: gồm các nút Edit / Approve / Deselect.",
         ],
-        "note": "Pattern áp dụng cho cả trang Projects, Labor Logs, và Expenses.",
+        "note": "Pattern áp dụng cho cả trang Projects, Labor Logs, Expenses, và Variance.",
+        "warning": "",
+    },
+    {
+        "id": "Q17",
+        "tags": ["COGS", "portfolio", "dashboard", "overview"],
+        "question": "Làm sao xem tổng quan sức khỏe COGS tất cả dự án cùng lúc?",
+        "situation": "Director muốn biết dự án nào đang over budget, dự án nào chưa sync, GP% portfolio đang bao nhiêu.",
+        "sop": [
+            "**Vào COGS Dashboard** → để Project = **'All Projects'** (mặc định).",
+            "**4 KPIs**: Avg Est GP%, Avg Act GP%, Projects Synced, Not Synced.",
+            "**Bảng Portfolio Health**: mỗi dự án 1 dòng — Est COGS, Act COGS, Variance%, Budget%, GP%, Finalized.",
+            "**Health indicator**: 🟢 variance ≤5%, 🟡 5–10%, 🔴 >10%, ⚪ chưa có data.",
+            "**Filter Status** ở sidebar: chỉ xem IN_PROGRESS, COMPLETED, hoặc All.",
+        ],
+        "note": "Dự án 🔴 (variance >10%) cần kiểm tra nguyên nhân ngay — vào project đó → tab Variance.",
+        "warning": "",
+    },
+    {
+        "id": "Q18",
+        "tags": ["variance", "generate", "COGS", "root cause"],
+        "question": "Dự án vừa COMPLETED, cần làm Variance Analysis nhưng có 7 khoản phải nhập, có cách nhanh hơn không?",
+        "situation": "Dự án xong, đã Sync COGS, cần điền Variance cho A–F + TOTAL trước khi Finalize.",
+        "sop": [
+            "**Tab Variance → nhấn ⚡ Generate All Variance**.",
+            "Hệ thống tự tạo/cập nhật **7 rows** (A, B, C, D, E, F, TOTAL) từ Estimate vs COGS Actual.",
+            "Estimated Amount, Actual Amount, Variance%, Impact — tất cả auto-fill.",
+            "**Bổ sung Root Cause + Corrective Action** cho khoản có variance >5% (hệ thống highlight bằng ⚠️).",
+            "Tick chọn dòng → nhấn ✏️ Edit Variance để nhập Root Cause.",
+        ],
+        "note": "Nếu đã Generate trước đó, nhấn lại sẽ **cập nhật** (upsert) — không tạo trùng. An toàn nhấn nhiều lần.",
+        "warning": "",
+    },
+    {
+        "id": "Q19",
+        "tags": ["benchmark", "auto-fill", "hệ số", "α", "β", "γ"],
+        "question": "Tạo Benchmark cho dự án vừa đóng, phải nhập nhiều hệ số α/β/γ quá, có cách tự điền không?",
+        "situation": "Dự án CLOSED, cần tạo Benchmark để lưu trữ kinh nghiệm cho dự án tương lai.",
+        "sop": [
+            "**Tab Benchmarks → nhấn ➕ Add** — hệ thống **auto-fill** toàn bộ.",
+            "**Project Type + Source Project**: tự chọn theo project hiện tại.",
+            "**α/β/γ Used**: lấy từ Estimate (alpha_rate, beta_rate, gamma_rate).",
+            "**α/β/γ Actual**: tính từ COGS Actual (B/A, E/D, F/(A+C)).",
+            "**Man-Days Est/Act, GP% Est/Act**: lấy từ Estimate + COGS Actual.",
+            "**Chỉ cần nhập**: Lessons Learned, Key Risk Factors, Recommendations.",
+        ],
+        "note": "Hệ số Recommended mặc định = Actual (người dùng có thể chỉnh). Benchmark giúp cải thiện default coefficients cho dự án tương lai cùng type.",
+        "warning": "",
+    },
+    {
+        "id": "Q20",
+        "tags": ["budget", "over budget", "progress", "COGS"],
+        "question": "Làm sao biết dự án đang tiêu bao nhiêu % ngân sách COGS?",
+        "situation": "Dự án đang IN_PROGRESS, muốn biết chi phí thực tế đã dùng bao nhiêu so với estimate.",
+        "sop": [
+            "**Vào COGS Dashboard → chọn project → tab Actual COGS**.",
+            "**Budget progress bar** hiện ngay trên bảng: Actual COGS / Estimated COGS × 100%.",
+            "🟢 < 90%: còn dư | ⚠️ 90–100%: gần hết | 🔴 > 100%: over budget.",
+            "**Xem nhanh nhiều dự án**: để Project = 'All Projects' → cột Budget% trong bảng portfolio.",
+        ],
+        "note": "Budget bar chỉ hiện khi có cả Estimate (active) VÀ COGS Actual đã Sync. Chưa Sync = chưa có data actual.",
         "warning": "",
     },
 ]
@@ -492,10 +555,19 @@ with tab_sop:
         col_a.warning("**D (tự động)** = Tổng Labor Logs APPROVED\n- Phase ≠ PRE_SALES: vào D-direct\n- Phase = PRE_SALES + allocation COGS: vào D-presales")
         col_b.warning("**E (tự động)** = Tổng Expenses APPROVED\n- Phase ≠ PRE_SALES và ≠ WARRANTY: vào E-travel\n- Pre-sales costs Layer 2 allocation COGS: vào E-presales")
         st.info("**⚠️ E-presales chỉ tính các category:** DEMO_TRANSPORT, TRAVEL_SPECIAL, POC_EXECUTION, WIFI_SURVEY, ENGINEERING_STUDY, CUSTOM_SAMPLE, OTHER.\n\nCác category **PROTOTYPE** và **CUSTOM_DEMO** (dù là SPECIAL/COGS) **không** được đưa vào E-presales khi Sync.")
+        st.divider()
+        bg1, bg2, bg3 = st.columns(3)
+        bg1.success("🟢 **Budget < 90%**\nCòn dư ngân sách")
+        bg2.warning("🟡 **Budget 90–100%**\nGần hết ngân sách")
+        bg3.error("🔴 **Budget > 100%**\nVượt ngân sách!")
 
     elif sop_choice == "✅ Đóng dự án & Benchmark":
         st.divider()
-        st.success("**Thứ tự các bước QUAN TRỌNG:** Approve hết → Sync COGS → Điền Variance → **Finalize** → Close → Benchmark. Không thể đảo thứ tự sau bước Finalize.")
+        st.success("**Thứ tự các bước QUAN TRỌNG:** Approve hết → Sync COGS → **⚡ Generate All Variance** → Điền Root Cause → **Finalize** → Close → **Benchmark (auto-fill)**. Không thể đảo thứ tự sau bước Finalize.")
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**⚡ Generate All Variance**\n\n1 click tạo 7 rows (A–F + TOTAL).\nAuto-fill Estimated & Actual từ data.\nChỉ cần bổ sung Root Cause cho khoản lệch >5%.")
+        col_b.info("**📚 Auto-fill Benchmark**\n\nNhấn ➕ Add → hệ thống tự điền:\n- α/β/γ Used (từ Estimate)\n- α/β/γ Actual (tính từ COGS Actual)\n- Man-days Est/Act, GP% Est/Act\n\nChỉ cần nhập Lessons Learned.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
