@@ -360,13 +360,16 @@ def update_estimate(estimate_id: int, data: Dict, modified_by: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_labor_logs_df(
-    project_id: int,
+    project_id: Optional[int] = None,
     phase: Optional[str] = None,
     approval_status: Optional[str] = None,
+    date_from=None,
+    date_to=None,
 ) -> pd.DataFrame:
     sql = """
         SELECT
-            ll.id, ll.work_date, ll.phase,
+            ll.id, ll.project_id, p.project_code,
+            ll.work_date, ll.phase,
             COALESCE(CONCAT(e.first_name,' ',e.last_name), ll.subcontractor_name) AS worker,
             ll.employee_level, ll.is_on_site,
             ll.man_days, ll.daily_rate, ll.amount,
@@ -376,15 +379,25 @@ def get_labor_logs_df(
         FROM il_project_labor_logs ll
         LEFT JOIN employees e  ON ll.employee_id  = e.id
         LEFT JOIN employees ap ON ll.approved_by  = ap.id
-        WHERE ll.project_id = :pid AND ll.delete_flag = 0
+        LEFT JOIN il_projects p ON ll.project_id = p.id
+        WHERE ll.delete_flag = 0
     """
-    params: Dict = {'pid': project_id}
+    params: Dict = {}
+    if project_id:
+        sql += " AND ll.project_id = :pid"
+        params['pid'] = project_id
     if phase:
         sql += " AND ll.phase = :phase"
         params['phase'] = phase
     if approval_status:
         sql += " AND ll.approval_status = :as_"
         params['as_'] = approval_status
+    if date_from:
+        sql += " AND ll.work_date >= :date_from"
+        params['date_from'] = date_from
+    if date_to:
+        sql += " AND ll.work_date <= :date_to"
+        params['date_to'] = date_to
     sql += " ORDER BY ll.work_date DESC, ll.created_date DESC"
     return execute_query_df(sql, params)
 
@@ -447,13 +460,16 @@ def soft_delete_labor_log(log_id: int, modified_by: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_expenses_df(
-    project_id: int,
+    project_id: Optional[int] = None,
     phase: Optional[str] = None,
     approval_status: Optional[str] = None,
+    date_from=None,
+    date_to=None,
 ) -> pd.DataFrame:
     sql = """
         SELECT
-            ex.id, ex.expense_date, ex.category, ex.phase,
+            ex.id, ex.project_id, p.project_code,
+            ex.expense_date, ex.category, ex.phase,
             CONCAT(e.first_name,' ',e.last_name) AS employee_name,
             ex.amount, cur.code AS currency, ex.exchange_rate, ex.amount_vnd,
             ex.description, ex.vendor_name, ex.receipt_number,
@@ -463,15 +479,25 @@ def get_expenses_df(
         LEFT JOIN employees  e  ON ex.employee_id  = e.id
         LEFT JOIN employees  ap ON ex.approved_by  = ap.id
         LEFT JOIN currencies cur ON ex.currency_id = cur.id
-        WHERE ex.project_id = :pid AND ex.delete_flag = 0
+        LEFT JOIN il_projects p  ON ex.project_id  = p.id
+        WHERE ex.delete_flag = 0
     """
-    params: Dict = {'pid': project_id}
+    params: Dict = {}
+    if project_id:
+        sql += " AND ex.project_id = :pid"
+        params['pid'] = project_id
     if phase:
         sql += " AND ex.phase = :phase"
         params['phase'] = phase
     if approval_status:
         sql += " AND ex.approval_status = :as_"
         params['as_'] = approval_status
+    if date_from:
+        sql += " AND ex.expense_date >= :date_from"
+        params['date_from'] = date_from
+    if date_to:
+        sql += " AND ex.expense_date <= :date_to"
+        params['date_to'] = date_to
     sql += " ORDER BY ex.expense_date DESC"
     return execute_query_df(sql, params)
 

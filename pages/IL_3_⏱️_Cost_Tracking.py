@@ -1,7 +1,13 @@
 # pages/IL_3_⏱️_Cost_Tracking.py
 """
 Cost Tracking — Labor Logs / Expenses / Pre-sales Costs
-UX: @st.dialog for CRUD forms | @st.fragment for tables | S3 for document attachments
+
+Redesigned:
+  - Sidebar: Project (All default), date range, phase, approval filters
+  - "All Projects" → Overview dashboard with cross-project KPIs + pending approvals
+  - Specific project → 3 tabs (Labor / Expenses / Pre-sales)
+  - No @st.fragment — action bar pattern for stability
+  - Deselect button on every table
 """
 
 import streamlit as st
@@ -47,7 +53,7 @@ emp_map = {e['id']: e['full_name'] for e in employees}
 cur_map = {c['id']: c['code'] for c in currencies}
 
 
-# ── S3 (cached per session, lazy init) ───────────────────────────────────────
+# ── S3 (cached per session) ──────────────────────────────────────────────────
 @st.cache_resource
 def _get_s3():
     try:
@@ -57,65 +63,78 @@ def _get_s3():
         return None
 
 
-# ── Vendor selector helper ─────────────────────────────────────────────────────
-
+# ── Vendor selector helper ────────────────────────────────────────────────────
 def _vendor_selector(col, current_name: str = "", key_suffix: str = "") -> str:
-    """
-    Dropdown vendor từ companies table (type=Vendor).
-    Option '— Enter manually —' cho vendor/cá nhân không có trong hệ thống.
-    Returns vendor name string.
-    """
     vendor_names = [v['name'] for v in vendors]
     options = ["(None)"] + vendor_names + ["— Enter manually —"]
-
     if current_name in vendor_names:
         default_idx = options.index(current_name)
     elif current_name:
         default_idx = options.index("— Enter manually —")
     else:
         default_idx = 0
-
-    sel = col.selectbox(
-        "Vendor",
-        options,
-        index=default_idx,
-        key=f"vendor_sel_{key_suffix}",
-        help="Chọn từ danh sách Vendor trong hệ thống, hoặc nhập thủ công",
-    )
-
+    sel = col.selectbox("Vendor", options, index=default_idx, key=f"vendor_sel_{key_suffix}",
+                        help="Chọn từ danh sách Vendor, hoặc nhập thủ công")
     if sel == "— Enter manually —":
-        return st.text_input(
-            "Vendor Name (manual)",
-            value=current_name if current_name not in vendor_names else "",
-            key=f"vendor_manual_{key_suffix}",
-            placeholder="Tên vendor / cá nhân tự do",
-        )
+        return st.text_input("Vendor Name (manual)",
+                             value=current_name if current_name not in vendor_names else "",
+                             key=f"vendor_manual_{key_suffix}", placeholder="Tên vendor / cá nhân tự do")
     elif sel == "(None)":
         return ""
-    else:
-        return sel
+    return sel
 
 
-# ── Page header ───────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE HEADER + SIDEBAR FILTERS
+# ══════════════════════════════════════════════════════════════════════════════
+
 st.title("⏱️ Cost Tracking")
 
 if proj_df.empty:
     st.warning("No projects found.")
     st.stop()
 
-proj_options = [f"{r.project_code} — {r.project_name}" for r in proj_df.itertuples()]
-sel_label    = st.selectbox("Select Project", proj_options)
-project_id   = int(proj_df.iloc[proj_options.index(sel_label)]['project_id'])
-project      = get_project(project_id)
-if not project:
-    st.error("Project not found.")
-    st.stop()
+with st.sidebar:
+    st.header("Filters")
 
-st.caption(
-    f"**{project['project_code']}** | "
-    f"{project.get('customer_name') or project.get('end_customer_name', '—')} | "
-    f"Status: **{project['status']}**"
-)
+    # ── Project selector (All Projects default) ──
+    proj_options = ["All Projects"] + [f"{r.project_code} — {r.project_name}" for r in proj_df.itertuples()]
+    sel_label = st.selectbox("Project", proj_options, key="ct_project")
+    is_all_projects = sel_label == "All Projects"
+
+    if not is_all_projects:
+        sel_idx = proj_options.index(sel_label) - 1  # offset for "All Projects"
+        project_id = int(proj_df.iloc[sel_idx]['project_id'])
+        project = get_project(project_id)
+    else:
+        project_id = None
+        project = None
+
+    # ── Date range ──
+    use_date = st.checkbox("Filter by date range", value=False)
+    if use_date:
+        d1, d2 = st.columns(2)
+        date_from = d1.date_input("From", value=date.today().replace(day=1))
+        date_to   = d2.date_input("To",   value=date.today())
+    else:
+        date_from = date_to = None
+
+    # ── Phase & Approval ──
+    f_phase  = st.selectbox("Phase",    ["All"] + list(PHASE_LABELS.keys()), key="ct_phase")
+    f_status = st.selectbox("Approval", ["All", "PENDING", "APPROVED", "REJECTED"], key="ct_approval")
+
+    # ── Action buttons (only when specific project selected) ──
+    if not is_all_projects:
+        st.divider()
+        bc1, bc2 = st.columns(2)
+        if bc1.button("➕ Log Labor", type="primary", use_container_width=True):
+            st.session_state["open_add_labor"] = True
+        if bc2.button("➕ Add Expense", type="primary", use_container_width=True):
+            st.session_state["open_add_expense"] = True
+
+# ── Resolve filters ──
+phase_filter    = None if f_phase == "All" else f_phase
+approval_filter = None if f_status == "All" else f_status
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,11 +142,10 @@ st.caption(
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.dialog("👷 Log Labor Entry", width="large")
-def _dialog_add_labor(project_id: int):
+def _dialog_add_labor(pid: int):
     with st.form("labor_add_form", clear_on_submit=True):
         is_subcon = st.checkbox("External / Subcontractor", value=False)
-        la1, la2  = st.columns(2)
-
+        la1, la2 = st.columns(2)
         if not is_subcon:
             emp_opts    = [e['full_name'] for e in employees]
             worker      = la1.selectbox("Employee", emp_opts)
@@ -155,15 +173,10 @@ def _dialog_add_labor(project_id: int):
             presales_alloc = lc3.selectbox("Pre-sales Allocation", ['PENDING', 'SGA', 'COGS'])
 
         description_v = st.text_input("Description")
-
         st.divider()
-        uploaded_file = st.file_uploader(
-            "📎 Attach document (optional)",
-            type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx"],
-            help="Timesheet, confirmation email, or related document",
-        )
-
-        submitted = st.form_submit_button("✅ Save entry", type="primary", width="stretch")
+        uploaded_file = st.file_uploader("📎 Attach document (optional)",
+                                         type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx"])
+        submitted = st.form_submit_button("✅ Save entry", type="primary", use_container_width=True)
 
     if submitted:
         if is_subcon and not subcon_name:
@@ -171,31 +184,21 @@ def _dialog_add_labor(project_id: int):
             return
         try:
             log_id = create_labor_log({
-                'project_id':            project_id,
-                'employee_id':           worker_id,
-                'employee_level':        level_sel or None,
-                'subcontractor_name':    subcon_name,
-                'subcontractor_company': subcon_co,
-                'work_date':             work_date,
-                'man_days':              man_days_v,
-                'daily_rate':            daily_rate_v,
-                'phase':                 phase_sel,
-                'description':           description_v or None,
-                'is_on_site':            1 if is_on_site else 0,
-                'presales_allocation':   presales_alloc,
+                'project_id': pid, 'employee_id': worker_id,
+                'employee_level': level_sel or None,
+                'subcontractor_name': subcon_name, 'subcontractor_company': subcon_co,
+                'work_date': work_date, 'man_days': man_days_v, 'daily_rate': daily_rate_v,
+                'phase': phase_sel, 'description': description_v or None,
+                'is_on_site': 1 if is_on_site else 0, 'presales_allocation': presales_alloc,
             }, user_id)
-
             if uploaded_file and log_id:
                 s3 = _get_s3()
                 if s3:
-                    ok, s3_key = s3.upload_labor_attachment(
-                        uploaded_file.read(), uploaded_file.name, project_id, log_id
-                    )
+                    ok, s3_key = s3.upload_labor_attachment(uploaded_file.read(), uploaded_file.name, pid, log_id)
                     if ok:
                         update_labor_attachment(log_id, s3_key, uploaded_file.name, user_id)
                     else:
                         st.warning(f"Entry saved but file upload failed: {s3_key}")
-
             st.success("✅ Labor entry added!")
             st.rerun()
         except Exception as e:
@@ -203,14 +206,12 @@ def _dialog_add_labor(project_id: int):
 
 
 @st.dialog("👷 Edit Labor Entry", width="large")
-def _dialog_edit_labor(log: dict, project_id: int):
+def _dialog_edit_labor(log: dict, pid: int):
     log_id = log['id']
     with st.form("labor_edit_form"):
         lb1, lb2, lb3 = st.columns(3)
-        work_date    = lb1.date_input(
-            "Work Date",
-            value=pd.to_datetime(log.get('work_date')).date() if log.get('work_date') else date.today(),
-        )
+        work_date    = lb1.date_input("Work Date",
+                        value=pd.to_datetime(log.get('work_date')).date() if log.get('work_date') else date.today())
         man_days_v   = lb2.number_input("Man-Days", value=float(log.get('man_days', 1)),
                                          min_value=0.5, max_value=3.0, step=0.5, format="%.1f")
         daily_rate_v = lb3.number_input("Day Rate (VND)", value=float(log.get('daily_rate', 0)),
@@ -232,21 +233,16 @@ def _dialog_edit_labor(log: dict, project_id: int):
             presales_alloc = st.selectbox("Pre-sales Allocation", alloc_opts, index=alloc_idx)
 
         description_v = st.text_input("Description", value=log.get('description') or '')
-
         col_save, col_del = st.columns(2)
-        save   = col_save.form_submit_button("💾 Update",  type="primary", width="stretch")
-        delete = col_del.form_submit_button("🗑 Delete", width="stretch")
+        save   = col_save.form_submit_button("💾 Update",  type="primary", use_container_width=True)
+        delete = col_del.form_submit_button("🗑 Delete", use_container_width=True)
 
     if save:
         ok = update_labor_log(log_id, {
-            'work_date':           work_date,
-            'man_days':            man_days_v,
-            'daily_rate':          daily_rate_v,
-            'phase':               phase_sel,
-            'description':         description_v or None,
-            'is_on_site':          1 if is_on_site else 0,
-            'employee_level':      level_sel or None,
-            'presales_allocation': presales_alloc,
+            'work_date': work_date, 'man_days': man_days_v, 'daily_rate': daily_rate_v,
+            'phase': phase_sel, 'description': description_v or None,
+            'is_on_site': 1 if is_on_site else 0,
+            'employee_level': level_sel or None, 'presales_allocation': presales_alloc,
         }, user_id)
         if ok:
             st.success("Updated!")
@@ -267,34 +263,28 @@ def _dialog_edit_labor(log: dict, project_id: int):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.dialog("🧾 Add Expense", width="large")
-def _dialog_add_expense(project_id: int):
-    # ── Currency selector OUTSIDE form → reruns dialog on change ─────────────
+def _dialog_add_expense(pid: int):
     cur_opts    = [c['code'] for c in currencies]
-    _r1, _r2, _r3 = st.columns([2, 2, 2])
+    _r1, _r2, _ = st.columns([2, 2, 2])
     _vnd_idx    = cur_opts.index('VND') if 'VND' in cur_opts else 0
     exp_cur     = _r1.selectbox("Currency", cur_opts, index=_vnd_idx, key="dlg_add_exp_cur")
     exp_cur_id  = currencies[cur_opts.index(exp_cur)]['id']
 
-    # Auto-fetch exchange rate to VND
     _rate_result = get_rate_to_vnd(exp_cur)
-    fetched_rate, rate_ok, rate_src = _rate_result.rate, _rate_result.ok, _rate_result.source
-    _icon, _msg = rate_status(_rate_result)
-    if rate_ok:
+    fetched_rate = _rate_result.rate
+    _icon, _msg  = rate_status(_rate_result)
+    if _rate_result.ok:
         _r2.success(f"{_icon} {_msg}")
     else:
         _r2.warning(f"{_icon} {_msg}")
-
     st.divider()
 
-    # ── Main form ─────────────────────────────────────────────────────────────
     with st.form("expense_add_form", clear_on_submit=True):
         ea1, ea2, ea3 = st.columns(3)
         exp_date  = ea1.date_input("Date", value=date.today())
         exp_cat   = ea2.selectbox("Category", EXPENSE_CATEGORIES)
-        exp_phase = ea3.selectbox(
-            "Phase", list(PHASE_LABELS.keys()),
-            index=list(PHASE_LABELS.keys()).index('IMPLEMENTATION'),
-        )
+        exp_phase = ea3.selectbox("Phase", list(PHASE_LABELS.keys()),
+                                   index=list(PHASE_LABELS.keys()).index('IMPLEMENTATION'))
 
         eb1, eb2 = st.columns(2)
         emp_opts   = [e['full_name'] for e in employees]
@@ -302,14 +292,9 @@ def _dialog_add_expense(project_id: int):
         exp_emp_id = employees[emp_opts.index(exp_emp)]['id']
         exp_amount = eb2.number_input("Amount", value=0.0, min_value=0.0, format="%.0f")
 
-        # Exchange rate — pre-filled from API, still editable
-        exp_rate = st.number_input(
-            f"Exchange Rate (1 {exp_cur} = ? VND)",
-            value=fetched_rate,
-            min_value=0.0,
-            format="%.2f",
-            help="Rate auto-fetched from API. You can override if needed.",
-        )
+        exp_rate = st.number_input(f"Exchange Rate (1 {exp_cur} = ? VND)",
+                                    value=fetched_rate, min_value=0.0, format="%.2f",
+                                    help="Rate auto-fetched from API. Override if needed.")
         if exp_amount > 0 and exp_rate > 0:
             st.caption(f"💱 Converted: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
@@ -319,13 +304,9 @@ def _dialog_add_expense(project_id: int):
         exp_desc    = st.text_input("Description")
 
         st.divider()
-        uploaded_file = st.file_uploader(
-            "📎 Attach document (invoice, receipt...)",
-            type=["pdf", "jpg", "jpeg", "png", "xlsx"],
-            help="Recommended: attach supporting documents for expense settlement",
-        )
-
-        submitted = st.form_submit_button("✅ Save expense", type="primary", width="stretch")
+        uploaded_file = st.file_uploader("📎 Attach document (invoice, receipt...)",
+                                          type=["pdf", "jpg", "jpeg", "png", "xlsx"])
+        submitted = st.form_submit_button("✅ Save expense", type="primary", use_container_width=True)
 
     if submitted:
         if exp_amount <= 0:
@@ -333,30 +314,20 @@ def _dialog_add_expense(project_id: int):
             return
         try:
             expense_id = create_expense({
-                'project_id':     project_id,
-                'employee_id':    exp_emp_id,
-                'expense_date':   exp_date,
-                'category':       exp_cat,
-                'phase':          exp_phase,
-                'amount':         exp_amount,
-                'currency_id':    exp_cur_id,
-                'exchange_rate':  exp_rate,
-                'description':    exp_desc or None,
-                'vendor_name':    exp_vendor or None,
+                'project_id': pid, 'employee_id': exp_emp_id,
+                'expense_date': exp_date, 'category': exp_cat, 'phase': exp_phase,
+                'amount': exp_amount, 'currency_id': exp_cur_id, 'exchange_rate': exp_rate,
+                'description': exp_desc or None, 'vendor_name': exp_vendor or None,
                 'receipt_number': exp_receipt or None,
             }, user_id)
-
             if uploaded_file and expense_id:
                 s3 = _get_s3()
                 if s3:
-                    ok, s3_key = s3.upload_expense_attachment(
-                        uploaded_file.read(), uploaded_file.name, project_id, expense_id
-                    )
+                    ok, s3_key = s3.upload_expense_attachment(uploaded_file.read(), uploaded_file.name, pid, expense_id)
                     if ok:
                         update_expense_attachment(expense_id, s3_key, uploaded_file.name, user_id)
                     else:
                         st.warning(f"Expense saved but file upload failed: {s3_key}")
-
             st.success("✅ Expense added!")
             st.rerun()
         except Exception as e:
@@ -364,10 +335,8 @@ def _dialog_add_expense(project_id: int):
 
 
 @st.dialog("🧾 Edit Expense", width="large")
-def _dialog_edit_expense(exp: dict, project_id: int):
+def _dialog_edit_expense(exp: dict, pid: int):
     exp_id = exp['id']
-
-    # ── Currency selector OUTSIDE form ────────────────────────────────────────
     cur_opts   = [c['code'] for c in currencies]
     cur_code   = exp.get('currency', 'VND')
     cur_idx    = cur_opts.index(cur_code) if cur_code in cur_opts else 0
@@ -375,27 +344,22 @@ def _dialog_edit_expense(exp: dict, project_id: int):
     exp_cur    = _r1.selectbox("Currency", cur_opts, index=cur_idx, key="dlg_edit_exp_cur")
     exp_cur_id = currencies[cur_opts.index(exp_cur)]['id']
 
-    # Auto-fetch rate — only re-fetch if currency changed from saved value
     _rate_result  = get_rate_to_vnd(exp_cur)
     fetched_rate  = _rate_result.rate
-    rate_ok       = _rate_result.ok
     saved_rate    = float(exp.get('exchange_rate') or fetched_rate)
     default_rate  = saved_rate if exp_cur == cur_code else fetched_rate
 
     _icon, _msg = rate_status(_rate_result)
-    if rate_ok:
+    if _rate_result.ok:
         _r2.success(f"{_icon} {_msg}")
     else:
         _r2.warning(f"{_icon} {_msg}")
-
     st.divider()
 
     with st.form("expense_edit_form"):
         ea1, ea2, ea3 = st.columns(3)
-        exp_date  = ea1.date_input(
-            "Date",
-            value=pd.to_datetime(exp.get('expense_date')).date() if exp.get('expense_date') else date.today(),
-        )
+        exp_date  = ea1.date_input("Date",
+                     value=pd.to_datetime(exp.get('expense_date')).date() if exp.get('expense_date') else date.today())
         cat_idx   = EXPENSE_CATEGORIES.index(exp['category']) if exp.get('category') in EXPENSE_CATEGORIES else 0
         exp_cat   = ea2.selectbox("Category", EXPENSE_CATEGORIES, index=cat_idx)
         phase_keys = list(PHASE_LABELS.keys())
@@ -410,54 +374,39 @@ def _dialog_edit_expense(exp: dict, project_id: int):
         exp_emp_id = employees[emp_opts.index(exp_emp)]['id']
         exp_amount = eb2.number_input("Amount", value=float(exp.get('amount', 0)), min_value=0.0, format="%.0f")
 
-        exp_rate = st.number_input(
-            f"Exchange Rate (1 {exp_cur} = ? VND)",
-            value=default_rate,
-            min_value=0.0,
-            format="%.2f",
-            help="Rate auto-fetched from API. You can override if needed.",
-        )
+        exp_rate = st.number_input(f"Exchange Rate (1 {exp_cur} = ? VND)",
+                                    value=default_rate, min_value=0.0, format="%.2f")
         if exp_amount > 0 and exp_rate > 0:
             st.caption(f"💱 Converted: {exp_amount:,.0f} {exp_cur} × {exp_rate:,.2f} = **{exp_amount * exp_rate:,.0f} VND**")
 
         ec1, ec2 = st.columns(2)
         exp_vendor  = _vendor_selector(ec1, current_name=exp.get('vendor_name') or '', key_suffix="edit")
         exp_receipt = ec2.text_input("Receipt Number", value=exp.get('receipt_number') or '')
-        exp_desc    = st.text_input("Description",     value=exp.get('description') or '')
+        exp_desc    = st.text_input("Description", value=exp.get('description') or '')
 
         st.divider()
         cur_attachment = exp.get('attachment_filename')
         if cur_attachment:
             st.info(f"📎 Current attachment: **{cur_attachment}**")
-        new_file = st.file_uploader(
-            "📎 Replace attachment (leave empty to keep current)",
-            type=["pdf", "jpg", "jpeg", "png", "xlsx"],
-        )
+        new_file = st.file_uploader("📎 Replace attachment (leave empty to keep current)",
+                                     type=["pdf", "jpg", "jpeg", "png", "xlsx"])
 
         col_save, col_del = st.columns(2)
-        save   = col_save.form_submit_button("💾 Update",  type="primary", width="stretch")
-        delete = col_del.form_submit_button("🗑 Delete", width="stretch")
+        save   = col_save.form_submit_button("💾 Update",  type="primary", use_container_width=True)
+        delete = col_del.form_submit_button("🗑 Delete", use_container_width=True)
 
     if save:
         ok = update_expense(exp_id, {
-            'expense_date':   exp_date,
-            'category':       exp_cat,
-            'phase':          exp_phase,
-            'amount':         exp_amount,
-            'currency_id':    exp_cur_id,
-            'exchange_rate':  exp_rate,
-            'description':    exp_desc or None,
-            'vendor_name':    exp_vendor or None,
-            'receipt_number': exp_receipt or None,
-            'employee_id':    exp_emp_id,
+            'expense_date': exp_date, 'category': exp_cat, 'phase': exp_phase,
+            'amount': exp_amount, 'currency_id': exp_cur_id, 'exchange_rate': exp_rate,
+            'description': exp_desc or None, 'vendor_name': exp_vendor or None,
+            'receipt_number': exp_receipt or None, 'employee_id': exp_emp_id,
         }, user_id)
         if ok:
             if new_file:
                 s3 = _get_s3()
                 if s3:
-                    ok2, s3_key = s3.upload_expense_attachment(
-                        new_file.read(), new_file.name, project_id, exp_id
-                    )
+                    ok2, s3_key = s3.upload_expense_attachment(new_file.read(), new_file.name, pid, exp_id)
                     if ok2:
                         update_expense_attachment(exp_id, s3_key, new_file.name, user_id)
             st.success("Updated!")
@@ -484,16 +433,15 @@ def _dialog_view_attachment(s3_key: str, filename: str):
     if not url:
         st.error("Could not generate URL — check S3 configuration.")
         return
-
     st.markdown(f"**File:** `{filename}`")
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     if ext in ('jpg', 'jpeg', 'png'):
-        st.image(url, width="stretch")
+        st.image(url, use_container_width=True)
     elif ext == 'pdf':
         st.markdown(f"[📄 Open PDF in new tab]({url})")
         st.components.v1.iframe(url, height=600, scrolling=True)
     else:
-        st.markdown(f"[⬇️ Download `{filename}`]({url}")
+        st.markdown(f"[⬇️ Download `{filename}`]({url})")
     st.caption("Link expires after 10 minutes.")
 
 
@@ -502,23 +450,19 @@ def _dialog_view_attachment(s3_key: str, filename: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.dialog("🔍 Add Pre-sales Cost", width="large")
-def _dialog_add_presales(project_id: int):
-    pa1, pa2    = st.columns(2)
-    ps_layer_lb = pa1.radio(
-        "Layer",
+def _dialog_add_presales(pid: int):
+    pa1, pa2 = st.columns(2)
+    ps_layer_lb = pa1.radio("Layer",
         ["STANDARD (Layer 1 → SGA)", "SPECIAL (Layer 2 → COGS if win)"],
-        horizontal=True, key="dlg_ps_layer",
-    )
+        horizontal=True, key="dlg_ps_layer")
     ps_layer_v  = "STANDARD" if "STANDARD" in ps_layer_lb else "SPECIAL"
     cat_list    = PRESALES_CATEGORIES_L1 if ps_layer_v == "STANDARD" else PRESALES_CATEGORIES_L2
     ps_cat      = pa2.selectbox("Category", cat_list, key="dlg_ps_cat")
 
-    # Currency selector OUTSIDE form
     ps_cur_opts = [c['code'] for c in currencies]
     _pc1, _pc2  = st.columns(2)
     ps_cur      = _pc1.selectbox("Currency", ps_cur_opts, key="dlg_ps_cur")
     ps_cur_id   = currencies[ps_cur_opts.index(ps_cur)]['id']
-
     _ps_rate_result = get_rate_to_vnd(ps_cur)
     fetched_rate    = _ps_rate_result.rate
     _icon, _msg     = rate_status(_ps_rate_result)
@@ -526,29 +470,25 @@ def _dialog_add_presales(project_id: int):
         _pc2.success(f"{_icon} {_msg}")
     else:
         _pc2.warning(f"{_icon} {_msg}")
-
     st.divider()
 
     with st.form("presales_add_form", clear_on_submit=True):
-        pb1, pb2      = st.columns(2)
-        is_ps_subcon  = pb1.checkbox("External worker", value=False)
+        pb1, pb2 = st.columns(2)
+        is_ps_subcon = pb1.checkbox("External worker", value=False)
         if not is_ps_subcon:
             ps_emp_opts = [e['full_name'] for e in employees]
             ps_emp      = pb2.selectbox("Employee", ps_emp_opts)
             ps_emp_id   = employees[ps_emp_opts.index(ps_emp)]['id']
             ps_subcon   = None
         else:
-            ps_emp_id   = None
-            ps_subcon   = pb2.text_input("Subcontractor Name *")
+            ps_emp_id = None
+            ps_subcon = pb2.text_input("Subcontractor Name *")
 
         pc1, pc2, pc3 = st.columns(3)
         ps_amount = pc1.number_input("Amount", value=0.0, min_value=0.0, format="%.0f")
-        ps_rate   = pc2.number_input(
-            f"Exchange Rate (1 {ps_cur} = ? VND)",
-            value=fetched_rate, min_value=0.0, format="%.2f",
-        )
+        ps_rate   = pc2.number_input(f"Exchange Rate (1 {ps_cur} = ? VND)",
+                                      value=fetched_rate, min_value=0.0, format="%.2f")
         ps_days   = pc3.number_input("Man-Days (optional)", value=0.0, min_value=0.0, format="%.1f")
-
         if ps_amount > 0 and ps_rate > 0:
             st.caption(f"💱 Converted: {ps_amount:,.0f} {ps_cur} × {ps_rate:,.2f} = **{ps_amount * ps_rate:,.0f} VND**")
 
@@ -556,8 +496,7 @@ def _dialog_add_presales(project_id: int):
         default_alloc = 'SGA' if ps_layer_v == 'STANDARD' else 'PENDING'
         ps_alloc      = st.selectbox("Allocation", alloc_opts, index=alloc_opts.index(default_alloc))
         ps_desc       = st.text_input("Description")
-
-        submitted = st.form_submit_button("✅ Save", type="primary", width="stretch")
+        submitted = st.form_submit_button("✅ Save", type="primary", use_container_width=True)
 
     if submitted:
         if ps_amount <= 0:
@@ -568,17 +507,12 @@ def _dialog_add_presales(project_id: int):
             return
         try:
             create_presales_cost({
-                'project_id':         project_id,
-                'employee_id':        ps_emp_id,
-                'subcontractor_name': ps_subcon,
-                'cost_layer':         ps_layer_v,
-                'category':           ps_cat,
-                'amount':             ps_amount,
-                'currency_id':        ps_cur_id,
-                'exchange_rate':      ps_rate,
-                'allocation':         ps_alloc,
-                'man_days':           ps_days if ps_days > 0 else None,
-                'description':        ps_desc or None,
+                'project_id': pid, 'employee_id': ps_emp_id,
+                'subcontractor_name': ps_subcon, 'cost_layer': ps_layer_v,
+                'category': ps_cat, 'amount': ps_amount, 'currency_id': ps_cur_id,
+                'exchange_rate': ps_rate, 'allocation': ps_alloc,
+                'man_days': ps_days if ps_days > 0 else None,
+                'description': ps_desc or None,
             }, user_id)
             st.success("✅ Pre-sales cost added!")
             st.rerun()
@@ -587,23 +521,141 @@ def _dialog_add_presales(project_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FRAGMENT — Labor tab
+# OVERVIEW — All Projects Dashboard
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.fragment
-def _labor_tab(project_id: int):
-    fc1, fc2, fc3 = st.columns([2, 2, 1])
-    lf_phase  = fc1.selectbox("Filter Phase",    ["All"] + list(PHASE_LABELS.keys()), key="lf_phase")
-    lf_status = fc2.selectbox("Filter Approval", ["All", "PENDING", "APPROVED", "REJECTED"], key="lf_status")
-    if fc3.button("➕ Log Labor", type="primary", width="stretch"):
-        _dialog_add_labor(project_id)
+def _render_overview(labor_df: pd.DataFrame, exp_df: pd.DataFrame):
+    """Cross-project dashboard: KPIs + per-project summary + pending approvals."""
 
-    labor_df = get_labor_logs_df(
-        project_id,
-        phase=None if lf_phase == "All" else lf_phase,
-        approval_status=None if lf_status == "All" else lf_status,
-    )
+    approved_labor = labor_df[labor_df['approval_status'] == 'APPROVED'] if not labor_df.empty else labor_df
+    approved_exp   = exp_df[exp_df['approval_status'] == 'APPROVED'] if not exp_df.empty else exp_df
+    pending_labor  = labor_df[labor_df['approval_status'] == 'PENDING'] if not labor_df.empty else labor_df
+    pending_exp    = exp_df[exp_df['approval_status'] == 'PENDING'] if not exp_df.empty else exp_df
 
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Man-Days (Approved)", f"{approved_labor['man_days'].sum():.1f}" if not approved_labor.empty else "0")
+    k2.metric("Labor Cost (Approved)", fmt_vnd(approved_labor['amount'].sum() if not approved_labor.empty else 0))
+    k3.metric("Expenses (Approved)", fmt_vnd(approved_exp['amount_vnd'].sum() if not approved_exp.empty else 0))
+    k4.metric("Pending Items", len(pending_labor) + len(pending_exp))
+
+    st.divider()
+
+    # ── Per-project summary ──────────────────────────────────────────────────
+    st.subheader("📊 Per-Project Cost Summary")
+
+    summary_rows = []
+    for _, row in proj_df.iterrows():
+        pid = row['project_id']
+        p_labor = approved_labor[approved_labor['project_id'] == pid] if not approved_labor.empty else pd.DataFrame()
+        p_exp   = approved_exp[approved_exp['project_id'] == pid] if not approved_exp.empty else pd.DataFrame()
+        p_pend_l = pending_labor[pending_labor['project_id'] == pid] if not pending_labor.empty else pd.DataFrame()
+        p_pend_e = pending_exp[pending_exp['project_id'] == pid] if not pending_exp.empty else pd.DataFrame()
+
+        labor_cost = float(p_labor['amount'].sum()) if not p_labor.empty else 0
+        exp_cost   = float(p_exp['amount_vnd'].sum()) if not p_exp.empty else 0
+
+        if labor_cost == 0 and exp_cost == 0 and len(p_pend_l) == 0 and len(p_pend_e) == 0:
+            continue
+
+        summary_rows.append({
+            'Project':    row['project_code'],
+            'Name':       row['project_name'],
+            'Status':     row['status'],
+            'Man-Days':   f"{p_labor['man_days'].sum():.1f}" if not p_labor.empty else "0",
+            'Labor Cost': f"{labor_cost:,.0f}" if labor_cost > 0 else '—',
+            'Expenses':   f"{exp_cost:,.0f}" if exp_cost > 0 else '—',
+            'Total':      f"{labor_cost + exp_cost:,.0f}" if (labor_cost + exp_cost) > 0 else '—',
+            'Pending':    len(p_pend_l) + len(p_pend_e),
+        })
+
+    if summary_rows:
+        st.dataframe(
+            pd.DataFrame(summary_rows), width="stretch", hide_index=True,
+            column_config={
+                'Project':    st.column_config.TextColumn('Project', width=150),
+                'Name':       st.column_config.TextColumn('Name'),
+                'Status':     st.column_config.TextColumn('Status', width=120),
+                'Man-Days':   st.column_config.TextColumn('Man-Days', width=90),
+                'Labor Cost': st.column_config.TextColumn('Labor (VND)'),
+                'Expenses':   st.column_config.TextColumn('Expenses (VND)'),
+                'Total':      st.column_config.TextColumn('Total (VND)'),
+                'Pending':    st.column_config.NumberColumn('Pending', width=80),
+            },
+        )
+    else:
+        st.info("No cost data found for the selected filters.")
+
+    # ── Pending Approvals (PM only) ──────────────────────────────────────────
+    if is_pm and (len(pending_labor) > 0 or len(pending_exp) > 0):
+        st.divider()
+        st.subheader("⏳ Pending Approvals")
+
+        ptab_labor, ptab_exp = st.tabs([
+            f"👷 Labor ({len(pending_labor)})",
+            f"🧾 Expenses ({len(pending_exp)})",
+        ])
+
+        with ptab_labor:
+            if not pending_labor.empty:
+                display_pl = pending_labor[['project_code', 'work_date', 'phase', 'worker',
+                                             'man_days', 'amount', 'description']].copy()
+                display_pl['amount_fmt'] = display_pl['amount'].apply(
+                    lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
+                st.dataframe(display_pl, width="stretch", hide_index=True,
+                             column_config={
+                                 'project_code': st.column_config.TextColumn('Project', width=150),
+                                 'work_date':    st.column_config.DateColumn('Date'),
+                                 'phase':        st.column_config.TextColumn('Phase'),
+                                 'worker':       st.column_config.TextColumn('Worker'),
+                                 'man_days':     st.column_config.NumberColumn('Days', format="%.1f"),
+                                 'amount_fmt':   st.column_config.TextColumn('Amount'),
+                                 'description':  st.column_config.TextColumn('Description'),
+                                 'amount':       None,
+                             })
+                if st.button(f"✅ Approve All Pending Labor ({len(pending_labor)})", key="bulk_approve_labor_all"):
+                    for lid in pending_labor['id'].tolist():
+                        approve_labor_log(lid, emp_int_id)
+                    st.success(f"Approved {len(pending_labor)} labor entries.")
+                    st.rerun()
+            else:
+                st.info("No pending labor entries.")
+
+        with ptab_exp:
+            if not pending_exp.empty:
+                display_pe = pending_exp[['project_code', 'expense_date', 'category', 'phase',
+                                           'employee_name', 'amount', 'currency', 'amount_vnd']].copy()
+                display_pe['amount_fmt']     = display_pe['amount'].apply(
+                    lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
+                display_pe['amount_vnd_fmt'] = display_pe['amount_vnd'].apply(
+                    lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
+                st.dataframe(display_pe, width="stretch", hide_index=True,
+                             column_config={
+                                 'project_code':  st.column_config.TextColumn('Project', width=150),
+                                 'expense_date':  st.column_config.DateColumn('Date'),
+                                 'category':      st.column_config.TextColumn('Category'),
+                                 'phase':         st.column_config.TextColumn('Phase'),
+                                 'employee_name': st.column_config.TextColumn('Employee'),
+                                 'amount_fmt':    st.column_config.TextColumn('Amount'),
+                                 'currency':      st.column_config.TextColumn('CCY', width=50),
+                                 'amount_vnd_fmt':st.column_config.TextColumn('VND'),
+                                 'amount':        None,
+                                 'amount_vnd':    None,
+                             })
+                if st.button(f"✅ Approve All Pending Expenses ({len(pending_exp)})", key="bulk_approve_exp_all"):
+                    for eid in pending_exp['id'].tolist():
+                        approve_expense(eid, emp_int_id)
+                    st.success(f"Approved {len(pending_exp)} expenses.")
+                    st.rerun()
+            else:
+                st.info("No pending expenses.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LABOR TABLE — Per-project
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _render_labor_tab(pid: int, labor_df: pd.DataFrame):
     approved_df = labor_df[labor_df['approval_status'] == 'APPROVED'] if not labor_df.empty else labor_df
     k1, k2, k3 = st.columns(3)
     k1.metric("Man-Days (Approved)", f"{approved_df['man_days'].sum():.1f}" if not approved_df.empty else "0")
@@ -614,14 +666,12 @@ def _labor_tab(project_id: int):
         st.info("No labor entries yet.")
         return
 
-    has_att    = 'attachment_filename' in labor_df.columns
     display_df = labor_df.copy()
     display_df['daily_rate_fmt'] = display_df['daily_rate'].apply(
-        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
-    )
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
     display_df['amount_fmt'] = display_df['amount'].apply(
-        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
-    )
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
+
     col_config = {
         'id':                  st.column_config.NumberColumn('ID', width=55),
         'work_date':           st.column_config.DateColumn('Date'),
@@ -635,31 +685,32 @@ def _labor_tab(project_id: int):
         'presales_allocation': st.column_config.TextColumn('Pre-sales'),
         'approval_status':     st.column_config.TextColumn('Status'),
         'description':         st.column_config.TextColumn('Description'),
-        # hide raw columns
-        'daily_rate':          None,
-        'amount':              None,
+        'daily_rate': None, 'amount': None,
+        'project_id': None, 'project_code': None,
+        'approved_by_name': None, 'approved_date': None,
     }
-    if has_att:
-        display_df.insert(0, '📎', display_df['attachment_filename'].apply(lambda x: '📎' if x else ''))
-        col_config['📎'] = st.column_config.TextColumn('', width=30)
 
-    event = st.dataframe(
-        display_df, width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row",
-        column_config=col_config,
-    )
+    tbl_key = f"labor_tbl_{st.session_state.get('_labor_key', 0)}"
+    event = st.dataframe(display_df, key=tbl_key, width="stretch", hide_index=True,
+                         on_select="rerun", selection_mode="single-row", column_config=col_config)
 
     sel = event.selection.rows
     if sel:
         row = labor_df.iloc[sel[0]].to_dict()
-        col_edit, col_att = st.columns(2)
+        st.markdown(f"**Selected:** ID {row['id']} — {row['worker']} ({row['phase']}, {row['approval_status']})")
+        ab1, ab2, ab3, ab4 = st.columns(4)
         if row.get('approval_status') == 'PENDING':
-            if col_edit.button("✏️ Edit selected", key="labor_edit_btn"):
-                _dialog_edit_labor(row, project_id)
-        if has_att and row.get('attachment_s3_key'):
-            if col_att.button("📎 View attachment", key="labor_att_btn"):
-                _dialog_view_attachment(row['attachment_s3_key'], row['attachment_filename'])
+            if ab1.button("✏️ Edit", key="labor_edit_btn", use_container_width=True):
+                _dialog_edit_labor(row, pid)
+            if is_pm and ab2.button("✅ Approve", key="labor_approve_btn", use_container_width=True):
+                approve_labor_log(row['id'], emp_int_id)
+                st.success("Approved!")
+                st.rerun()
+        if ab3.button("✖ Deselect", key="labor_desel_btn", use_container_width=True):
+            st.session_state["_labor_key"] = st.session_state.get("_labor_key", 0) + 1
+            st.rerun()
 
+    # Bulk approve
     if is_pm:
         pending_ids = labor_df[labor_df['approval_status'] == 'PENDING']['id'].tolist()
         if pending_ids:
@@ -667,27 +718,14 @@ def _labor_tab(project_id: int):
                 for lid in pending_ids:
                     approve_labor_log(lid, emp_int_id)
                 st.success(f"Approved {len(pending_ids)} entries.")
-                st.rerun(scope="fragment")
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FRAGMENT — Expenses tab
+# EXPENSE TABLE — Per-project
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.fragment
-def _expense_tab(project_id: int):
-    ef1, ef2, ef3 = st.columns([2, 2, 1])
-    ef_phase  = ef1.selectbox("Filter Phase",    ["All"] + list(PHASE_LABELS.keys()), key="ef_phase")
-    ef_status = ef2.selectbox("Filter Approval", ["All", "PENDING", "APPROVED", "REJECTED"], key="ef_status")
-    if ef3.button("➕ Add Expense", type="primary", width="stretch"):
-        _dialog_add_expense(project_id)
-
-    exp_df = get_expenses_df(
-        project_id,
-        phase=None if ef_phase == "All" else ef_phase,
-        approval_status=None if ef_status == "All" else ef_status,
-    )
-
+def _render_expense_tab(pid: int, exp_df: pd.DataFrame):
     approved_exp = exp_df[exp_df['approval_status'] == 'APPROVED'] if not exp_df.empty else exp_df
     ek1, ek2, ek3 = st.columns(3)
     ek1.metric("Total Expenses (Approved)", fmt_vnd(approved_exp['amount_vnd'].sum() if not approved_exp.empty else 0))
@@ -698,14 +736,12 @@ def _expense_tab(project_id: int):
         st.info("No expenses yet.")
         return
 
-    has_att    = 'attachment_filename' in exp_df.columns
     display_df = exp_df.copy()
     display_df['amount_fmt'] = display_df['amount'].apply(
-        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
-    )
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
     display_df['amount_vnd_fmt'] = display_df['amount_vnd'].apply(
-        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
-    )
+        lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
+
     col_config = {
         'id':              st.column_config.NumberColumn('ID', width=55),
         'expense_date':    st.column_config.DateColumn('Date'),
@@ -719,30 +755,30 @@ def _expense_tab(project_id: int):
         'receipt_number':  st.column_config.TextColumn('Receipt#'),
         'approval_status': st.column_config.TextColumn('Status'),
         'description':     st.column_config.TextColumn('Description'),
-        # hide raw columns
-        'amount':          None,
-        'amount_vnd':      None,
+        'amount': None, 'amount_vnd': None, 'exchange_rate': None,
+        'project_id': None, 'project_code': None,
+        'approved_by_name': None,
     }
-    if has_att:
-        display_df.insert(0, '📎', display_df['attachment_filename'].apply(lambda x: '📎' if x else ''))
-        col_config['📎'] = st.column_config.TextColumn('', width=30)
 
-    event = st.dataframe(
-        display_df, width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row",
-        column_config=col_config,
-    )
+    tbl_key = f"exp_tbl_{st.session_state.get('_exp_key', 0)}"
+    event = st.dataframe(display_df, key=tbl_key, width="stretch", hide_index=True,
+                         on_select="rerun", selection_mode="single-row", column_config=col_config)
 
     sel = event.selection.rows
     if sel:
         row = exp_df.iloc[sel[0]].to_dict()
-        col_edit, col_att = st.columns(2)
+        st.markdown(f"**Selected:** ID {row['id']} — {row.get('employee_name', '—')} ({row['category']}, {row['approval_status']})")
+        ab1, ab2, ab3, ab4 = st.columns(4)
         if row.get('approval_status') == 'PENDING':
-            if col_edit.button("✏️ Edit selected", key="exp_edit_btn"):
-                _dialog_edit_expense(row, project_id)
-        if has_att and row.get('attachment_s3_key'):
-            if col_att.button("📎 View attachment", key="exp_att_btn"):
-                _dialog_view_attachment(row['attachment_s3_key'], row['attachment_filename'])
+            if ab1.button("✏️ Edit", key="exp_edit_btn", use_container_width=True):
+                _dialog_edit_expense(row, pid)
+            if is_pm and ab2.button("✅ Approve", key="exp_approve_btn", use_container_width=True):
+                approve_expense(row['id'], emp_int_id)
+                st.success("Approved!")
+                st.rerun()
+        if ab3.button("✖ Deselect", key="exp_desel_btn", use_container_width=True):
+            st.session_state["_exp_key"] = st.session_state.get("_exp_key", 0) + 1
+            st.rerun()
 
     if is_pm:
         pending_exp = exp_df[exp_df['approval_status'] == 'PENDING']['id'].tolist()
@@ -751,20 +787,19 @@ def _expense_tab(project_id: int):
                 for eid in pending_exp:
                     approve_expense(eid, emp_int_id)
                 st.success(f"Approved {len(pending_exp)} expenses.")
-                st.rerun(scope="fragment")
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FRAGMENT — Pre-sales tab
+# PRE-SALES TABLE — Per-project
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.fragment
-def _presales_tab(project_id: int):
-    ps_h1, ps_h2 = st.columns([5, 1])
-    if ps_h2.button("➕ Add", type="primary", width="stretch"):
-        _dialog_add_presales(project_id)
+def _render_presales_tab(pid: int):
+    ph1, ph2 = st.columns([5, 1])
+    if ph2.button("➕ Add", type="primary", use_container_width=True, key="btn_add_presales"):
+        _dialog_add_presales(pid)
 
-    ps_df = get_presales_costs_df(project_id)
+    ps_df = get_presales_costs_df(pid)
 
     if not ps_df.empty:
         l1_total = ps_df[ps_df['cost_layer'] == 'STANDARD']['amount_vnd'].sum()
@@ -776,33 +811,26 @@ def _presales_tab(project_id: int):
         pk3.metric("Layer 2 → COGS",  fmt_vnd(l2_cogs))
 
         display_df = ps_df.copy()
-        display_df['amount_fmt'] = display_df['amount'].apply(
-            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
-        )
+        display_df['amount_fmt']     = display_df['amount'].apply(
+            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
         display_df['amount_vnd_fmt'] = display_df['amount_vnd'].apply(
-            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—'
-        )
+            lambda v: f"{v:,.0f}" if v is not None and str(v) not in ('', 'nan', 'None') else '—')
         display_df.insert(0, '●', display_df['allocation'].map(
-            lambda a: {'SGA': '🔵', 'COGS': '🟢', 'PENDING': '⚪'}.get(a, '⚪')
-        ))
-        st.dataframe(
-            display_df, width="stretch", hide_index=True,
-            column_config={
-                '●':             st.column_config.TextColumn('', width=30),
-                'cost_layer':    st.column_config.TextColumn('Layer'),
-                'category':      st.column_config.TextColumn('Category'),
-                'worker':        st.column_config.TextColumn('Worker'),
-                'amount_fmt':    st.column_config.TextColumn('Amount'),
-                'currency':      st.column_config.TextColumn('CCY', width=50),
-                'amount_vnd_fmt':st.column_config.TextColumn('VND'),
-                'man_days':      st.column_config.NumberColumn('Man-Days', format="%.1f"),
-                'allocation':    st.column_config.TextColumn('Allocation'),
-                'description':   st.column_config.TextColumn('Description'),
-                # hide raw columns
-                'amount':        None,
-                'amount_vnd':    None,
-            },
-        )
+            lambda a: {'SGA': '🔵', 'COGS': '🟢', 'PENDING': '⚪'}.get(a, '⚪')))
+        st.dataframe(display_df, width="stretch", hide_index=True,
+                     column_config={
+                         '●':              st.column_config.TextColumn('', width=30),
+                         'cost_layer':     st.column_config.TextColumn('Layer'),
+                         'category':       st.column_config.TextColumn('Category'),
+                         'worker':         st.column_config.TextColumn('Worker'),
+                         'amount_fmt':     st.column_config.TextColumn('Amount'),
+                         'currency':       st.column_config.TextColumn('CCY', width=50),
+                         'amount_vnd_fmt': st.column_config.TextColumn('VND'),
+                         'man_days':       st.column_config.NumberColumn('Man-Days', format="%.1f"),
+                         'allocation':     st.column_config.TextColumn('Allocation'),
+                         'description':    st.column_config.TextColumn('Description'),
+                         'amount': None, 'amount_vnd': None,
+                     })
     else:
         st.info("No pre-sales costs yet.")
 
@@ -811,26 +839,78 @@ def _presales_tab(project_id: int):
         st.markdown("**Win/Lose Decision — Layer 2 allocation**")
         dc1, dc2, _ = st.columns(3)
         if dc1.button("🏆 WIN — Move Layer 2 → COGS", type="primary"):
-            n = bulk_update_presales_allocation(project_id, 'COGS', user_id)
+            n = bulk_update_presales_allocation(pid, 'COGS', user_id)
             st.success(f"Updated {n} Layer-2 costs → COGS.")
-            st.rerun(scope="fragment")
+            st.rerun()
         if dc2.button("❌ LOSE — Move Layer 2 → SGA"):
-            n = bulk_update_presales_allocation(project_id, 'SGA', user_id)
+            n = bulk_update_presales_allocation(pid, 'SGA', user_id)
             st.info(f"Updated {n} Layer-2 costs → SGA.")
-            st.rerun(scope="fragment")
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN
+# MAIN CONTENT
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab_labor, tab_exp, tab_presales = st.tabs(["👷 Labor Logs", "🧾 Expenses", "🔍 Pre-sales Costs"])
+if is_all_projects:
+    # ── Overview mode ─────────────────────────────────────────────────────────
+    all_labor = get_labor_logs_df(
+        phase=phase_filter,
+        approval_status=approval_filter,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    all_exp = get_expenses_df(
+        phase=phase_filter,
+        approval_status=approval_filter,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    _render_overview(all_labor, all_exp)
 
-with tab_labor:
-    _labor_tab(project_id)
+else:
+    # ── Per-project mode ──────────────────────────────────────────────────────
+    if not project:
+        st.error("Project not found.")
+        st.stop()
 
-with tab_exp:
-    _expense_tab(project_id)
+    st.caption(
+        f"**{project['project_code']}** | "
+        f"{project.get('customer_name') or project.get('end_customer_name', '—')} | "
+        f"Status: **{project['status']}**"
+    )
 
-with tab_presales:
-    _presales_tab(project_id)
+    # Fetch data with sidebar filters
+    labor_df = get_labor_logs_df(
+        project_id=project_id,
+        phase=phase_filter,
+        approval_status=approval_filter,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    exp_df = get_expenses_df(
+        project_id=project_id,
+        phase=phase_filter,
+        approval_status=approval_filter,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    tab_labor, tab_exp, tab_presales = st.tabs(["👷 Labor Logs", "🧾 Expenses", "🔍 Pre-sales Costs"])
+
+    with tab_labor:
+        _render_labor_tab(project_id, labor_df)
+
+    with tab_exp:
+        _render_expense_tab(project_id, exp_df)
+
+    with tab_presales:
+        _render_presales_tab(project_id)
+
+
+# ── Dialog triggers (from sidebar buttons) ────────────────────────────────────
+if st.session_state.pop("open_add_labor", False) and project_id:
+    _dialog_add_labor(project_id)
+
+if st.session_state.pop("open_add_expense", False) and project_id:
+    _dialog_add_expense(project_id)
