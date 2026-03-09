@@ -89,6 +89,20 @@ def _items_total(cat=None):
 def _items_sell_total():
     return sum(i.get('quantity',0)*i.get('unit_sell',0)*i.get('sell_exchange_rate',1) for i in st.session_state["_est_items"])
 
+def _show_rate(col, label: str, rate_result) -> float:
+    """Display exchange rate with source badge. Returns the rate value."""
+    _badges = {
+        'same': ('ℹ️', 'Same currency'),
+        'api': ('🟢', 'Live'),
+        'cache': ('🟢', 'Live (cached)'),
+        'db': ('🔵', 'DB'),
+        'fallback': ('🟠', 'Fallback'),
+    }
+    icon, src = _badges.get(rate_result.source, ('⚪', rate_result.source))
+    col.metric(label, f"{rate_result.rate:,.2f}")
+    col.caption(f"{icon} {src}")
+    return rate_result.rate
+
 # ── Dialog: Add Product ──────────────────────────────────────────────────────
 @st.dialog("🔍 Add Product from Catalog", width="large")
 def _dialog_add_product(category):
@@ -102,12 +116,11 @@ def _dialog_add_product(category):
     st.divider()
     st.markdown("**💰 Vendor Cost (Costbook)**")
     cb_entries = get_costbook_for_product(product['id'])
-    cb = None; default_rate = 1.0
+    cb = None; _r_cost = None
     if cb_entries:
         cb_opts = [f"{c['costbook_number']} | {c['vendor_name']} | {c['unit_price']:,.2f} {c['currency_code']} [{c['status']}]" for c in cb_entries]
         cb = cb_entries[cb_opts.index(st.selectbox("Costbook Entry", cb_opts))]
-        r = get_rate_to_vnd(cb['currency_code'])
-        default_rate = r.rate if r.ok else 1.0
+        _r_cost = get_rate_to_vnd(cb['currency_code'])
     else:
         st.warning("No costbook found. Enter cost manually below.")
     st.divider()
@@ -123,14 +136,19 @@ def _dialog_add_product(category):
     qty = qc1.number_input("Quantity", value=1.0, min_value=0.01, format="%.2f")
     cost_price = float(cb['unit_price'] if cb else 0)
     cost_cur = cb['currency_code'] if cb else 'VND'
-    cost_rate = qc2.number_input(f"Cost Rate ({cost_cur}→VND)", value=default_rate, format="%.2f", disabled=True)
+    if _r_cost:
+        cost_rate = _show_rate(qc2, f"Cost Rate ({cost_cur}→VND)", _r_cost)
+    else:
+        cost_rate = 1.0
+        qc2.metric(f"Cost Rate ({cost_cur}→VND)", "1.00")
     sell_price = float(sel_qd['selling_unit_price'] if sel_qd else 0)
     sell_cur = sel_qd['currency_code'] if sel_qd else 'VND'
-    sell_default_rate = 1.0
     if sel_qd:
-        r_sell = get_rate_to_vnd(sell_cur)
-        sell_default_rate = r_sell.rate if r_sell.ok else 1.0
-    sell_rate = qc3.number_input(f"Sell Rate ({sell_cur}→VND)", value=sell_default_rate, format="%.2f", disabled=True)
+        _r_sell = get_rate_to_vnd(sell_cur)
+        sell_rate = _show_rate(qc3, f"Sell Rate ({sell_cur}→VND)", _r_sell)
+    else:
+        sell_rate = 1.0
+        qc3.metric(f"Sell Rate ({sell_cur}→VND)", "1.00")
     if not cb:
         mc1, mc2 = st.columns(2)
         cost_price = mc1.number_input("Manual Cost", value=0.0, format="%.2f")
@@ -138,7 +156,8 @@ def _dialog_add_product(category):
         if cost_cur != 'VND':
             r2 = get_rate_to_vnd(cost_cur)
             cost_rate = r2.rate if r2.ok else 1.0
-            st.caption(f"💱 Rate: 1 {cost_cur} = **{cost_rate:,.2f}** VND")
+            _badges = {'api': '🟢 Live', 'cache': '🟢 Live (cached)', 'db': '🔵 DB', 'fallback': '🟠 Fallback'}
+            st.caption(f"💱 1 {cost_cur} = **{cost_rate:,.2f}** VND — {_badges.get(r2.source, r2.source)}")
         else:
             cost_rate = 1.0
     cost_vnd = qty*cost_price*cost_rate
@@ -187,8 +206,8 @@ def _dialog_import_costbook(category):
         for p in products])
     st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(products)+38, 300))
     cur_code = products[0].get('currency_code','USD') if products else 'USD'
-    r = get_rate_to_vnd(cur_code)
-    exc_rate = st.number_input(f"Rate ({cur_code}→VND)", value=r.rate if r.ok else 1.0, format="%.2f", disabled=True)
+    _r_cb = get_rate_to_vnd(cur_code)
+    exc_rate = _show_rate(st, f"Rate ({cur_code}→VND)", _r_cb)
     if st.button(f"📦 Import {len(products)} items", type="primary", use_container_width=True):
         for p in products:
             cat = 'SERVICE' if p.get('is_service') else category
@@ -228,14 +247,11 @@ def _dialog_edit_item(idx):
     new_ccy = eq3.text_input("Cost Currency", value=it.get('cost_currency_code', 'VND'), key="edit_ccy")
 
     # Auto-fetch cost rate from currency
-    if new_ccy.upper().strip() == 'VND':
-        new_cost_rate = 1.0
-    else:
-        _r_edit = get_rate_to_vnd(new_ccy)
-        new_cost_rate = _r_edit.rate if _r_edit.ok else float(it.get('cost_exchange_rate', 1))
+    _r_edit_cost = get_rate_to_vnd(new_ccy)
+    new_cost_rate = _r_edit_cost.rate if _r_edit_cost.ok else float(it.get('cost_exchange_rate', 1))
 
     er1, er2 = st.columns(2)
-    er1.number_input("Cost Rate (→VND)", value=new_cost_rate, format="%.2f", key="edit_cost_rate", disabled=True)
+    _show_rate(er1, f"Cost Rate ({new_ccy}→VND)", _r_edit_cost)
     new_vendor = er2.text_input("Vendor", value=it.get('vendor_name', '') or '', key="edit_vendor")
 
     st.divider()
@@ -245,12 +261,9 @@ def _dialog_edit_item(idx):
     new_sell_ccy = es2.text_input("Sell Currency", value=sell_ccy, key="edit_sell_ccy")
 
     # Auto-fetch sell rate from currency
-    if new_sell_ccy.upper().strip() == 'VND':
-        new_sell_rate = 1.0
-    else:
-        _r_sell_edit = get_rate_to_vnd(new_sell_ccy)
-        new_sell_rate = _r_sell_edit.rate if _r_sell_edit.ok else float(it.get('sell_exchange_rate', 1))
-    es3.number_input("Sell Rate (→VND)", value=new_sell_rate, format="%.2f", key="edit_sell_rate", disabled=True)
+    _r_edit_sell = get_rate_to_vnd(new_sell_ccy)
+    new_sell_rate = _r_edit_sell.rate if _r_edit_sell.ok else float(it.get('sell_exchange_rate', 1))
+    _show_rate(es3, f"Sell Rate ({new_sell_ccy}→VND)", _r_edit_sell)
 
     new_notes = st.text_input("Notes", value=it.get('notes', '') or '', key="edit_notes")
 
