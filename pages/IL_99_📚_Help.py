@@ -28,6 +28,17 @@ QUICK_REF = {
         ("CLOSED", "⬛", "Đã đóng hoàn toàn", "Tạo Benchmark"),
         ("CANCELLED", "❌", "Đã hủy", "Lưu hồ sơ"),
     ],
+    "🏷️ Loại dự án (Project Type)": [
+        # (code, name, desc, alpha, beta, gamma)
+        ("AMR-L", "AMR Transport (10+ units)",         "Dự án AMR lớn (≥10 robot)",             "α=0.06", "β=0.40", "γ=0.04"),
+        ("AMR-S", "AMR Transport (5-6 units)",         "Dự án AMR nhỏ (5–6 robot)",             "α=0.06", "β=0.40", "γ=0.04"),
+        ("CVR",   "Conveyor / Transfer System",        "Hệ thống băng tải, chuyển giao",        "α=0.06", "β=0.40", "γ=0.04"),
+        ("SMF",   "Smart Factory (Integrated)",        "Nhà máy thông minh tích hợp",           "α=0.06", "β=0.40", "γ=0.04"),
+        ("VIS",   "Vision System (FMR/Camera)",        "Hệ thống vision, camera",               "α=0.06", "β=0.40", "γ=0.04"),
+        ("WMS",   "Warehouse Automation (ASRS+AMR)",   "Tự động hóa kho (ASRS + AMR)",          "α=0.06", "β=0.40", "γ=0.04"),
+        ("SPR",   "Spare Parts Supply",                "Bán linh kiện thay thế",                "α=0.08", "β=0.30", "γ=0.02"),
+        ("SVC",   "Service Deployment",                "Dịch vụ triển khai (không bán SP)",     "α=0.03", "β=0.50", "γ=0.02"),
+    ],
     "💰 Công thức COGS A→F": [
         # (code, name, formula_estimate, source_actual, desc)
         ("A", "Equipment Cost",    "Nhập thủ công",              "Nhập thủ công từ invoice supplier",           "Chi phí thiết bị, máy móc"),
@@ -42,28 +53,38 @@ QUICK_REF = {
 SOP_STEPS = {
     "📝 Tạo dự án mới": [
         ("1", "Nhấn ➕ New Project ở sidebar", "Project Code tự sinh: IL-YYYY-UserID-NNN"),
-        ("2", "Tab Basic: điền Project Name, Type, Customer, Status = DRAFT", "Project Name là trường bắt buộc duy nhất"),
+        ("2", "Tab Basic: điền Project Name, Type, Customer, Status = DRAFT", "Project Name là trường bắt buộc duy nhất. Type mới: SPR (Spare Parts), SVC (Service Deployment)"),
         ("3", "Tab Financial: điền Contract Value, Currency, Exchange Rate", "Hệ thống tự fetch tỷ giá — xác nhận trước khi lưu"),
         ("4", "Tab Timeline: điền Est. Start / End", "Actual dates để trống, điền sau khi có thực tế"),
         ("5", "Tab Team: chọn PM và Sales", "Bắt buộc có PM"),
         ("6", "Nhấn 💾 Create → tạo Estimate ngay sau đó", "Không có Estimate = không có baseline Variance"),
+        ("7", "Xem/Sửa: tick chọn dự án trong bảng → nhấn 👁️ View hoặc ✏️ Edit ở action bar bên dưới", "Nhấn ✖ Deselect để bỏ chọn dòng"),
     ],
     "🔢 Ghi Labor Log": [
-        ("1", "Vào module Labor Logs của dự án", ""),
-        ("2", "Điền Work Date, Phase đúng giai đoạn thực tế", "KHÔNG dùng PRE_SALES cho công việc sau khi ký hợp đồng"),
-        ("3", "Chọn Worker (nội bộ) hoặc nhập subcontractor_name", ""),
-        ("4", "Nhập Man-days (0.5 = nửa ngày, tối đa 3.0 mỗi entry), Daily Rate, tick Is On-site", "Cần ghi > 3 ngày: tạo nhiều entry (VD: 3 + 2). Daily Rate tự gợi ý theo Level chọn ở trên"),
-        ("5", "Nếu Phase = PRE_SALES: chọn Presales Allocation (COGS/SGA)", "Dự án GO → COGS | NO_GO → SGA"),
-        ("6", "Đính kèm timesheet / email xác nhận", ""),
-        ("7", "Submit → Manager Approve → log vào COGS khi sync", "Log PENDING không được tính vào COGS"),
+        ("1", "Vào Cost Tracking → Sidebar chọn Project cụ thể (không chọn 'All Projects')", "Nút ➕ Log Labor xuất hiện ở sidebar khi đã chọn project"),
+        ("2", "Nhấn ➕ Log Labor ở sidebar → popup dialog", "Có thể lọc Phase / Approval / Date Range ở sidebar trước khi xem"),
+        ("3", "Điền Work Date, Phase đúng giai đoạn thực tế", "KHÔNG dùng PRE_SALES cho công việc sau khi ký hợp đồng"),
+        ("4", "Chọn Worker (nội bộ) hoặc nhập subcontractor_name", ""),
+        ("5", "Nhập Man-days (0.5 = nửa ngày, tối đa 3.0 mỗi entry), Daily Rate, tick Is On-site", "Cần ghi > 3 ngày: tạo nhiều entry (VD: 3 + 2). Daily Rate tự gợi ý theo Level"),
+        ("6", "Nếu Phase = PRE_SALES: chọn Presales Allocation (COGS/SGA)", "Dự án GO → COGS | NO_GO → SGA"),
+        ("7", "Đính kèm timesheet / email xác nhận", ""),
+        ("8", "Submit → chờ Manager Approve", "Log PENDING không được tính vào COGS. PM approve từng entry hoặc Approve All"),
     ],
     "💳 Ghi Expense": [
-        ("1", "Vào module Expenses của dự án", ""),
-        ("2", "Điền Expense Date, Category đúng loại, Phase đúng giai đoạn", ""),
-        ("3", "Nhập Amount và Currency. Exchange Rate tự fetch — kiểm tra lại", "Nếu ⚠️ fallback rate: nhập tỷ giá từ ngân hàng"),
-        ("4", "Điền Vendor Name và Receipt Number", ""),
-        ("5", "Upload scan hóa đơn / receipt vào Attachment", "Finance thường yêu cầu chứng từ trước khi approve"),
-        ("6", "Submit → Finance Approve → expense vào COGS khi sync", "Expense WARRANTY không vào khoản E"),
+        ("1", "Vào Cost Tracking → Sidebar chọn Project cụ thể", "Nút ➕ Add Expense xuất hiện ở sidebar"),
+        ("2", "Nhấn ➕ Add Expense → chọn Currency trước (ngoài form)", "Tỷ giá auto-fetch khi đổi currency"),
+        ("3", "Điền Expense Date, Category đúng loại, Phase đúng giai đoạn", ""),
+        ("4", "Nhập Amount. Exchange Rate tự fetch — kiểm tra lại", "Nếu ⚠️ fallback rate: nhập tỷ giá từ ngân hàng"),
+        ("5", "Điền Vendor Name và Receipt Number", "Vendor chọn từ danh sách hoặc nhập thủ công"),
+        ("6", "Upload scan hóa đơn / receipt vào Attachment", "Finance thường yêu cầu chứng từ trước khi approve"),
+        ("7", "Submit → chờ Finance Approve → expense vào COGS khi sync", "Expense WARRANTY không vào khoản E"),
+    ],
+    "📊 Xem Overview tất cả dự án": [
+        ("1", "Vào Cost Tracking → Sidebar để Project = 'All Projects' (mặc định)", "Hiện dashboard tổng hợp tất cả dự án"),
+        ("2", "Xem KPI: tổng Man-Days, Labor Cost, Expenses, Pending Items", "Chỉ tính records APPROVED cho cost KPIs"),
+        ("3", "Bảng Per-Project Summary: so sánh chi phí giữa các dự án", "Chỉ hiện dự án có data (bỏ qua dự án chưa phát sinh)"),
+        ("4", "PM: xem Pending Approvals — approve hàng loạt từ 1 chỗ", "Không cần vào từng dự án để approve"),
+        ("5", "Dùng Date Range filter để xem cost theo tháng / quý", "Tick 'Filter by date range' ở sidebar"),
     ],
     "🔄 Sync COGS Actual": [
         ("1", "Đảm bảo tất cả Labor Logs & Expenses đã được Approve", "Log/Expense PENDING bị bỏ qua hoàn toàn"),
@@ -251,6 +272,64 @@ QA_DATA = [
         "note": "Layer 1 (standard pre-sales) luôn vào SGA bất kể kết quả. Chỉ Layer 2 (special) mới cần quyết định.",
         "warning": "",
     },
+    {
+        "id": "Q13",
+        "tags": ["spare-part", "SPR", "project type"],
+        "question": "Dự án bán spare part cho khách hàng, chọn Project Type nào? COGS tính thế nào?",
+        "situation": "Khách hàng đặt mua bộ encoder thay thế + yêu cầu kỹ sư đến lắp 1 ngày.",
+        "sop": [
+            "**Project Type**: chọn **[SPR] Spare Parts Supply**.",
+            "**A — Equipment Cost**: giá mua linh kiện từ hãng (CIF/FOB).",
+            "**B — Logistics**: α mặc định = 0.08 (nhập khẩu). Override nếu mua nội địa.",
+            "**D — Labor**: nếu có kỹ sư lắp, ghi Labor Log bình thường (man_days = 1).",
+            "**Estimate**: nhập A, sales value, man_days nếu có. B/E/F tính tự động.",
+        ],
+        "note": "SPR thường có A cao (mua hàng), D thấp (ít labor). GP% chủ yếu phụ thuộc vào markup trên A.",
+        "warning": "",
+    },
+    {
+        "id": "Q14",
+        "tags": ["service", "SVC", "project type", "man-day"],
+        "question": "Hãng thuê mình cung cấp đội kỹ sư triển khai, không bán sản phẩm, dùng project type nào?",
+        "situation": "Partner Nhật thuê 3 kỹ sư deploy hệ thống 2 tháng, thanh toán T&M theo man-day.",
+        "sop": [
+            "**Project Type**: chọn **[SVC] Service Deployment**.",
+            "**A — Equipment**: bằng 0 hoặc rất nhỏ (chỉ tools/consumables nếu có).",
+            "**D — Labor**: là chi phí chính. Ghi Labor Log đầy đủ mỗi ngày/tuần.",
+            "**E — Travel**: β mặc định = 0.50 (kỹ sư đi site nhiều). Ghi Expense cho mỗi chuyến.",
+            "**Billing Type**: nên chọn TIME_MATERIAL nếu thanh toán theo man-day, hoặc LUMP_SUM nếu fixed price.",
+        ],
+        "note": "SVC có D chiếm tỷ trọng lớn nhất trong COGS. Theo dõi man-days thực tế vs estimate rất quan trọng.",
+        "warning": "",
+    },
+    {
+        "id": "Q15",
+        "tags": ["overview", "dashboard", "approve", "cost tracking"],
+        "question": "Làm sao xem tổng chi phí tất cả dự án và approve nhanh từ 1 chỗ?",
+        "situation": "PM quản lý 7 dự án, muốn xem tổng hợp cost và approve pending entries mà không vào từng dự án.",
+        "sop": [
+            "**Vào Cost Tracking** → để Project = **'All Projects'** ở sidebar (mặc định).",
+            "**Dashboard hiển thị**: tổng Man-Days, Labor Cost, Expenses (approved) và số Pending Items.",
+            "**Bảng Per-Project Summary**: so sánh labor/expense giữa các dự án.",
+            "**Pending Approvals** (PM only): 2 tab Labor/Expenses — xem tất cả entries cần approve across projects.",
+            "**Approve All**: nhấn nút để approve hàng loạt. Hoặc vào từng project để approve từng entry.",
+        ],
+        "note": "Dùng Date Range filter để xem cost theo tháng. Phase filter để chỉ xem ví dụ IMPLEMENTATION.",
+        "warning": "",
+    },
+    {
+        "id": "Q16",
+        "tags": ["UI", "deselect", "action bar", "table"],
+        "question": "Đã tick chọn 1 dòng trong bảng nhưng không tìm được cách bỏ chọn?",
+        "situation": "Chọn nhầm dòng labor log, muốn bỏ chọn để chọn dòng khác.",
+        "sop": [
+            "**Cách 1**: Nhấn nút **✖ Deselect** ở action bar bên dưới bảng.",
+            "**Cách 2**: Tick vào dòng khác để thay đổi selection.",
+            "**Action bar** hiện ra khi có dòng được chọn: gồm các nút Edit / Approve / Deselect.",
+        ],
+        "note": "Pattern áp dụng cho cả trang Projects, Labor Logs, và Expenses.",
+        "warning": "",
+    },
 ]
 
 # Tags list for filter
@@ -284,6 +363,24 @@ with tab_quickref:
                      "Ý nghĩa": st.column_config.TextColumn(width=260),
                      "Hành động tiếp theo": st.column_config.TextColumn(width=260),
                  })
+
+    st.divider()
+    st.subheader("Loại dự án (Project Type)")
+    st.caption("Mỗi loại có default hệ số α/β/γ riêng. Hệ số dùng trong Estimate (A→F formula) — có thể override khi lập estimate.")
+
+    type_rows = QUICK_REF["🏷️ Loại dự án (Project Type)"]
+    for code, name, desc, alpha, beta, gamma in type_rows:
+        highlight = "border-left:4px solid #28A745;" if code in ('SPR', 'SVC') else "border-left:4px solid #2E75B6;"
+        new_badge = ' <span style="background:#28A745;color:white;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px">MỚI</span>' if code in ('SPR', 'SVC') else ''
+        st.markdown(f"""
+        <div style="background:#F8F9FA;{highlight}
+                    padding:8px 14px;margin-bottom:4px;border-radius:4px;">
+            <span style="font-size:15px;font-weight:700;color:#1F4E79">[{code}]</span>
+            <span style="font-weight:600">{name}</span>{new_badge}
+            <span style="font-size:12px;color:#555;margin-left:8px">{desc}</span>
+            <br><span style="font-size:11px;color:#888">{alpha} &nbsp;|&nbsp; {beta} &nbsp;|&nbsp; {gamma}</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.divider()
     st.subheader("Công thức COGS A→F")
@@ -330,6 +427,14 @@ with tab_quickref:
     rc3.info("💡 **Lệch > 1%**\nCân nhắc cập nhật")
     rc4.info("ℹ️ **VND**\nKhông cần quy đổi")
 
+    st.divider()
+    st.subheader("Thao tác bảng dữ liệu")
+    st.caption("Pattern chung cho tất cả các trang: Projects, Cost Tracking (Labor / Expenses)")
+    ui1, ui2, ui3 = st.columns(3)
+    ui1.info("**Chọn dòng**\n\nTick checkbox bên trái → Action bar xuất hiện bên dưới bảng")
+    ui2.success("**Action bar**\n\n👁️ View / ✏️ Edit / ✅ Approve / ✖ Deselect — tùy context")
+    ui3.warning("**Bỏ chọn**\n\nNhấn **✖ Deselect** hoặc tick dòng khác")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — SOP
@@ -364,6 +469,22 @@ with tab_sop:
     if sop_choice == "📝 Tạo dự án mới":
         st.divider()
         st.info("**Sau khi tạo xong:** Vào module IL Estimates để tạo Estimate đầu tiên ngay. Không có Estimate = không có baseline để Variance Analysis sau này.")
+        st.success("**Project Types mới:** [SPR] Spare Parts Supply (bán linh kiện) | [SVC] Service Deployment (bán dịch vụ triển khai, không bán sản phẩm)")
+
+    elif sop_choice == "🔢 Ghi Labor Log":
+        st.divider()
+        st.info("**Sửa / Xóa entry:** Tick chọn entry trong bảng → nhấn ✏️ Edit ở action bar bên dưới. Chỉ entry PENDING mới sửa/xóa được.")
+        st.warning("**Approve:** PM tick chọn entry → nhấn ✅ Approve, hoặc dùng nút ✅ Approve All Pending ở cuối bảng.")
+
+    elif sop_choice == "💳 Ghi Expense":
+        st.divider()
+        st.info("**Currency chọn ngoài form** để hệ thống fetch tỷ giá trước khi điền amount. Sau khi chọn currency, tỷ giá tự điền vào form.")
+
+    elif sop_choice == "📊 Xem Overview tất cả dự án":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.success("**KPIs tổng hợp**\n- Man-Days (Approved)\n- Labor Cost (Approved)\n- Expenses (Approved)\n- Pending Items")
+        col_b.info("**Sidebar filters**\n- Project: All / specific\n- Date Range: from → to\n- Phase: All / specific\n- Approval: All / PENDING / APPROVED")
 
     elif sop_choice == "🔄 Sync COGS Actual":
         st.divider()
