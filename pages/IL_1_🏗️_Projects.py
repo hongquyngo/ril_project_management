@@ -243,7 +243,6 @@ def _dialog_edit_project(project_id: int):
         cancelled = col_cancel.form_submit_button("✖ Cancel", width="stretch")
 
     if cancelled:
-        st.session_state["open_view_pid"] = project_id
         st.rerun()
     if submitted:
         if not data['project_name']:
@@ -253,7 +252,6 @@ def _dialog_edit_project(project_id: int):
             update_project(project_id, data, user_id)
             st.success("✅ Project updated!")
             st.cache_data.clear()
-            st.session_state["open_view_pid"] = project_id
             st.rerun()
         except Exception as e:
             st.error(f"Save failed: {e}")
@@ -408,7 +406,7 @@ def _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search)
 
     event = st.dataframe(
         display_df,
-        key="proj_table",
+        key=f"proj_table_{st.session_state.get('_tbl_key', 0)}",
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -483,7 +481,7 @@ if selected_pid:
             f"**Selected:** `{proj_info['project_code']}` — {proj_info['project_name']} "
             f"({STATUS_COLORS.get(proj_info['status'], '⚪')} {proj_info['status']})"
         )
-        ab1, ab2, ab3, _ = st.columns([1, 1, 1, 4])
+        ab1, ab2, ab3, ab4, _ = st.columns([1, 1, 1, 1, 3])
         if ab1.button("👁️ View", type="primary", use_container_width=True):
             st.session_state["open_view_pid"] = selected_pid
             st.rerun()
@@ -496,6 +494,9 @@ if selected_pid:
                     st.success("Project deleted.")
                     st.cache_data.clear()
                     st.rerun()
+        if ab4.button("✖ Deselect", use_container_width=True):
+            st.session_state["_tbl_key"] = st.session_state.get("_tbl_key", 0) + 1
+            st.rerun()
 
 # ── Dialog triggers (only via explicit button click) ──────────────────────────
 if st.session_state.pop("open_create", False):
