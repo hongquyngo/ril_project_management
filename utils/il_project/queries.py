@@ -1018,3 +1018,247 @@ def create_benchmark(data: Dict, created_by: str) -> int:
 def _get_engine():
     from ..db import get_db_engine
     return get_db_engine()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PRODUCTS & COSTBOOK LOOKUP — for Estimate line items
+# ══════════════════════════════════════════════════════════════════════════════
+
+def search_products(search: str = '', is_service: Optional[bool] = None, limit: int = 50) -> List[Dict]:
+    """Search products by name or pt_code. For Estimate GP product picker."""
+    sql = """
+        SELECT p.id, p.name, p.pt_code, p.uom, p.package_size,
+               p.is_service, b.brand_name
+        FROM products p
+        LEFT JOIN brands b ON p.brand_id = b.id
+        WHERE p.delete_flag = 0
+    """
+    params: Dict = {}
+    if search:
+        sql += " AND (p.name LIKE :s OR p.pt_code LIKE :s)"
+        params['s'] = f"%{search}%"
+    if is_service is not None:
+        sql += " AND p.is_service = :svc"
+        params['svc'] = 1 if is_service else 0
+    sql += " ORDER BY p.name LIMIT :lim"
+    params['lim'] = limit
+    return execute_query(sql, params)
+
+
+def get_costbook_for_product(product_id: int) -> List[Dict]:
+    """
+    Find costbook entries (vendor cost) for a product.
+    Returns active + recently expired, sorted by date DESC.
+    """
+    return execute_query("""
+        SELECT
+            cd.id AS costbook_detail_id,
+            cb.costbook_number, cb.vendor_quote_number,
+            v.english_name AS vendor_name,
+            cd.unit_price, cd.purchase_unit_price,
+            cur.code AS currency_code, cur.id AS currency_id,
+            cb.costbook_date, cb.valid_to,
+            CASE
+                WHEN cb.valid_to IS NULL THEN 'No Expiry'
+                WHEN cb.valid_to >= CURDATE() THEN 'Active'
+                ELSE 'Expired'
+            END AS status
+        FROM costbook_details cd
+        JOIN costbooks cb ON cd.costbook_id = cb.id AND cb.delete_flag = 0 AND cb.is_approved = 1
+        JOIN products p ON cd.product_id = p.id
+        LEFT JOIN companies v ON cb.vendor_id = v.id
+        LEFT JOIN currencies cur ON cd.product_currency_id = cur.id
+        WHERE cd.product_id = :pid AND cd.delete_flag = 0 AND cd.is_active = 1
+        ORDER BY
+            CASE WHEN cb.valid_to IS NULL OR cb.valid_to >= CURDATE() THEN 0 ELSE 1 END,
+            cb.costbook_date DESC
+        LIMIT 10
+    """, {'pid': product_id})
+
+
+def get_quotation_for_product(product_id: int, customer_id: Optional[int] = None) -> List[Dict]:
+    """
+    Find quotation entries (selling price) for a product.
+    Optionally filter by customer (buyer_id = project's customer).
+    """
+    sql = """
+        SELECT
+            qd.id AS quotation_detail_id,
+            q.quotation_number,
+            buyer.english_name AS customer_name,
+            qd.selling_unit_price, qd.quantity,
+            cur.code AS currency_code, cur.id AS currency_id,
+            q.quotation_date, q.valid_to,
+            CASE
+                WHEN q.valid_to IS NULL THEN 'No Expiry'
+                WHEN q.valid_to >= CURDATE() THEN 'Active'
+                ELSE 'Expired'
+            END AS status
+        FROM quotation_details qd
+        JOIN quotations q ON qd.quotation_id = q.id AND q.delete_flag = 0 AND q.is_approved = 1
+        LEFT JOIN companies buyer ON q.buyer_id = buyer.id
+        LEFT JOIN currencies cur ON q.currency_id = cur.id
+        WHERE qd.product_id = :pid AND qd.delete_flag = 0
+    """
+    params: Dict = {'pid': product_id}
+    if customer_id:
+        sql += " AND q.buyer_id = :cid"
+        params['cid'] = customer_id
+    sql += " ORDER BY q.quotation_date DESC LIMIT 10"
+    return execute_query(sql, params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ESTIMATE LINE ITEMS — CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_estimate_line_items(estimate_id: int) -> pd.DataFrame:
+    return execute_query_df("""
+        SELECT
+            li.id, li.cogs_category, li.product_id,
+            li.item_description, li.brand_name, li.pt_code,
+            li.costbook_detail_id, li.vendor_name, li.vendor_quote_ref, li.costbook_number,
+            li.unit_cost, cc.code AS cost_currency, li.cost_exchange_rate,
+            li.quotation_detail_id,
+            li.unit_sell, sc.code AS sell_currency, li.sell_exchange_rate,
+            li.quantity, li.uom,
+            li.amount_cost_vnd, li.amount_sell_vnd,
+            li.attachment_s3_key, li.attachment_filename,
+            li.notes, li.view_order
+        FROM il_estimate_line_items li
+        LEFT JOIN currencies cc ON li.cost_currency_id = cc.id
+        LEFT JOIN currencies sc ON li.sell_currency_id = sc.id
+        WHERE li.estimate_id = :eid AND li.delete_flag = 0
+        ORDER BY li.cogs_category, li.view_order, li.id
+    """, {'eid': estimate_id})
+
+
+def create_estimate_line_item(data: Dict, created_by: str) -> int:
+    sql = """
+        INSERT INTO il_estimate_line_items (
+            estimate_id, cogs_category, product_id,
+            item_description, brand_name, pt_code,
+            costbook_detail_id, vendor_name, vendor_quote_ref, costbook_number,
+            unit_cost, cost_currency_id, cost_exchange_rate,
+            quotation_detail_id, unit_sell, sell_currency_id, sell_exchange_rate,
+            quantity, uom, notes, view_order, created_by
+        ) VALUES (
+            :estimate_id, :cogs_category, :product_id,
+            :item_description, :brand_name, :pt_code,
+            :costbook_detail_id, :vendor_name, :vendor_quote_ref, :costbook_number,
+            :unit_cost, :cost_currency_id, :cost_exchange_rate,
+            :quotation_detail_id, :unit_sell, :sell_currency_id, :sell_exchange_rate,
+            :quantity, :uom, :notes, :view_order, :created_by
+        )
+    """
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text(sql), {**data, 'created_by': created_by})
+        conn.commit()
+        return result.lastrowid
+
+
+def delete_estimate_line_item(item_id: int) -> bool:
+    rows = execute_update(
+        "UPDATE il_estimate_line_items SET delete_flag=1 WHERE id=:id",
+        {'id': item_id}
+    )
+    return rows > 0
+
+
+def get_costbook_products_for_import(costbook_id: int) -> List[Dict]:
+    """Get all products from a costbook for bulk import into estimate."""
+    return execute_query("""
+        SELECT
+            cd.id AS costbook_detail_id,
+            cd.product_id, p.name AS product_name, p.pt_code, p.uom, p.is_service,
+            b.brand_name,
+            cd.unit_price, cd.purchase_unit_price,
+            cur.code AS currency_code, cur.id AS currency_id,
+            cb.costbook_number, cb.vendor_quote_number,
+            v.english_name AS vendor_name
+        FROM costbook_details cd
+        JOIN costbooks cb ON cd.costbook_id = cb.id
+        JOIN products p ON cd.product_id = p.id
+        LEFT JOIN brands b ON p.brand_id = b.id
+        LEFT JOIN currencies cur ON cd.product_currency_id = cur.id
+        LEFT JOIN companies v ON cb.vendor_id = v.id
+        WHERE cd.costbook_id = :cbid AND cd.delete_flag = 0 AND cd.is_active = 1
+        ORDER BY cd.view_order, cd.id
+    """, {'cbid': costbook_id})
+
+
+def get_active_costbooks() -> List[Dict]:
+    """Get list of active/valid costbooks for import dropdown."""
+    return execute_query("""
+        SELECT
+            cb.id, cb.costbook_number, cb.vendor_quote_number,
+            v.english_name AS vendor_name,
+            cb.costbook_date, cb.valid_to,
+            COUNT(cd.id) AS line_count,
+            CASE
+                WHEN cb.valid_to IS NULL THEN 'No Expiry'
+                WHEN cb.valid_to >= CURDATE() THEN 'Active'
+                ELSE 'Expired'
+            END AS status
+        FROM costbooks cb
+        JOIN costbook_details cd ON cb.id = cd.costbook_id AND cd.delete_flag = 0 AND cd.is_active = 1
+        LEFT JOIN companies v ON cb.vendor_id = v.id
+        WHERE cb.delete_flag = 0 AND cb.is_approved = 1
+        GROUP BY cb.id
+        ORDER BY
+            CASE WHEN cb.valid_to IS NULL OR cb.valid_to >= CURDATE() THEN 0 ELSE 1 END,
+            cb.costbook_date DESC
+        LIMIT 50
+    """)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ESTIMATE ATTACHMENTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def update_line_item_attachment(item_id: int, s3_key: str, filename: str) -> bool:
+    """Attach a file to a specific line item (vendor quote per item)."""
+    rows = execute_update("""
+        UPDATE il_estimate_line_items
+        SET attachment_s3_key = :key, attachment_filename = :name
+        WHERE id = :id AND delete_flag = 0
+    """, {'id': item_id, 'key': s3_key, 'name': filename})
+    return rows > 0
+
+
+def create_estimate_attachment(estimate_id: int, s3_key: str, filename: str,
+                                description: str = None, file_size_kb: int = None,
+                                uploaded_by: str = None) -> int:
+    """Upload estimate-level attachment (scope, BOQ, proposal)."""
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            INSERT INTO il_estimate_attachments
+                (estimate_id, s3_key, filename, file_type, file_size_kb, description, uploaded_by)
+            VALUES
+                (:eid, :key, :name, :ftype, :size, :desc, :by)
+        """), {'eid': estimate_id, 'key': s3_key, 'name': filename,
+               'ftype': ext, 'size': file_size_kb, 'desc': description, 'by': uploaded_by})
+        conn.commit()
+        return result.lastrowid
+
+
+def get_estimate_attachments(estimate_id: int) -> List[Dict]:
+    """List all attachments for an estimate."""
+    return execute_query("""
+        SELECT id, s3_key, filename, file_type, file_size_kb,
+               description, uploaded_by, upload_date
+        FROM il_estimate_attachments
+        WHERE estimate_id = :eid AND delete_flag = 0
+        ORDER BY upload_date DESC
+    """, {'eid': estimate_id})
+
+
+def delete_estimate_attachment(attachment_id: int) -> bool:
+    rows = execute_update(
+        "UPDATE il_estimate_attachments SET delete_flag=1 WHERE id=:id",
+        {'id': attachment_id}
+    )
+    return rows > 0

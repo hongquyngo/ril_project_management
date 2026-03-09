@@ -56,6 +56,21 @@ from .queries import (
     # Benchmarks
     get_benchmarks_df,
     create_benchmark,
+    # Products & Costbook lookup
+    search_products,
+    get_costbook_for_product,
+    get_quotation_for_product,
+    # Estimate line items
+    get_estimate_line_items,
+    create_estimate_line_item,
+    delete_estimate_line_item,
+    get_costbook_products_for_import,
+    get_active_costbooks,
+    # Estimate attachments
+    update_line_item_attachment,
+    create_estimate_attachment,
+    get_estimate_attachments,
+    delete_estimate_attachment,
 )
 
 from .helpers import (
@@ -94,6 +109,11 @@ __all__ = [
     'get_milestones_df', 'create_milestone', 'update_milestone',
     'get_variance_df', 'upsert_variance_row',
     'get_benchmarks_df', 'create_benchmark',
+    'search_products', 'get_costbook_for_product', 'get_quotation_for_product',
+    'get_estimate_line_items', 'create_estimate_line_item', 'delete_estimate_line_item',
+    'get_costbook_products_for_import', 'get_active_costbooks',
+    'update_line_item_attachment', 'create_estimate_attachment',
+    'get_estimate_attachments', 'delete_estimate_attachment',
     'calculate_estimate', 'get_go_no_go', 'fmt_vnd', 'fmt_percent', 'pct_change',
     'COGS_LABELS', 'PHASE_LABELS', 'STATUS_COLORS',
     'ILProjectS3Manager',

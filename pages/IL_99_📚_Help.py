@@ -60,6 +60,18 @@ SOP_STEPS = {
         ("6", "Nhấn 💾 Create → tạo Estimate ngay sau đó", "Không có Estimate = không có baseline Variance"),
         ("7", "Xem/Sửa: tick chọn dự án trong bảng → nhấn 👁️ View hoặc ✏️ Edit ở action bar bên dưới", "Nhấn ✖ Deselect để bỏ chọn dòng"),
     ],
+    "📊 Lập Estimate GP": [
+        ("1", "Vào Estimate GP → Sidebar chọn Project", "Sidebar hiện thông tin project: Type, Distance, Environment, Import + hệ số mặc định α/β/γ"),
+        ("2", "Tab New Estimate → chọn Label và Type (QUICK / DETAILED)", "Tick '📋 Pre-fill from active estimate' nếu muốn copy từ Rev trước"),
+        ("3", "Nhập Sales Value — giá bán dự kiến cho khách hàng", "Đây là số quan trọng nhất — quyết định GP%"),
+        ("4", "Tab A+B: nhập Equipment Cost + Logistics", "Ghi notes chi tiết: supplier, quote ref, số lượng. VD: '6 AMR VNP15 @$18,500 [Q-VN-001]'"),
+        ("5", "Tab C: nhập Fabrication Cost", "Ghi notes NCC + báo giá. Dùng Line-Item Calculator bên dưới form để tính chi tiết từng hạng mục"),
+        ("6", "Tab D+E: nhập Man-Days, Day Rate, Team Size", "Xem benchmark: Man-days gợi ý theo project type ở sidebar. β tự điền theo distance"),
+        ("7", "Tab F: kiểm tra Warranty Reserve γ", "CLEAN 2–3%, NORMAL 4%, HARSH 5%. Override nếu có yêu cầu đặc biệt"),
+        ("8", "Kiểm tra Live Preview bên phải: COGS breakdown, GP%, Go/No-Go", "Preview cập nhật real-time khi thay đổi số liệu"),
+        ("9", "Upload báo giá supplier / forwarder / NCC vào Quotation Attachments", "Hỗ trợ PDF, Excel, ảnh. Lưu S3 folder project"),
+        ("10", "Nhấn 💾 Save & Activate", "Estimate mới tự động activated. Notes từ line-item calculator tự merge vào"),
+    ],
     "🔢 Ghi Labor Log": [
         ("1", "Vào Cost Tracking → Sidebar chọn Project cụ thể (không chọn 'All Projects')", "Nút ➕ Log Labor xuất hiện ở sidebar khi đã chọn project"),
         ("2", "Nhấn ➕ Log Labor ở sidebar → popup dialog", "Có thể lọc Phase / Approval / Date Range ở sidebar trước khi xem"),
@@ -393,6 +405,69 @@ QA_DATA = [
         "note": "Budget bar chỉ hiện khi có cả Estimate (active) VÀ COGS Actual đã Sync. Chưa Sync = chưa có data actual.",
         "warning": "",
     },
+    {
+        "id": "Q21",
+        "tags": ["estimate", "line-item", "báo giá", "A", "C"],
+        "question": "Nhận báo giá từ NCC (ví dụ rack, trolley), muốn nhập chi tiết từng item vào Estimate, làm sao?",
+        "situation": "NCC Hải Long gửi báo giá: 32 Rack KT 1040x1340mm @3,750,000 = 120,000,000 VND (đã VAT). Muốn lưu chi tiết hạng mục.",
+        "sop": [
+            "**Vào Estimate GP → chọn project → tab New Estimate**.",
+            "**Kéo xuống phần Line-Item Calculators** (nằm dưới form).",
+            "Chọn tab **📦 A — Equipment Items** hoặc **🔧 C — Fabrication Items** tùy loại.",
+            "Nhấn **➕ Add item**: điền Description (VD: Rack 1040x1340mm), Qty = 32, Unit Price = 3,750,000, Supplier = Hải Long QV25-3W.",
+            "Calculator auto-tính: 32 × 3,750,000 = **120,000,000**.",
+            "**Copy tổng** vào ô A/C Equipment/Fabrication Total trong form bên trên.",
+            "Khi Save, notes từ calculator **tự động merge** vào Notes A/C.",
+        ],
+        "note": "Line-item calculator nằm ngoài form (interactive, không cần submit). Có thể thêm nhiều items cùng lúc. Nhấn 🗑 Clear all để xóa hết và nhập lại.",
+        "warning": "",
+    },
+    {
+        "id": "Q22",
+        "tags": ["estimate", "pre-fill", "revision", "scope change"],
+        "question": "Khách hàng thay đổi scope, cần tạo Estimate V2 dựa trên V1. Có cách nào nhanh hơn nhập lại từ đầu?",
+        "situation": "Estimate V1 đã GO, nhưng khách hàng thêm 10 trolley. Cần revision mới mà không mất data V1.",
+        "sop": [
+            "**Tab New Estimate → tick '📋 Pre-fill from active estimate'**.",
+            "Tất cả fields tự động điền từ Rev hiện tại: Sales, A, B, C, D, E, F, coefficients, notes.",
+            "**Chỉ sửa phần thay đổi**: VD tăng C thêm 10 trolley, tăng man_days.",
+            "Label = 'Rev 2 — scope change +10 trolley'. Assessment notes ghi lý do revision.",
+            "Nhấn 💾 Save & Activate → Rev 2 tự động thay thế Rev 1 làm active.",
+        ],
+        "note": "Rev 1 vẫn được lưu trong tab History. Có thể activate lại Rev cũ bất cứ lúc nào. History hiện thêm cột α/β/γ để so sánh coefficients giữa các revision.",
+        "warning": "",
+    },
+    {
+        "id": "Q23",
+        "tags": ["estimate", "attachment", "báo giá", "chứng từ"],
+        "question": "Muốn lưu file báo giá từ supplier/forwarder cùng với Estimate, upload ở đâu?",
+        "situation": "Có PDF báo giá thiết bị từ VisionNav và báo giá shipping từ DHL. Muốn lưu kèm Estimate.",
+        "sop": [
+            "**Tab New Estimate → kéo xuống phần 📎 Quotation Attachments** (cuối trang).",
+            "Drag & drop hoặc Browse files — hỗ trợ PDF, Excel, Word, ảnh.",
+            "Có thể upload **nhiều files cùng lúc**.",
+            "Khi nhấn Save & Activate, files được **upload lên S3** dưới folder project.",
+            "Files này lưu tham chiếu — dùng khi cần review lại basis of estimate.",
+        ],
+        "note": "Files lưu theo project (không theo estimate version). Nếu cần xem lại, vào Projects → View → xem attachments.",
+        "warning": "",
+    },
+    {
+        "id": "Q24",
+        "tags": ["estimate", "SPR", "SVC", "quick", "detailed"],
+        "question": "Dự án Spare Parts (SPR) chỉ mua hàng gửi cho KH, Estimate đơn giản lắm, có cần điền hết A→F không?",
+        "situation": "Bán 5 bộ encoder cho khách, mua CIF $2,000/bộ, bán $3,200/bộ. Không có labor, không fabrication.",
+        "sop": [
+            "**Chọn Type = QUICK** (không cần DETAILED cho SPR đơn giản).",
+            "**Sales Value**: 5 × $3,200 × tỷ giá = VND.",
+            "**Tab A+B**: A = 5 × $2,000 × tỷ giá. α = 0.08 (nhập khẩu). B tự tính.",
+            "**Tab C, D+E, F**: để 0 nếu không phát sinh.",
+            "Hệ thống tính: COGS = A + B, GP = Sales - COGS.",
+            "**SVC (service)** tương tự: A = 0, D là chi phí chính, nhập man_days + rate.",
+        ],
+        "note": "Không bắt buộc điền tất cả 6 khoản. Khoản nào = 0 thì bỏ qua. Hệ thống vẫn tính GP% đúng.",
+        "warning": "",
+    },
 ]
 
 # Tags list for filter
@@ -533,6 +608,13 @@ with tab_sop:
         st.divider()
         st.info("**Sau khi tạo xong:** Vào module IL Estimates để tạo Estimate đầu tiên ngay. Không có Estimate = không có baseline để Variance Analysis sau này.")
         st.success("**Project Types mới:** [SPR] Spare Parts Supply (bán linh kiện) | [SVC] Service Deployment (bán dịch vụ triển khai, không bán sản phẩm)")
+
+    elif sop_choice == "📊 Lập Estimate GP":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**Layout mới — 4 tab COGS:**\n- 📦 **A+B**: Equipment + Logistics\n- 🔧 **C**: Fabrication\n- 👷 **D+E**: Labor + Travel\n- 🛡️ **F**: Warranty\n\nMỗi tab có Notes riêng để ghi supplier, quote ref, chi tiết hạng mục.")
+        col_b.success("**Công cụ hỗ trợ:**\n- 📋 **Pre-fill**: copy từ Rev trước\n- 📋 **Line-Item Calculator**: tính chi tiết A, C\n- 📎 **Quotation Attachments**: upload PDF, Excel\n- 📐 **Live Preview**: GP% cập nhật real-time")
+        st.warning("**Lưu ý:** Line-Item Calculator nằm **bên dưới form** (ngoài form). Sau khi tính xong, copy tổng vào ô tương ứng trong form rồi nhấn Save. Notes từ calculator tự merge vào khi Save.")
 
     elif sop_choice == "🔢 Ghi Labor Log":
         st.divider()
