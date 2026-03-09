@@ -688,6 +688,31 @@ def get_cogs_actual(project_id: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
+def get_all_cogs_summary_df() -> pd.DataFrame:
+    """Cross-project COGS summary: estimate vs actual with GP% for portfolio view."""
+    return execute_query_df("""
+        SELECT
+            p.id AS project_id, p.project_code, p.project_name,
+            p.status, pt.code AS type_code,
+            e.total_cogs     AS est_cogs,
+            e.sales_value    AS est_sales,
+            e.estimated_gp_percent AS est_gp_pct,
+            a.total_cogs     AS act_cogs,
+            a.sales_value    AS act_sales,
+            a.actual_gp_percent AS act_gp_pct,
+            a.last_sync_date,
+            a.is_finalized
+        FROM il_projects p
+        LEFT JOIN il_project_types pt ON p.project_type_id = pt.id
+        LEFT JOIN il_project_cogs_estimate e
+            ON e.project_id = p.id AND e.is_active = 1 AND e.delete_flag = 0
+        LEFT JOIN il_project_cogs_actual a
+            ON a.project_id = p.id AND a.delete_flag = 0
+        WHERE p.delete_flag = 0
+        ORDER BY p.project_code DESC
+    """)
+
+
 def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
     """
     Aggregate from detail tables → upsert il_project_cogs_actual.
