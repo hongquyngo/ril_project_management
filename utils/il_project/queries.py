@@ -418,10 +418,10 @@ def update_labor_log(log_id: int, data: Dict, modified_by: str) -> bool:
             work_date = :work_date, man_days = :man_days, daily_rate = :daily_rate,
             phase = :phase, description = :description, is_on_site = :is_on_site,
             employee_level = :employee_level, presales_allocation = :presales_allocation,
-            modified_by = :modified_by, version = version + 1
+            version = version + 1
         WHERE id = :id AND delete_flag = 0 AND approval_status = 'PENDING'
     """
-    rows = execute_update(sql, {**data, 'id': log_id, 'modified_by': modified_by})
+    rows = execute_update(sql, {**data, 'id': log_id})
     return rows > 0
 
 
@@ -436,8 +436,8 @@ def approve_labor_log(log_id: int, approved_by: int, status: str = 'APPROVED') -
 
 def soft_delete_labor_log(log_id: int, modified_by: str) -> bool:
     rows = execute_update(
-        "UPDATE il_project_labor_logs SET delete_flag=1, modified_by=:m WHERE id=:id AND approval_status='PENDING'",
-        {'id': log_id, 'm': modified_by}
+        "UPDATE il_project_labor_logs SET delete_flag=1 WHERE id=:id AND approval_status='PENDING'",
+        {'id': log_id}
     )
     return rows > 0
 
@@ -508,26 +508,24 @@ def approve_expense(expense_id: int, approved_by: int, status: str = 'APPROVED')
 
 def soft_delete_expense(expense_id: int, modified_by: str) -> bool:
     rows = execute_update(
-        "UPDATE il_project_expenses SET delete_flag=1, modified_by=:m WHERE id=:id AND approval_status='PENDING'",
-        {'id': expense_id, 'm': modified_by}
+        "UPDATE il_project_expenses SET delete_flag=1 WHERE id=:id AND approval_status='PENDING'",
+        {'id': expense_id}
     )
     return rows > 0
 
 
 def update_expense(expense_id: int, data: Dict, modified_by: str) -> bool:
     """Update a PENDING expense (pre-approval edit)."""
-    amount_vnd = float(data.get('amount', 0) or 0) * float(data.get('exchange_rate', 1) or 1)
     sql = """
         UPDATE il_project_expenses SET
             expense_date = :expense_date, category = :category, phase = :phase,
             employee_id = :employee_id,
             amount = :amount, currency_id = :currency_id, exchange_rate = :exchange_rate,
-            amount_vnd = :amount_vnd,
             description = :description, vendor_name = :vendor_name, receipt_number = :receipt_number,
-            modified_by = :modified_by, version = version + 1
+            version = version + 1
         WHERE id = :id AND delete_flag = 0 AND approval_status = 'PENDING'
     """
-    rows = execute_update(sql, {**data, 'amount_vnd': amount_vnd, 'id': expense_id, 'modified_by': modified_by})
+    rows = execute_update(sql, {**data, 'id': expense_id})
     return rows > 0
 
 
@@ -536,9 +534,9 @@ def update_expense_attachment(expense_id: int, s3_key: str, filename: str, modif
     rows = execute_update("""
         UPDATE il_project_expenses
         SET attachment_s3_key = :key, attachment_filename = :name,
-            modified_by = :m, version = version + 1
+            version = version + 1
         WHERE id = :id AND delete_flag = 0
-    """, {'id': expense_id, 'key': s3_key, 'name': filename, 'm': modified_by})
+    """, {'id': expense_id, 'key': s3_key, 'name': filename})
     return rows > 0
 
 
@@ -547,9 +545,9 @@ def update_labor_attachment(log_id: int, s3_key: str, filename: str, modified_by
     rows = execute_update("""
         UPDATE il_project_labor_logs
         SET attachment_s3_key = :key, attachment_filename = :name,
-            modified_by = :m, version = version + 1
+            version = version + 1
         WHERE id = :id AND delete_flag = 0
-    """, {'id': log_id, 'key': s3_key, 'name': filename, 'm': modified_by})
+    """, {'id': log_id, 'key': s3_key, 'name': filename})
     return rows > 0
 
 
@@ -595,9 +593,9 @@ def bulk_update_presales_allocation(project_id: int, allocation: str, modified_b
     """Set allocation (SGA/COGS) for all Layer-2 costs when win/lose decision made."""
     rows = execute_update("""
         UPDATE il_project_presales_costs
-        SET allocation = :alloc, allocation_date = CURDATE(), modified_by = :m, version = version + 1
+        SET allocation = :alloc, allocation_date = CURDATE(), version = version + 1
         WHERE project_id = :pid AND cost_layer = :layer AND delete_flag = 0
-    """, {'pid': project_id, 'alloc': allocation, 'm': modified_by, 'layer': layer})
+    """, {'pid': project_id, 'alloc': allocation, 'layer': layer})
     return rows
 
 
