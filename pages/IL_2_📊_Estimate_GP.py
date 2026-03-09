@@ -123,21 +123,24 @@ def _dialog_add_product(category):
     qty = qc1.number_input("Quantity", value=1.0, min_value=0.01, format="%.2f")
     cost_price = float(cb['unit_price'] if cb else 0)
     cost_cur = cb['currency_code'] if cb else 'VND'
-    cost_rate = qc2.number_input(f"Cost Rate ({cost_cur}→VND)", value=default_rate, format="%.2f")
+    cost_rate = qc2.number_input(f"Cost Rate ({cost_cur}→VND)", value=default_rate, format="%.2f", disabled=True)
     sell_price = float(sel_qd['selling_unit_price'] if sel_qd else 0)
     sell_cur = sel_qd['currency_code'] if sel_qd else 'VND'
     sell_default_rate = 1.0
     if sel_qd:
         r_sell = get_rate_to_vnd(sell_cur)
         sell_default_rate = r_sell.rate if r_sell.ok else 1.0
-    sell_rate = qc3.number_input(f"Sell Rate ({sell_cur}→VND)", value=sell_default_rate, format="%.2f")
+    sell_rate = qc3.number_input(f"Sell Rate ({sell_cur}→VND)", value=sell_default_rate, format="%.2f", disabled=True)
     if not cb:
         mc1, mc2 = st.columns(2)
         cost_price = mc1.number_input("Manual Cost", value=0.0, format="%.2f")
         cost_cur = mc2.text_input("Currency", value="VND")
         if cost_cur != 'VND':
             r2 = get_rate_to_vnd(cost_cur)
-            cost_rate = st.number_input("Rate", value=r2.rate if r2.ok else 1.0, format="%.2f")
+            cost_rate = r2.rate if r2.ok else 1.0
+            st.caption(f"💱 Rate: 1 {cost_cur} = **{cost_rate:,.2f}** VND")
+        else:
+            cost_rate = 1.0
     cost_vnd = qty*cost_price*cost_rate
     sell_vnd = qty*sell_price*sell_rate
     pc1, pc2, pc3 = st.columns(3)
@@ -185,7 +188,7 @@ def _dialog_import_costbook(category):
     st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(products)+38, 300))
     cur_code = products[0].get('currency_code','USD') if products else 'USD'
     r = get_rate_to_vnd(cur_code)
-    exc_rate = st.number_input(f"Rate ({cur_code}→VND)", value=r.rate if r.ok else 1.0, format="%.2f")
+    exc_rate = st.number_input(f"Rate ({cur_code}→VND)", value=r.rate if r.ok else 1.0, format="%.2f", disabled=True)
     if st.button(f"📦 Import {len(products)} items", type="primary", use_container_width=True):
         for p in products:
             cat = 'SERVICE' if p.get('is_service') else category
@@ -224,14 +227,30 @@ def _dialog_edit_item(idx):
     new_cost = eq2.number_input("Unit Cost", value=float(it.get('unit_cost', 0)), format="%.2f", key="edit_cost")
     new_ccy = eq3.text_input("Cost Currency", value=it.get('cost_currency_code', 'VND'), key="edit_ccy")
 
+    # Auto-fetch cost rate from currency
+    if new_ccy.upper().strip() == 'VND':
+        new_cost_rate = 1.0
+    else:
+        _r_edit = get_rate_to_vnd(new_ccy)
+        new_cost_rate = _r_edit.rate if _r_edit.ok else float(it.get('cost_exchange_rate', 1))
+
     er1, er2 = st.columns(2)
-    new_cost_rate = er1.number_input("Cost Rate (→VND)", value=float(it.get('cost_exchange_rate', 1)), format="%.2f", key="edit_cost_rate")
+    er1.number_input("Cost Rate (→VND)", value=new_cost_rate, format="%.2f", key="edit_cost_rate", disabled=True)
     new_vendor = er2.text_input("Vendor", value=it.get('vendor_name', '') or '', key="edit_vendor")
 
     st.divider()
-    es1, es2 = st.columns(2)
+    sell_ccy = it.get('sell_currency_code', 'VND') or 'VND'
+    es1, es2, es3 = st.columns(3)
     new_sell = es1.number_input("Unit Sell", value=float(it.get('unit_sell', 0)), format="%.2f", key="edit_sell")
-    new_sell_rate = es2.number_input("Sell Rate (→VND)", value=float(it.get('sell_exchange_rate', 1)), format="%.2f", key="edit_sell_rate")
+    new_sell_ccy = es2.text_input("Sell Currency", value=sell_ccy, key="edit_sell_ccy")
+
+    # Auto-fetch sell rate from currency
+    if new_sell_ccy.upper().strip() == 'VND':
+        new_sell_rate = 1.0
+    else:
+        _r_sell_edit = get_rate_to_vnd(new_sell_ccy)
+        new_sell_rate = _r_sell_edit.rate if _r_sell_edit.ok else float(it.get('sell_exchange_rate', 1))
+    es3.number_input("Sell Rate (→VND)", value=new_sell_rate, format="%.2f", key="edit_sell_rate", disabled=True)
 
     new_notes = st.text_input("Notes", value=it.get('notes', '') or '', key="edit_notes")
 
@@ -252,6 +271,7 @@ def _dialog_edit_item(idx):
         it['cost_exchange_rate'] = new_cost_rate
         it['vendor_name'] = new_vendor
         it['unit_sell'] = new_sell
+        it['sell_currency_code'] = new_sell_ccy
         it['sell_exchange_rate'] = new_sell_rate
         it['notes'] = new_notes or None
         _update_item(idx, it)
@@ -270,7 +290,11 @@ with tab_new:
     st.markdown(f"**Project:** `{project['project_code']}` — {project['project_name']}")
     prefill = {}
     if active_est:
-        if st.checkbox(f"📋 Pre-fill from Rev {active_est['estimate_version']}", value=False, key="prefill_chk"):
+        if st.checkbox(
+            f"📋 Copy from Rev {active_est['estimate_version']}",
+            value=False, key="prefill_chk",
+            help="Copy all data (coefficients, line items, overrides) from the current active estimate into this new revision. Useful for creating an updated version with minor changes."
+        ):
             prefill = active_est
             if not st.session_state["_est_items"]:
                 existing = get_estimate_line_items(active_est['id'])
@@ -279,13 +303,20 @@ with tab_new:
     st.divider()
     col_form, col_result = st.columns([3, 2])
     with col_form:
-        st.subheader("📋 Line Items")
-        st.caption("Products from catalog + Costbook pricing. Or import entire costbook.")
+        # ── Section 1: Line Items ────────────────────────────────────────
+        st.subheader("① Line Items")
         b1, b2, b3, b4 = st.columns(4)
-        if b1.button("🔍 Equipment (A)", use_container_width=True): _dialog_add_product("A")
-        if b2.button("🔧 Fabrication (C)", use_container_width=True): _dialog_add_product("C")
-        if b3.button("📦 Import Costbook", use_container_width=True): _dialog_import_costbook("A")
-        if b4.button("🗑 Clear", use_container_width=True): _clear_items(); st.rerun()
+        if b1.button("🔍 Equipment (A)", use_container_width=True,
+                      help="Add equipment/hardware products from the product catalog (COGS category A)"):
+            _dialog_add_product("A")
+        if b2.button("🔧 Fabrication (C)", use_container_width=True,
+                      help="Add custom fabrication items — metalwork, racking, wiring (COGS category C)"):
+            _dialog_add_product("C")
+        if b3.button("📦 Import Costbook", use_container_width=True,
+                      help="Bulk import all products from a vendor costbook"):
+            _dialog_import_costbook("A")
+        if b4.button("🗑 Clear All", use_container_width=True,
+                     help="Remove all line items"): _clear_items(); st.rerun()
         items = st.session_state["_est_items"]
         if items:
             rows = []
@@ -294,7 +325,7 @@ with tab_new:
                 rows.append({'📎': '📎' if it.get('_attachment') else '', '#': i+1, 'Cat': it.get('cogs_category',''), 'Product': (it.get('item_description','') or '')[:35],
                     'Vendor': (it.get('vendor_name','') or '')[:20], 'Qty': it.get('quantity',0),
                     'Cost': f"{it.get('unit_cost',0):,.2f}", 'CCY': it.get('cost_currency_code',''),
-                    'Total': f"{cv:,.0f}", 'Ref': (it.get('costbook_number','') or '')[:15]})
+                    'Total VND': f"{cv:,.0f}", 'Ref': (it.get('costbook_number','') or '')[:15]})
             tbl_key = f"li_tbl_{st.session_state.get('_li_key',0)}"
             event = st.dataframe(pd.DataFrame(rows), key=tbl_key, width="stretch", hide_index=True,
                 on_select="rerun", selection_mode="single-row",
@@ -310,17 +341,18 @@ with tab_new:
                 if sc3.button("✖ Deselect", use_container_width=True):
                     st.session_state["_li_key"] = st.session_state.get("_li_key",0)+1; st.rerun()
             a_total = _items_total('A'); c_total = _items_total('C')
-            st.markdown(f"**A: {a_total:,.0f}** | **C: {c_total:,.0f}** | **Sell: {_items_sell_total():,.0f}**")
+            st.caption(f"**A (Equipment):** {a_total:,.0f} ₫ &nbsp;|&nbsp; **C (Fabrication):** {c_total:,.0f} ₫ &nbsp;|&nbsp; **Sell Total:** {_items_sell_total():,.0f} ₫")
         else:
             a_total = c_total = 0
             st.info("No items yet. Add from catalog or import costbook.")
         with st.expander("✏️ Manual item (not in catalog)"):
             mc1, mc2 = st.columns(2)
-            m_cat = mc1.selectbox("Category", ["A","C","SERVICE"], key="m_cat")
+            m_cat = mc1.selectbox("Category", ["A","C","SERVICE"], key="m_cat",
+                                   help="A = Equipment, C = Fabrication, SERVICE = Service items")
             m_desc = mc2.text_input("Description *", key="m_desc")
             md1, md2, md3 = st.columns(3)
             m_qty = md1.number_input("Qty", value=1.0, min_value=0.01, format="%.2f", key="m_qty")
-            m_price = md2.number_input("Unit Cost", value=0.0, format="%.0f", key="m_price")
+            m_price = md2.number_input("Unit Cost (VND)", value=0.0, format="%.0f", key="m_price")
             m_vendor = md3.text_input("Vendor", key="m_vendor")
             if st.button("➕ Add manual", key="m_add", use_container_width=True):
                 if m_desc and m_price > 0:
@@ -332,41 +364,74 @@ with tab_new:
                         'sell_currency_id': None, 'sell_exchange_rate': 1.0,
                         'quantity': m_qty, 'uom': 'Pcs', 'notes': None})
                     st.rerun()
-        st.divider()
-        st.subheader("📎 Estimate Attachments")
-        st.caption("Upload scope documents, BOQ, technical proposals, vendor quotes for the entire estimate.")
-        est_files = st.file_uploader("Drag & drop files", type=["pdf","jpg","jpeg","png","xlsx","docx"],
-                                      accept_multiple_files=True, key="est_attachments")
+
+        # ── Section 2: Coefficients & Formula ────────────────────────────
         st.divider()
         with st.form("estimate_form"):
-            st.subheader("📐 Coefficients & Overrides")
+            st.subheader("② COGS Formula")
             hc1, hc2, hc3 = st.columns(3)
-            label = hc1.text_input("Label", value=f"Rev {next_version}")
-            est_type = hc2.selectbox("Type", ["QUICK","DETAILED"], index=1 if prefill.get('estimate_type')=='DETAILED' else 0)
-            sales_value = hc3.number_input("Sales Override (0=auto)", value=float(prefill.get('sales_value',0) or 0), format="%.0f")
-            st.caption(f"A items: {a_total:,.0f} | C items: {c_total:,.0f} | Sell items: {_items_sell_total():,.0f}")
+            label = hc1.text_input("Label", value=f"Rev {next_version}",
+                                    help="Short name for this estimate revision")
+            est_type = hc2.selectbox("Type", ["QUICK","DETAILED"], index=1 if prefill.get('estimate_type')=='DETAILED' else 0,
+                                      help="QUICK = rough estimate, DETAILED = full breakdown with line items")
+            sales_value = hc3.number_input("Sales Value (VND)", value=float(prefill.get('sales_value',0) or 0), format="%.0f",
+                                            help="Contract value in VND. Set 0 to use total Sell from line items.")
+
+            st.divider()
+            st.markdown("**A — Equipment &nbsp;&nbsp;|&nbsp;&nbsp; C — Fabrication**")
+            st.caption("Leave 0 to use totals from line items above. Override to enter a manual value.")
             ac1, ac2 = st.columns(2)
-            a_override = ac1.number_input("A Override (0=items)", value=0.0, format="%.0f")
-            c_override = ac2.number_input("C Override (0=items)", value=0.0, format="%.0f")
-            st.markdown("**B = A × α**")
+            a_override = ac1.number_input("A Override (VND)", value=0.0, format="%.0f",
+                                           help=f"Current line items total: {a_total:,.0f} ₫. Enter value > 0 to override.")
+            c_override = ac2.number_input("C Override (VND)", value=0.0, format="%.0f",
+                                           help=f"Current line items total: {c_total:,.0f} ₫. Enter value > 0 to override.")
+
+            st.divider()
+            st.markdown("**B — Logistics & Import** &nbsp; `B = A × α`")
             bc1, bc2 = st.columns([1,2])
-            alpha = bc1.number_input("α", value=float(prefill.get('alpha_rate',def_alpha) or def_alpha), format="%.4f")
-            b_manual = bc2.number_input("B Override", value=0.0, format="%.0f")
-            st.markdown("**D = days × rate × team**")
+            alpha = bc1.number_input("α (logistics ratio)", value=float(prefill.get('alpha_rate',def_alpha) or def_alpha), format="%.4f",
+                                      help=f"Logistics cost as percentage of equipment cost. Default for this project type: {def_alpha}")
+            b_manual = bc2.number_input("B Override (VND)", value=0.0, format="%.0f",
+                                         help="Enter value > 0 to override the formula B = A × α")
+
+            st.divider()
+            st.markdown("**D — Direct Labor** &nbsp; `D = days × daily rate × team size`")
             dd1, dd2, dd3 = st.columns(3)
-            man_days = dd1.number_input("Days", value=int(prefill.get('d_man_days',0) or 0), min_value=0)
-            day_rate = dd2.number_input("Rate", value=float(prefill.get('d_man_day_rate',1_500_000) or 1_500_000), format="%.0f")
-            team_size = dd3.number_input("Team", value=float(prefill.get('d_team_size',1.0) or 1.0), format="%.1f")
-            d_manual = st.number_input("D Override", value=0.0, format="%.0f")
-            st.markdown("**E = D × β**")
+            man_days = dd1.number_input("Man-Days", value=int(prefill.get('d_man_days',0) or 0), min_value=0,
+                                         help="Total estimated working days for the project")
+            day_rate = dd2.number_input("Daily Rate (VND)", value=float(prefill.get('d_man_day_rate',1_500_000) or 1_500_000), format="%.0f",
+                                         help="Average daily cost per person (VND)")
+            team_size = dd3.number_input("Team Size", value=float(prefill.get('d_team_size',1.0) or 1.0), format="%.1f",
+                                          help="Average number of people working simultaneously")
+            d_manual = st.number_input("D Override (VND)", value=0.0, format="%.0f",
+                                        help="Enter value > 0 to override the formula D = days × rate × team")
+
+            st.divider()
+            st.markdown("**E — Travel & Site Overhead** &nbsp; `E = D × β`")
             ec1, ec2 = st.columns([1,2])
-            beta = ec1.number_input("β", value=float(prefill.get('beta_rate',def_beta) or def_beta), format="%.4f")
-            e_manual = ec2.number_input("E Override", value=0.0, format="%.0f")
-            st.markdown("**F = (A+C) × γ**")
+            beta = ec1.number_input("β (travel ratio)", value=float(prefill.get('beta_rate',def_beta) or def_beta), format="%.4f",
+                                     help=f"Travel & site cost as ratio of direct labor. Default: {def_beta}")
+            e_manual = ec2.number_input("E Override (VND)", value=0.0, format="%.0f",
+                                         help="Enter value > 0 to override the formula E = D × β")
+
+            st.divider()
+            st.markdown("**F — Warranty Reserve** &nbsp; `F = (A + C) × γ`")
             fc1, fc2 = st.columns([1,2])
-            gamma = fc1.number_input("γ", value=float(prefill.get('gamma_rate',def_gamma) or def_gamma), format="%.4f")
-            f_manual = fc2.number_input("F Override", value=0.0, format="%.0f")
-            assessment_notes = st.text_area("Assessment Notes", value=prefill.get('assessment_notes') or '', height=70)
+            gamma = fc1.number_input("γ (warranty ratio)", value=float(prefill.get('gamma_rate',def_gamma) or def_gamma), format="%.4f",
+                                      help=f"Warranty reserve as ratio of equipment + fabrication cost. Default: {def_gamma}")
+            f_manual = fc2.number_input("F Override (VND)", value=0.0, format="%.0f",
+                                         help="Enter value > 0 to override the formula F = (A+C) × γ")
+
+            st.divider()
+            assessment_notes = st.text_area("Assessment Notes", value=prefill.get('assessment_notes') or '', height=70,
+                                             help="Assumptions, risks, or notes about this estimate")
+
+            # ── Section 3: Attachments (inside form) ─────────────────────
+            st.divider()
+            st.markdown("**📎 Attachments** — scope documents, BOQ, vendor quotes")
+            est_files = st.file_uploader("Drag & drop files", type=["pdf","jpg","jpeg","png","xlsx","docx"],
+                                          accept_multiple_files=True, key="est_attachments")
+
             submitted = st.form_submit_button("💾 Save & Activate", type="primary", use_container_width=True)
     with col_result:
         st.markdown("### 📐 Live Estimate")
