@@ -74,14 +74,42 @@ cond_thr = float(pt.get('gp_conditional_threshold', 18))
 # ── Session state items ──────────────────────────────────────────────────────
 if "_est_items" not in st.session_state:
     st.session_state["_est_items"] = []
-def _add_item(item): st.session_state["_est_items"].append(item)
+
+def _sanitize_item(item: dict) -> dict:
+    """Clean pandas NaN/NaT → None so MySQL doesn't choke.
+    Called when loading items from DataFrame (active estimate prefill)
+    and before saving to DB."""
+    import math
+    clean = {}
+    for k, v in item.items():
+        if isinstance(v, float) and math.isnan(v):
+            clean[k] = None
+        elif hasattr(v, 'isoformat'):  # pd.Timestamp / NaT
+            try:
+                if pd.isna(v):
+                    clean[k] = None
+                else:
+                    clean[k] = v
+            except (TypeError, ValueError):
+                clean[k] = v
+        else:
+            try:
+                if pd.isna(v):
+                    clean[k] = None
+                    continue
+            except (TypeError, ValueError):
+                pass
+            clean[k] = v
+    return clean
+
+def _add_item(item): st.session_state["_est_items"].append(_sanitize_item(item))
 def _remove_item(idx):
     if 0 <= idx < len(st.session_state["_est_items"]):
         st.session_state["_est_items"].pop(idx)
 def _clear_items(): st.session_state["_est_items"] = []
 def _update_item(idx, item):
     if 0 <= idx < len(st.session_state["_est_items"]):
-        st.session_state["_est_items"][idx] = item
+        st.session_state["_est_items"][idx] = _sanitize_item(item)
 def _items_total(cat=None):
     items = st.session_state["_est_items"]
     if cat: items = [i for i in items if i.get('cogs_category') == cat]
@@ -507,7 +535,7 @@ with tab_new:
             new_id = create_estimate(est_data, user_id)
             activate_estimate(project_id, new_id, user_id)
             for i, it in enumerate(items):
-                create_estimate_line_item({
+                li_data = _sanitize_item({
                     'estimate_id': new_id, 'cogs_category': it.get('cogs_category','A'),
                     'product_id': it.get('product_id'), 'item_description': it.get('item_description',''),
                     'brand_name': it.get('brand_name',''), 'pt_code': it.get('pt_code',''),
@@ -520,27 +548,27 @@ with tab_new:
                     'unit_sell': it.get('unit_sell',0), 'sell_currency_id': it.get('sell_currency_id'),
                     'sell_exchange_rate': it.get('sell_exchange_rate',1),
                     'quantity': it.get('quantity',1), 'uom': it.get('uom','Pcs'),
-                    'notes': it.get('notes'), 'view_order': i}, user_id)
-                # Upload line-item attachments
-                s3 = _get_s3()
-                if s3:
-                    for i, it in enumerate(items):
-                        att = it.get('_attachment')
-                        if att and att.get('bytes'):
-                            ok, s3_key = s3.upload_project_file(att['bytes'], att['name'], project_id)
-                            if ok:
-                                # Find the line item ID (view_order = i)
-                                li_saved = get_estimate_line_items(new_id)
-                                if not li_saved.empty and i < len(li_saved):
-                                    update_line_item_attachment(int(li_saved.iloc[i]['id']), s3_key, att['name'])
-                    # Upload estimate-level attachments
-                    if est_files:
-                        for f in est_files:
-                            ok, s3_key = s3.upload_project_file(f.read(), f.name, project_id)
-                            if ok:
-                                create_estimate_attachment(new_id, s3_key, f.name,
-                                    file_size_kb=f.size // 1024 if hasattr(f, 'size') else None,
-                                    uploaded_by=user_id)
+                    'notes': it.get('notes'), 'view_order': i})
+                create_estimate_line_item(li_data, user_id)
+            # Upload line-item attachments (outside the line-item insert loop)
+            s3 = _get_s3()
+            if s3:
+                for i, it in enumerate(items):
+                    att = it.get('_attachment')
+                    if att and att.get('bytes'):
+                        ok, s3_key = s3.upload_project_file(att['bytes'], att['name'], project_id)
+                        if ok:
+                            li_saved = get_estimate_line_items(new_id)
+                            if not li_saved.empty and i < len(li_saved):
+                                update_line_item_attachment(int(li_saved.iloc[i]['id']), s3_key, att['name'])
+                # Upload estimate-level attachments
+                if est_files:
+                    for f in est_files:
+                        ok, s3_key = s3.upload_project_file(f.read(), f.name, project_id)
+                        if ok:
+                            create_estimate_attachment(new_id, s3_key, f.name,
+                                file_size_kb=f.size // 1024 if hasattr(f, 'size') else None,
+                                uploaded_by=user_id)
             st.success(f"✅ Rev {next_version} saved with {len(items)} line items!")
             _clear_items(); st.cache_data.clear(); st.rerun()
         except Exception as e:
