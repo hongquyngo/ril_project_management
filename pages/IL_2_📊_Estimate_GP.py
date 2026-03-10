@@ -303,16 +303,27 @@ with tab_new:
     st.markdown(f"**Project:** `{project['project_code']}` — {project['project_name']}")
     prefill = {}
     if active_est:
-        if st.checkbox(
-            f"📋 Copy from Rev {active_est['estimate_version']}",
-            value=False, key="prefill_chk",
-            help="Copy all data (coefficients, line items, overrides) from the current active estimate into this new revision. Useful for creating an updated version with minor changes."
-        ):
+        # Auto-load coefficients + line items from active estimate by default
+        # so users can add/remove items incrementally without losing existing data
+        start_fresh = st.checkbox(
+            "🔄 Start from scratch (ignore active estimate)",
+            value=False, key="prefill_fresh_chk",
+            help="Uncheck = build on current active estimate (coefficients + line items carried over). Check = start with empty slate."
+        )
+        if not start_fresh:
             prefill = active_est
             if not st.session_state["_est_items"]:
                 existing = get_estimate_line_items(active_est['id'])
                 if not existing.empty:
                     for _, row in existing.iterrows(): _add_item(row.to_dict())
+                    st.toast(f"📋 Loaded {len(existing)} items from Rev {active_est['estimate_version']}")
+        else:
+            # User explicitly chose fresh start — clear if items were auto-loaded
+            if st.session_state.get("_prefill_loaded"):
+                _clear_items()
+            st.session_state["_prefill_loaded"] = False
+        if not start_fresh:
+            st.session_state["_prefill_loaded"] = True
     st.divider()
     col_form, col_result = st.columns([3, 2])
     with col_form:
