@@ -442,16 +442,56 @@ def _analyze_estimate_for_pr(est_id: int, cogs_filter: list) -> dict:
     }
 
 
+# ══════════════════════════════════════════════════════════════════
+# WIZARD — Create PR (multi-step flow)
+# ══════════════════════════════════════════════════════════════════
+# Steps:  ① Setup (header) → ② Items (import/add/edit) → ③ Review & Confirm
+# State:  pr_wiz_*  keys in session_state (cleaned on create or cancel)
+
+def _init_pr_wizard(project_id: int):
+    """Initialize wizard state — only if fresh or different project."""
+    if st.session_state.get('pr_wiz_pid') != project_id:
+        st.session_state.update({
+            'pr_wiz_pid':          project_id,
+            'pr_wiz_step':         1,
+            'pr_wiz_header':       {},
+            'pr_wiz_items':        [],      # list[dict] — in-memory items
+            'pr_wiz_show_import':  False,
+            'pr_wiz_show_add':     False,
+            'pr_wiz_edit_idx':     -1,
+            'pr_wiz_tbl_ver':      0,       # bump to deselect dataframe
+        })
+
+
+def _cleanup_pr_wizard():
+    """Remove all wizard keys from session_state."""
+    for k in [k for k in st.session_state if k.startswith('pr_wiz_')]:
+        del st.session_state[k]
+
+
+def _wiz_step_bar(step: int):
+    """Render horizontal step indicator."""
+    labels = {1: '① Setup', 2: '② Items', 3: '③ Review & Confirm'}
+    parts = []
+    for i, lbl in labels.items():
+        if   i <  step: parts.append(f'✅ ~~{lbl}~~')
+        elif i == step: parts.append(f'🔵 **{lbl}**')
+        else:           parts.append(f'⚪ {lbl}')
+    st.markdown(' &nbsp;→&nbsp; '.join(parts))
+
+
 @st.dialog("🛒 New Purchase Request", width="large")
 def _dialog_create_pr(project_id: int):
     project = get_project(project_id)
     if not project:
         st.error("Project not found."); return
-
     if not is_project_pm(project_id, emp_int_id) and not is_admin:
         st.warning("Only the PM of this project can create a PR."); return
 
-    # ── Header context ──
+    _init_pr_wizard(project_id)
+    step = st.session_state['pr_wiz_step']
+
+    # ── Project banner (always visible) ──────────────────────────
     st.markdown(f"**Project:** `{project['project_code']}` — {project['project_name']}")
     st.caption(f"Customer: {project.get('customer_name', '—')} | Status: **{project['status']}**")
 
@@ -459,202 +499,691 @@ def _dialog_create_pr(project_id: int):
     if est:
         est_cogs = float(est.get('total_cogs', 0) or 0)
         if est_cogs > 0:
-            st.info(f"💰 Estimate Budget: **{fmt_vnd(est_cogs)}** (Rev {est.get('estimate_version', '—')})")
+            st.info(f"💰 Budget: **{fmt_vnd(est_cogs)}** (Rev {est.get('estimate_version', '—')})")
 
-    # ══════════════════════════════════════════════════════════════
-    # STEP 1 — Type Selection (OUTSIDE form → reactive auto-fill)
-    # ══════════════════════════════════════════════════════════════
+    _wiz_step_bar(step)
     st.divider()
-    st.markdown("##### ① Select PR Type")
 
+    if   step == 1: _wiz_step1_setup(project_id, project, est)
+    elif step == 2: _wiz_step2_items(project_id, project, est)
+    elif step == 3: _wiz_step3_review(project_id, project, est)
+
+
+# ──────────────────────────────────────────────────────────────────
+# STEP 1 — Setup (type, vendor, currency, priority …)
+# ──────────────────────────────────────────────────────────────────
+
+def _wiz_step1_setup(project_id, project, est):
+    header = st.session_state.get('pr_wiz_header', {})
+
+    st.markdown("##### ① PR Setup")
+
+    # Type selector (outside form for reactivity) ─────────────
     tc1, tc2 = st.columns(2)
-    pr_type = tc1.selectbox("Type", ['EQUIPMENT', 'FABRICATION', 'SERVICE', 'MIXED'],
-                            key="cr_type",
-                            help="EQUIPMENT = A (hardware/sensors), FABRICATION = C (racking/metalwork), "
-                                 "SERVICE = labor/consulting, MIXED = combined")
-    # Auto-set COGS from type
+    types = ['EQUIPMENT', 'FABRICATION', 'SERVICE', 'MIXED']
+    type_idx = types.index(header['pr_type']) if header.get('pr_type') in types else 0
+    pr_type = tc1.selectbox(
+        "Type", types, index=type_idx, key="wiz_s1_type",
+        help="EQUIPMENT = A (hardware/sensors), FABRICATION = C (racking), "
+             "SERVICE = D (labor/consulting), MIXED = multiple categories",
+    )
     auto_cogs = _TYPE_COGS_MAP.get(pr_type, 'A')
-    _cogs_labels = {'A': 'A — Equipment', 'C': 'C — Fabrication', 'D': 'D — Service/Labor', 'MIXED': 'MIXED'}
-    tc2.text_input("COGS Category", value=_cogs_labels.get(auto_cogs, auto_cogs), disabled=True,
-                   help="Auto-set from PR Type. A=Equipment, C=Fabrication, D=Service, MIXED=Multiple")
+    _cogs_lbl = {'A': 'A — Equipment', 'C': 'C — Fabrication',
+                 'D': 'D — Service/Labor', 'MIXED': 'MIXED'}
+    tc2.text_input("COGS Category", value=_cogs_lbl.get(auto_cogs, auto_cogs),
+                   disabled=True, help="Auto-set from PR Type")
 
-    # ── Analyze estimate items for this type ──
-    analysis = {}
-    importable_items = []
+    # Quick preview of matching estimate items ─────────────
     if est:
         cogs_filter = _COGS_FILTER_MAP.get(auto_cogs, ['A', 'C', 'SERVICE'])
         analysis = _analyze_estimate_for_pr(est['id'], cogs_filter)
-        importable_items = analysis.get('items', [])
-
         if analysis['item_count'] > 0:
-            # Show analysis summary
-            ac1, ac2, ac3 = st.columns(3)
-            ac1.metric("Available Items", analysis['item_count'])
-            ac2.metric("Total Cost", fmt_vnd(analysis['total_vnd']))
-            if analysis['dominant_vendor']:
-                ac3.metric("Top Vendor", analysis['dominant_vendor'][:20])
-
-            # Vendor breakdown (if multiple)
-            if len(analysis.get('vendor_breakdown', {})) > 1:
-                vb = analysis['vendor_breakdown']
-                parts = [f"{v}: {fmt_vnd(a)}" for v, a in
-                         sorted(vb.items(), key=lambda x: -x[1])[:4]]
-                st.caption(f"Vendor breakdown: {' | '.join(parts)}")
-
-            # Preview items (collapsible)
-            with st.expander(f"📋 Preview {analysis['item_count']} items to import", expanded=False):
-                if analysis['preview_rows']:
-                    st.dataframe(
-                        pd.DataFrame(analysis['preview_rows']),
-                        width="stretch", hide_index=True,
-                        height=min(35 * len(analysis['preview_rows']) + 38, 250),
-                    )
-                    if analysis['item_count'] > 15:
-                        st.caption(f"... and {analysis['item_count'] - 15} more items")
+            st.caption(f"📋 **{analysis['item_count']} estimate items** available "
+                       f"for import ({fmt_vnd(analysis['total_vnd'])})")
         else:
-            st.caption(f"ℹ️ No importable estimate items for category **{auto_cogs}**. "
-                       "You can add items manually after creating the PR.")
+            st.caption(f"ℹ️ No importable estimate items for **{auto_cogs}** — "
+                       "you can add items manually in the next step.")
 
-    # ══════════════════════════════════════════════════════════════
-    # STEP 2 — PR Details (form)
-    # ══════════════════════════════════════════════════════════════
-    st.divider()
-    st.markdown("##### ② PR Details")
-
-    # Pre-compute suggested values from analysis
-    suggested_vendor = analysis.get('dominant_vendor', '')
-    suggested_currency = analysis.get('dominant_currency', 'VND')
-
-    with st.form("create_pr_form"):
-        # Row 1: PR number + Priority
+    # Form fields ──────────────────────────────────────────────
+    with st.form("wiz_step1_form"):
         h1, h2 = st.columns(2)
         pr_number = generate_pr_number()
-        h1.text_input("PR Number", value=pr_number, disabled=True)
-        priority = h2.selectbox("Priority", ['NORMAL', 'LOW', 'HIGH', 'URGENT'])
+        h1.text_input("PR Number (auto)", value=pr_number, disabled=True)
+        priorities = ['NORMAL', 'LOW', 'HIGH', 'URGENT']
+        pri_idx = priorities.index(header['priority']) if header.get('priority') in priorities else 0
+        priority = h2.selectbox("Priority", priorities, index=pri_idx)
 
-        # Row 2: Vendor + Currency
+        # Vendor ───────────────────────────────────────────────
         v1, v2 = st.columns(2)
         vendor_names_list = ["(Select later)"] + [v['name'] for v in vendors]
-        # Auto-select suggested vendor if found in list
-        vendor_default_idx = 0
-        if suggested_vendor:
-            for i, vn in enumerate(vendor_names_list):
-                if vn == suggested_vendor:
-                    vendor_default_idx = i
-                    break
-        vendor_sel = v1.selectbox("Primary Vendor", vendor_names_list, index=vendor_default_idx,
-                                  help=f"💡 Suggested: {suggested_vendor}" if suggested_vendor else None)
-        vendor_id = None
-        if vendor_sel != "(Select later)":
-            vendor_id = next((v['id'] for v in vendors if v['name'] == vendor_sel), None)
+        vd_idx = 0
+        if header.get('vendor_name') and header['vendor_name'] in vendor_names_list:
+            vd_idx = vendor_names_list.index(header['vendor_name'])
+        vendor_sel = v1.selectbox("Primary Vendor", vendor_names_list, index=vd_idx)
 
+        # Currency ─────────────────────────────────────────────
         cur_opts = [c['code'] for c in currencies]
-        # Auto-select suggested currency
-        cur_default_idx = cur_opts.index(suggested_currency) if suggested_currency in cur_opts else (
+        cur_default = header.get('currency_code', 'VND')
+        cur_idx = cur_opts.index(cur_default) if cur_default in cur_opts else (
             cur_opts.index('VND') if 'VND' in cur_opts else 0)
-        cur_sel = v2.selectbox("Currency", cur_opts, index=cur_default_idx)
+        cur_sel = v2.selectbox("Currency", cur_opts, index=cur_idx)
         currency_id = currencies[cur_opts.index(cur_sel)]['id']
 
-        # Row 3: Exchange rate (AUTO — read-only display)
+        # Exchange rate (read-only) ────────────────────────────
         _rate_res = get_rate_to_vnd(cur_sel)
         exc_rate = _rate_res.rate if _rate_res.ok else 1.0
-        _badges = {'same': 'ℹ️ Same currency', 'api': '✅ Live API', 'cache': '✅ Cached',
-                   'db': '🔵 DB rate', 'fallback': '⚠️ Fallback'}
-        rate_badge = _badges.get(_rate_res.source, _rate_res.source)
-
-        if cur_sel == 'VND':
-            st.caption(f"💱 Currency: VND — no conversion needed")
-        else:
+        if cur_sel != 'VND':
             rc1, rc2 = st.columns([2, 1])
-            rc1.text_input(f"Exchange Rate (1 {cur_sel} = ? VND)",
-                           value=f"{exc_rate:,.4f}", disabled=True,
-                           help="Auto-fetched. Rate is locked to ensure consistency.")
-            rc2.caption(f"\n{rate_badge}")
+            rc1.text_input(f"Exchange Rate (1 {cur_sel} → VND)",
+                           value=f"{exc_rate:,.4f}", disabled=True)
+            _badges = {'same': 'ℹ️', 'api': '✅ Live', 'cache': '✅ Cache',
+                       'db': '🔵 DB', 'fallback': '⚠️ Fallback'}
+            rc2.caption(f"\n{_badges.get(_rate_res.source, '')} {_rate_res.source}")
             if not _rate_res.ok:
-                st.warning(f"⚠️ {_rate_res.warning or 'Could not fetch live rate. Using reference rate.'}")
+                st.warning(_rate_res.warning or 'Using reference rate — verify before use.')
+        else:
+            st.caption("💱 VND — no conversion needed")
 
-        # Row 4: Required date + Justification
-        req_date = st.date_input("Required Date", value=None,
-                                  help="Ngày cần hàng. Để trống nếu không urgent.")
-        justification = st.text_area("Justification / Business Reason", height=70,
-                                      help="Mô tả lý do mua hàng, phục vụ phase nào của project")
+        # Date + justification ─────────────────────────────────
+        req_date = st.date_input("Required Date", value=header.get('required_date'),
+                                 help="Ngày cần hàng. Để trống nếu không urgent.")
+        justification = st.text_area("Justification / Business Reason",
+                                     value=header.get('justification', ''), height=70)
 
-        # Row 5: Import option
-        auto_import = False
-        if importable_items:
-            auto_import = st.checkbox(
-                f"📋 Auto-import {len(importable_items)} items from estimate (Rev {est.get('estimate_version', '?')})",
-                value=True,
-                help=f"Import {len(importable_items)} available items ({auto_cogs}) "
-                     f"totaling {fmt_vnd(analysis.get('total_vnd', 0))}"
+        go_next = st.form_submit_button("Next: Items →", type="primary",
+                                        use_container_width=True)
+
+    if go_next:
+        vendor_id, vendor_name = None, ''
+        if vendor_sel != "(Select later)":
+            vendor_name = vendor_sel
+            vendor_id = next((v['id'] for v in vendors if v['name'] == vendor_sel), None)
+
+        st.session_state['pr_wiz_header'] = {
+            'pr_number':     pr_number,
+            'pr_type':       pr_type,
+            'cogs_category': auto_cogs,
+            'priority':      priority,
+            'vendor_id':     vendor_id,
+            'vendor_name':   vendor_name,
+            'currency_id':   currency_id,
+            'currency_code': cur_sel,
+            'exchange_rate': exc_rate,
+            'required_date': req_date,
+            'justification': justification,
+            'estimate_id':   est['id'] if est else None,
+        }
+        st.session_state['pr_wiz_step'] = 2
+        st.rerun()
+
+
+# ──────────────────────────────────────────────────────────────────
+# STEP 2 — Items (import / add / edit / delete)
+# ──────────────────────────────────────────────────────────────────
+
+def _wiz_step2_items(project_id, project, est):
+    header = st.session_state['pr_wiz_header']
+    items  = st.session_state['pr_wiz_items']
+
+    st.markdown("##### ② Items")
+    st.caption(f"Type: **{header['pr_type']}** | COGS: **{header['cogs_category']}** | "
+               f"Vendor: {header.get('vendor_name') or '—'} | "
+               f"Currency: **{header['currency_code']}**")
+
+    # ── Action buttons ───────────────────────────────────────
+    ab1, ab2, _ab3 = st.columns([1.3, 1.1, 1.5])
+    if est and ab1.button("📋 Import from Estimate", use_container_width=True):
+        st.session_state['pr_wiz_show_import'] = True
+        st.session_state['pr_wiz_show_add']    = False
+        st.session_state['pr_wiz_edit_idx']    = -1
+        st.rerun()
+    if ab2.button("➕ Add Manual Item", use_container_width=True):
+        st.session_state['pr_wiz_show_add']    = True
+        st.session_state['pr_wiz_show_import'] = False
+        st.session_state['pr_wiz_edit_idx']    = -1
+        st.rerun()
+
+    # ── Import panel ─────────────────────────────────────────
+    if st.session_state.get('pr_wiz_show_import') and est:
+        _wiz_import_panel(est, header, items)
+
+    # ── Add manual panel ─────────────────────────────────────
+    if st.session_state.get('pr_wiz_show_add'):
+        _wiz_add_panel(header, items)
+
+    # ── Items table ──────────────────────────────────────────
+    st.divider()
+    if items:
+        rows = []
+        for i, it in enumerate(items):
+            rows.append({
+                '#': i + 1,
+                'Cat':     it.get('cogs_category', ''),
+                'Description': (it.get('item_description', '') or '')[:45],
+                'Vendor':  (it.get('vendor_name', '') or '')[:25],
+                'Qty':     f"{it.get('quantity', 0):.1f}",
+                'Unit Cost': f"{it.get('unit_cost', 0):,.2f}",
+                'CCY':     it.get('currency_code', ''),
+                'VND':     f"{float(it.get('amount_vnd', 0)):,.0f}",
+                'Source':  '📋' if it.get('estimate_line_item_id') else '✏️',
+            })
+
+        tbl_key = f"wiz_items_{st.session_state.get('pr_wiz_tbl_ver', 0)}"
+        event = st.dataframe(
+            pd.DataFrame(rows), key=tbl_key, width="stretch", hide_index=True,
+            on_select="rerun", selection_mode="single-row",
+            height=min(35 * len(rows) + 38, 320),
+            column_config={
+                '#':          st.column_config.NumberColumn('#', width=40),
+                'Cat':        st.column_config.TextColumn('Cat', width=50),
+                'Description':st.column_config.TextColumn('Description'),
+                'Vendor':     st.column_config.TextColumn('Vendor'),
+                'Qty':        st.column_config.TextColumn('Qty', width=55),
+                'Unit Cost':  st.column_config.TextColumn('Cost'),
+                'CCY':        st.column_config.TextColumn('CCY', width=45),
+                'VND':        st.column_config.TextColumn('VND'),
+                'Source':     st.column_config.TextColumn('', width=30),
+            },
+        )
+
+        total_vnd = sum(float(it.get('amount_vnd', 0) or 0) for it in items)
+        st.markdown(f"**Total: {fmt_vnd(total_vnd)}** &nbsp;·&nbsp; {len(items)} items "
+                    f"&nbsp;·&nbsp; 📋 = estimate &nbsp; ✏️ = manual")
+
+        # ── Selected-item actions ────────────────────────────
+        sel = event.selection.rows
+        if sel:
+            idx = sel[0]
+            sel_item = items[idx]
+            sc1, sc2, sc3 = st.columns([3, 1, 1])
+            sc1.caption(f"**#{idx+1}** — {sel_item.get('item_description', '')[:50]}")
+            if sc2.button("✏️ Edit", use_container_width=True, key="wiz_edit_sel"):
+                st.session_state['pr_wiz_edit_idx'] = idx
+                st.session_state['pr_wiz_show_import'] = False
+                st.session_state['pr_wiz_show_add'] = False
+                st.rerun()
+            if sc3.button("🗑 Remove", use_container_width=True, key="wiz_rm_sel"):
+                items.pop(idx)
+                st.session_state['pr_wiz_items'] = items
+                st.session_state['pr_wiz_tbl_ver'] = st.session_state.get('pr_wiz_tbl_ver', 0) + 1
+                st.rerun()
+
+        # ── Inline edit form ─────────────────────────────────
+        edit_idx = st.session_state.get('pr_wiz_edit_idx', -1)
+        if 0 <= edit_idx < len(items):
+            _wiz_edit_panel(items, edit_idx)
+
+    else:
+        st.info("No items yet.  Use **📋 Import from Estimate** or **➕ Add Manual Item** above.")
+
+    # ── Navigation ───────────────────────────────────────────
+    st.divider()
+    n1, _n2, n3 = st.columns([1, 2, 1])
+    if n1.button("← Back", use_container_width=True, key="wiz_back_2"):
+        st.session_state['pr_wiz_step'] = 1
+        st.rerun()
+    if items:
+        if n3.button("Next: Review →", type="primary", use_container_width=True, key="wiz_next_2"):
+            st.session_state['pr_wiz_step'] = 3
+            st.session_state['pr_wiz_show_import'] = False
+            st.session_state['pr_wiz_show_add']    = False
+            st.session_state['pr_wiz_edit_idx']    = -1
+            st.rerun()
+    else:
+        n3.button("Next: Review →", disabled=True, use_container_width=True,
+                  key="wiz_next_2_dis", help="Add at least one item to continue")
+
+
+# ── Step 2 sub-panels ────────────────────────────────────────────
+
+def _wiz_import_panel(est, header, items):
+    """Collapsible panel: import estimate items into wizard."""
+    with st.container(border=True):
+        st.markdown("**📋 Import from Estimate**")
+        cogs_filter = _COGS_FILTER_MAP.get(header['cogs_category'], ['A', 'C', 'SERVICE'])
+        all_avail = _analyze_estimate_for_pr(est['id'], cogs_filter).get('items', [])
+
+        # Exclude items already in wizard list
+        existing_elis = {it['estimate_line_item_id']
+                         for it in items if it.get('estimate_line_item_id')}
+        avail = [it for it in all_avail if it.get('estimate_line_item_id') not in existing_elis]
+
+        if not avail:
+            st.caption("✅ All matching estimate items already added (or none available).")
+            if st.button("Close", key="wiz_imp_close"):
+                st.session_state['pr_wiz_show_import'] = False
+                st.rerun()
+            return
+
+        # Preview table
+        preview = []
+        for it in avail:
+            preview.append({
+                'Cat':     it.get('cogs_category', ''),
+                'Product': (it.get('item_description', '') or '')[:40],
+                'Vendor':  (it.get('vendor_name', '') or '')[:25],
+                'Qty':     it.get('quantity', 0),
+                'Cost':    f"{it.get('unit_cost', 0):,.2f}",
+                'CCY':     it.get('cost_currency_code', ''),
+                'VND':     f"{float(it.get('amount_cost_vnd', 0) or 0):,.0f}",
+            })
+        st.dataframe(pd.DataFrame(preview), width="stretch", hide_index=True,
+                     height=min(35 * len(preview) + 38, 250))
+
+        total = sum(float(it.get('amount_cost_vnd', 0) or 0) for it in avail)
+
+        ic1, ic2 = st.columns([2, 1])
+        if ic1.button(f"✅ Import {len(avail)} items ({fmt_vnd(total)})",
+                      type="primary", use_container_width=True, key="wiz_do_import"):
+            for it in avail:
+                items.append({
+                    'estimate_line_item_id': it.get('estimate_line_item_id'),
+                    'costbook_detail_id':    it.get('costbook_detail_id'),
+                    'product_id':            it.get('product_id'),
+                    'cogs_category':         it.get('cogs_category', 'A'),
+                    'item_description':      it.get('item_description', ''),
+                    'brand_name':            it.get('brand_name', ''),
+                    'pt_code':               it.get('pt_code', ''),
+                    'vendor_id':             None,
+                    'vendor_name':           it.get('vendor_name', ''),
+                    'vendor_quote_ref':      it.get('vendor_quote_ref', ''),
+                    'quantity':              float(it.get('quantity', 1) or 1),
+                    'uom':                   it.get('uom', 'Pcs'),
+                    'unit_cost':             float(it.get('unit_cost', 0) or 0),
+                    'currency_id':           it.get('cost_currency_id'),
+                    'currency_code':         it.get('cost_currency_code', 'VND'),
+                    'exchange_rate':         float(it.get('cost_exchange_rate', 1) or 1),
+                    'amount_vnd':            float(it.get('amount_cost_vnd', 0) or 0),
+                    'specifications':        None,
+                    'notes':                 'Imported from estimate',
+                })
+            st.session_state['pr_wiz_items'] = items
+            st.session_state['pr_wiz_show_import'] = False
+            st.session_state['pr_wiz_tbl_ver'] = st.session_state.get('pr_wiz_tbl_ver', 0) + 1
+            st.rerun()
+        if ic2.button("Cancel", use_container_width=True, key="wiz_imp_cancel"):
+            st.session_state['pr_wiz_show_import'] = False
+            st.rerun()
+
+
+def _wiz_add_panel(header, items):
+    """Inline form to add a manual item to the wizard list."""
+    with st.container(border=True):
+        st.markdown("**➕ Add Manual Item**")
+        with st.form("wiz_add_item_form"):
+            m1, m2 = st.columns(2)
+            cat  = m1.selectbox("COGS Category", ['A', 'C', 'SERVICE'], key="wiz_add_cat")
+            desc = m2.text_input("Description *", key="wiz_add_desc")
+
+            m3, m4, m5 = st.columns(3)
+            qty  = m3.number_input("Qty",       value=1.0, min_value=0.01, format="%.2f", key="wiz_add_qty")
+            cost = m4.number_input("Unit Cost",  value=0.0, format="%.2f",                 key="wiz_add_cost")
+            uom  = m5.text_input("UOM",          value="Pcs",                              key="wiz_add_uom")
+
+            m6, m7 = st.columns(2)
+            vn_list    = ["(None)"] + [v['name'] for v in vendors]
+            vendor_sel = m6.selectbox("Vendor", vn_list, key="wiz_add_vendor")
+            vendor_ref = m7.text_input("Quote Ref",      key="wiz_add_ref")
+
+            specs = st.text_input("Specifications", key="wiz_add_specs")
+
+            if cost > 0 and qty > 0:
+                line_vnd = qty * cost * header['exchange_rate']
+                st.caption(f"💰 Line total: **{fmt_vnd(line_vnd)}**")
+
+            fc1, fc2 = st.columns(2)
+            add_ok = fc1.form_submit_button("➕ Add Item", type="primary", use_container_width=True)
+            cancel_add = fc2.form_submit_button("Cancel", use_container_width=True)
+
+        if cancel_add:
+            st.session_state['pr_wiz_show_add'] = False
+            st.rerun()
+
+        if add_ok:
+            if not desc:
+                st.error("Description is required."); return
+            if cost <= 0:
+                st.error("Unit cost must be > 0."); return
+
+            v_id, v_name = None, ''
+            if vendor_sel != "(None)":
+                v_name = vendor_sel
+                v_id   = next((v['id'] for v in vendors if v['name'] == vendor_sel), None)
+
+            items.append({
+                'estimate_line_item_id': None,
+                'costbook_detail_id':    None,
+                'product_id':            None,
+                'cogs_category':         cat,
+                'item_description':      desc,
+                'brand_name':            '',
+                'pt_code':               '',
+                'vendor_id':             v_id,
+                'vendor_name':           v_name,
+                'vendor_quote_ref':      vendor_ref or '',
+                'quantity':              qty,
+                'uom':                   uom,
+                'unit_cost':             cost,
+                'currency_id':           header['currency_id'],
+                'currency_code':         header['currency_code'],
+                'exchange_rate':         header['exchange_rate'],
+                'amount_vnd':            round(qty * cost * header['exchange_rate'], 0),
+                'specifications':        specs or None,
+                'notes':                 'Manual entry',
+            })
+            st.session_state['pr_wiz_items']    = items
+            st.session_state['pr_wiz_show_add'] = False
+            st.session_state['pr_wiz_tbl_ver']  = st.session_state.get('pr_wiz_tbl_ver', 0) + 1
+            st.rerun()
+
+
+def _wiz_edit_panel(items, idx):
+    """Inline form to edit an existing wizard item."""
+    eit = items[idx]
+    with st.container(border=True):
+        st.markdown(f"**✏️ Edit Item #{idx + 1}**")
+        with st.form("wiz_edit_item_form"):
+            e1, e2 = st.columns(2)
+            e_desc = e1.text_input("Description", value=eit.get('item_description', ''))
+            cogs_opts = ['A', 'C', 'SERVICE']
+            e_cat = e2.selectbox("COGS", cogs_opts,
+                                 index=cogs_opts.index(eit['cogs_category'])
+                                 if eit.get('cogs_category') in cogs_opts else 0)
+
+            e3, e4, e5 = st.columns(3)
+            e_qty  = e3.number_input("Qty",  value=float(eit.get('quantity', 1)), format="%.2f")
+            e_cost = e4.number_input("Cost", value=float(eit.get('unit_cost', 0)), format="%.2f")
+            e_uom  = e5.text_input("UOM",    value=eit.get('uom', 'Pcs'))
+
+            e6, e7 = st.columns(2)
+            vn_list    = ["(None)"] + [v['name'] for v in vendors]
+            vn_current = eit.get('vendor_name', '')
+            vn_idx     = vn_list.index(vn_current) if vn_current in vn_list else 0
+            e_vendor   = e6.selectbox("Vendor", vn_list, index=vn_idx, key="wiz_edit_vendor")
+            e_ref      = e7.text_input("Quote Ref", value=eit.get('vendor_quote_ref', ''))
+            e_spec     = st.text_input("Specifications", value=eit.get('specifications') or '')
+
+            rate = float(eit.get('exchange_rate', 1) or 1)
+            if e_cost > 0 and e_qty > 0:
+                st.caption(f"💰 Line total: **{fmt_vnd(e_qty * e_cost * rate)}**")
+
+            sc1, sc2 = st.columns(2)
+            save_ok    = sc1.form_submit_button("💾 Save", type="primary", use_container_width=True)
+            cancel_ok  = sc2.form_submit_button("Cancel", use_container_width=True)
+
+        if cancel_ok:
+            st.session_state['pr_wiz_edit_idx'] = -1
+            st.rerun()
+
+        if save_ok:
+            v_id, v_name = None, ''
+            if e_vendor != "(None)":
+                v_name = e_vendor
+                v_id   = next((v['id'] for v in vendors if v['name'] == e_vendor), None)
+
+            items[idx].update({
+                'item_description': e_desc,
+                'cogs_category':    e_cat,
+                'quantity':         e_qty,
+                'unit_cost':        e_cost,
+                'uom':              e_uom,
+                'vendor_id':        v_id,
+                'vendor_name':      v_name,
+                'vendor_quote_ref': e_ref,
+                'specifications':   e_spec or None,
+                'amount_vnd':       round(e_qty * e_cost * rate, 0),
+            })
+            st.session_state['pr_wiz_items']   = items
+            st.session_state['pr_wiz_edit_idx'] = -1
+            st.session_state['pr_wiz_tbl_ver']  = st.session_state.get('pr_wiz_tbl_ver', 0) + 1
+            st.rerun()
+
+
+# ──────────────────────────────────────────────────────────────────
+# STEP 3 — Review & Confirm
+# ──────────────────────────────────────────────────────────────────
+
+def _wiz_step3_review(project_id, project, est):
+    header = st.session_state['pr_wiz_header']
+    items  = st.session_state['pr_wiz_items']
+    total_vnd = sum(float(it.get('amount_vnd', 0) or 0) for it in items)
+
+    st.markdown("##### ③ Review & Confirm")
+
+    # ── PR Summary card ──────────────────────────────────────
+    with st.container(border=True):
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("PR Number", header['pr_number'])
+        s2.metric("Items", len(items))
+        s3.metric("Total VND", fmt_vnd(total_vnd))
+        s4.metric("Priority", f"{PRIORITY_ICONS.get(header['priority'], '')} {header['priority']}")
+
+        st.caption(
+            f"Type: **{header['pr_type']}** | COGS: **{header['cogs_category']}** | "
+            f"Vendor: {header.get('vendor_name') or '—'} | Currency: **{header['currency_code']}** | "
+            f"Rate: {header['exchange_rate']:,.2f}"
+        )
+        if header.get('justification'):
+            st.caption(f"📝 {header['justification']}")
+        if header.get('required_date'):
+            st.caption(f"📅 Required: {header['required_date']}")
+
+    # ── Items table (read-only) ──────────────────────────────
+    st.divider()
+    st.markdown("**📋 Line Items**")
+    rows = []
+    for it in items:
+        rows.append({
+            'Cat':         it.get('cogs_category', ''),
+            'Description': it.get('item_description', ''),
+            'Vendor':      (it.get('vendor_name', '') or '')[:25],
+            'Qty':         f"{it.get('quantity', 0):.1f}",
+            'Unit Cost':   f"{it.get('unit_cost', 0):,.2f}",
+            'CCY':         it.get('currency_code', ''),
+            'Amount VND':  f"{float(it.get('amount_vnd', 0)):,.0f}",
+        })
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True,
+                 height=min(35 * len(rows) + 38, 300))
+
+    # ── Budget Comparison (Estimate vs Existing PRs + This PR) ─
+    if est:
+        st.divider()
+        st.markdown("**📊 Budget Impact — Estimate vs PR Committed + This PR**")
+
+        budget = get_budget_vs_pr(project_id)
+
+        # Aggregate this PR by COGS category
+        pr_by_cat: dict = {}
+        for it in items:
+            cat = it.get('cogs_category', 'A') or 'A'
+            # SERVICE items → map to D for budget comparison
+            if cat == 'SERVICE':
+                cat = 'D'
+            pr_by_cat[cat] = pr_by_cat.get(cat, 0) + float(it.get('amount_vnd', 0) or 0)
+
+        if budget.get('has_data'):
+            comp_rows = []
+            for cat_data in budget['categories']:
+                cat = cat_data['category']
+                if cat not in ('A', 'B', 'C', 'D', 'E', 'F'):
+                    continue
+
+                estimated     = cat_data['estimated']
+                prev_committed = cat_data['pr_committed']
+                this_pr       = pr_by_cat.get(cat, 0)
+                new_total     = prev_committed + this_pr
+                remaining     = estimated - new_total
+                pct           = (new_total / estimated * 100) if estimated > 0 else (100.0 if new_total > 0 else 0)
+
+                if   estimated <= 0 and new_total <= 0: icon = '⚪'
+                elif pct > 100: icon = '🔴'
+                elif pct > 85:  icon = '🟡'
+                else:           icon = '🟢'
+
+                comp_rows.append({
+                    '●':         icon,
+                    'Category':  cat_data['label'],
+                    'Estimated': f"{estimated:,.0f}" if estimated > 0 else '—',
+                    'Prev PRs':  f"{prev_committed:,.0f}" if prev_committed > 0 else '—',
+                    '⭐ This PR': f"{this_pr:,.0f}" if this_pr > 0 else '—',
+                    'New Total': f"{new_total:,.0f}" if new_total > 0 else '—',
+                    'Remaining': f"{remaining:,.0f}" if remaining >= 0 else f"({abs(remaining):,.0f})",
+                    'Used %':    f"{pct:.0f}%",
+                })
+
+            # Totals
+            t_est  = budget['total_estimated']
+            t_prev = budget['total_committed']
+            t_this = total_vnd
+            t_new  = t_prev + t_this
+            t_rem  = t_est  - t_new
+            t_pct  = (t_new / t_est * 100) if t_est > 0 else 0
+            comp_rows.append({
+                '●':          '🔴' if t_pct > 100 else '🟡' if t_pct > 85 else '🟢',
+                'Category':   '**TOTAL**',
+                'Estimated':  f"{t_est:,.0f}",
+                'Prev PRs':   f"{t_prev:,.0f}",
+                '⭐ This PR':  f"{t_this:,.0f}",
+                'New Total':  f"{t_new:,.0f}",
+                'Remaining':  f"{t_rem:,.0f}" if t_rem >= 0 else f"({abs(t_rem):,.0f})",
+                'Used %':     f"{t_pct:.0f}%",
+            })
+
+            st.dataframe(
+                pd.DataFrame(comp_rows), width="stretch", hide_index=True,
+                column_config={
+                    '●':          st.column_config.TextColumn('', width=30),
+                    'Category':   st.column_config.TextColumn('Category'),
+                    'Estimated':  st.column_config.TextColumn('Estimated'),
+                    'Prev PRs':   st.column_config.TextColumn('Prev PRs'),
+                    '⭐ This PR':  st.column_config.TextColumn('⭐ This PR'),
+                    'New Total':  st.column_config.TextColumn('New Total'),
+                    'Remaining':  st.column_config.TextColumn('Remaining'),
+                    'Used %':     st.column_config.TextColumn('Used %', width=70),
+                },
             )
-        elif est:
-            st.caption("ℹ️ No new items to import (all already in PRs, or no items for this category)")
 
-        submitted = st.form_submit_button("💾 Create PR", type="primary", use_container_width=True)
+            # Warnings
+            if t_pct > 100:
+                st.error(f"⚠️ **Over budget!** Tổng committed sẽ vượt estimate "
+                         f"**{fmt_vnd(abs(t_rem))}**")
+            elif t_pct > 85:
+                st.warning(f"⚠️ Budget gần giới hạn — còn lại **{fmt_vnd(t_rem)}** sau PR này")
 
-    # ══════════════════════════════════════════════════════════════
-    # STEP 3 — Create + auto-import
-    # ══════════════════════════════════════════════════════════════
-    if submitted:
-        try:
-            new_id = create_pr({
-                'pr_number': pr_number,
-                'project_id': project_id,
-                'estimate_id': est['id'] if est else None,
-                'requester_id': emp_int_id,
-                'vendor_id': vendor_id,
-                'currency_id': currency_id,
-                'exchange_rate': exc_rate,
-                'priority': priority,
-                'pr_type': pr_type,
-                'cogs_category': auto_cogs,
-                'required_date': req_date,
-                'justification': justification or None,
+            st.caption("🟢 < 85% &nbsp;|&nbsp; 🟡 85–100% &nbsp;|&nbsp; 🔴 > 100% (over budget)")
+        else:
+            st.caption("ℹ️ No active estimate — budget comparison unavailable.")
+
+    # ── Navigation ───────────────────────────────────────────
+    st.divider()
+    n1, n2, n3 = st.columns([1, 1, 1.5])
+    if n1.button("← Back to Items", use_container_width=True, key="wiz_back_3"):
+        st.session_state['pr_wiz_step'] = 2
+        st.rerun()
+    if n2.button("💾 Save as Draft", use_container_width=True, key="wiz_save_draft"):
+        _wiz_do_create(project_id, project, est, submit_now=False)
+    if n3.button("✅ Create & Submit for Approval", type="primary",
+                 use_container_width=True, key="wiz_confirm_submit"):
+        _wiz_do_create(project_id, project, est, submit_now=True)
+
+
+# ──────────────────────────────────────────────────────────────────
+# WIZARD — Create PR in DB + optional submit
+# ──────────────────────────────────────────────────────────────────
+
+def _wiz_do_create(project_id, project, est, submit_now: bool = False):
+    """Insert PR header + all items into DB.  Optionally submit for approval."""
+    header = st.session_state['pr_wiz_header']
+    items  = st.session_state['pr_wiz_items']
+
+    try:
+        # 1. Create header ─────────────────────────────────────
+        new_id = create_pr({
+            'pr_number':     header['pr_number'],
+            'project_id':    project_id,
+            'requester_id':  emp_int_id,
+            'estimate_id':   header.get('estimate_id'),
+            'vendor_id':     header.get('vendor_id'),
+            'vendor_contact_id': None,
+            'currency_id':   header['currency_id'],
+            'exchange_rate': header['exchange_rate'],
+            'priority':      header['priority'],
+            'pr_type':       header['pr_type'],
+            'cogs_category': header['cogs_category'],
+            'required_date': header.get('required_date'),
+            'justification': header.get('justification') or None,
+        }, user_id)
+
+        # 2. Create items ──────────────────────────────────────
+        for i, it in enumerate(items):
+            create_pr_item({
+                'pr_id':                 new_id,
+                'estimate_line_item_id': it.get('estimate_line_item_id'),
+                'costbook_detail_id':    it.get('costbook_detail_id'),
+                'product_id':            it.get('product_id'),
+                'item_description':      it.get('item_description', ''),
+                'brand_name':            it.get('brand_name', ''),
+                'pt_code':               it.get('pt_code', ''),
+                'vendor_id':             it.get('vendor_id'),
+                'vendor_name':           it.get('vendor_name', ''),
+                'vendor_quote_ref':      it.get('vendor_quote_ref', ''),
+                'quantity':              it.get('quantity', 1),
+                'uom':                   it.get('uom', 'Pcs'),
+                'unit_cost':             it.get('unit_cost', 0),
+                'currency_id':           it.get('currency_id') or header['currency_id'],
+                'exchange_rate':         it.get('exchange_rate', header['exchange_rate']),
+                'cogs_category':         it.get('cogs_category', 'A'),
+                'specifications':        it.get('specifications'),
+                'notes':                 it.get('notes'),
+                'view_order':            i,
             }, user_id)
 
-            # Auto-import from estimate
-            import_count = 0
-            if auto_import and importable_items:
-                for i, it in enumerate(importable_items):
-                    try:
-                        create_pr_item({
-                            'pr_id': new_id,
-                            'estimate_line_item_id': it['estimate_line_item_id'],
-                            'costbook_detail_id': it.get('costbook_detail_id'),
-                            'product_id': it.get('product_id'),
-                            'item_description': it.get('item_description', ''),
-                            'brand_name': it.get('brand_name', ''),
-                            'pt_code': it.get('pt_code', ''),
-                            'vendor_id': None,
-                            'vendor_name': it.get('vendor_name', ''),
-                            'vendor_quote_ref': it.get('vendor_quote_ref', ''),
-                            'quantity': it.get('quantity', 1),
-                            'uom': it.get('uom', 'Pcs'),
-                            'unit_cost': it.get('unit_cost', 0),
-                            'currency_id': it.get('cost_currency_id'),
-                            'exchange_rate': it.get('cost_exchange_rate', 1),
-                            'cogs_category': it.get('cogs_category', 'A'),
-                            'specifications': None,
-                            'notes': 'Imported from estimate',
-                            'view_order': i,
-                        }, user_id)
-                        import_count += 1
-                    except Exception:
-                        pass
-                if import_count > 0:
-                    recalc_pr_totals(new_id)
+        # 3. Recalc totals ─────────────────────────────────────
+        recalc_pr_totals(new_id)
 
-            msg = f"✅ PR {pr_number} created!"
-            if import_count > 0:
-                msg += f" ({import_count} items imported, {fmt_vnd(analysis.get('total_vnd', 0))})"
-            st.success(msg)
-            # Go to edit mode so user can review imported items
-            st.session_state['open_pr_edit' if auto_import and import_count > 0 else 'open_pr_view'] = new_id
-            st.cache_data.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Create failed: {e}")
+        total_vnd = sum(float(it.get('amount_vnd', 0) or 0) for it in items)
+
+        # 4. Optionally submit ─────────────────────────────────
+        if submit_now:
+            result = submit_pr(new_id, user_id)
+            if result['success']:
+                st.success(f"✅ **{header['pr_number']}** created ({len(items)} items, "
+                           f"{fmt_vnd(total_vnd)}) and **submitted for approval**.")
+                if result.get('approver_name'):
+                    st.info(f"📧 Pending approval: **{result['approver_name']}** "
+                            f"(Level 1/{result.get('max_level', 1)})")
+                    # Send email
+                    _budget = get_budget_vs_pr(project_id)
+                    notify_pr_submitted(
+                        pr_number=header['pr_number'],
+                        project_code=project.get('project_code', ''),
+                        project_name=project.get('project_name', ''),
+                        requester_name=emp_map.get(emp_int_id, ''),
+                        total_vnd=total_vnd,
+                        item_count=len(items),
+                        priority=header['priority'],
+                        justification=header.get('justification', ''),
+                        approver_name=result['approver_name'],
+                        approver_email=result['approver_email'],
+                        approval_level=1,
+                        max_level=result.get('max_level', 1),
+                        budget_data=_budget,
+                    )
+            else:
+                st.warning(f"PR created as Draft — submit failed: {result['message']}")
+        else:
+            st.success(f"✅ **{header['pr_number']}** saved as Draft "
+                       f"({len(items)} items, {fmt_vnd(total_vnd)}).")
+
+        # 5. Cleanup & navigate ────────────────────────────────
+        _cleanup_pr_wizard()
+        st.cache_data.clear()
+        st.session_state['open_pr_view'] = new_id
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"❌ Creation failed: {e}")
+        logger.error(f"PR wizard create failed: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1688,6 +2217,9 @@ with st.sidebar:
         if is_pm or is_admin:
             st.divider()
             if st.button("➕ New PR", type="primary", use_container_width=True):
+                # Reset wizard state for a fresh start
+                for _k in [k for k in st.session_state if k.startswith('pr_wiz_')]:
+                    del st.session_state[_k]
                 st.session_state['open_create_pr'] = True
 
 
