@@ -1077,6 +1077,30 @@ def _wiz_step3_review(project_id, project, est):
         else:
             st.caption("ℹ️ No active estimate — budget comparison unavailable.")
 
+    # ── Approval Chain Preview ─────────────────────────────────
+    st.divider()
+    st.markdown("**📧 Approval Flow**")
+    chain = get_approval_chain(total_vnd)
+    has_chain = bool(chain)
+    if has_chain:
+        max_level = determine_max_level(total_vnd, chain)
+        chain_parts = []
+        for entry in chain:
+            lvl = entry['level']
+            name = entry.get('employee_name', f'L{lvl}')
+            email = entry.get('email', '')
+            if lvl <= max_level:
+                if lvl == 1:
+                    chain_parts.append(f"📧 **L{lvl} — {name}** ({email})")
+                else:
+                    chain_parts.append(f"⏳ L{lvl} — {name}")
+        st.caption(' &nbsp;→&nbsp; '.join(chain_parts))
+        st.caption(f"Cần **{max_level} level** phê duyệt cho **{fmt_vnd(total_vnd)}**. "
+                   f"Email sẽ gửi đến **{chain[0].get('employee_name', '')}** ngay khi submit.")
+    else:
+        st.warning("⚠️ Chưa cấu hình approval chain cho IL_PURCHASE_REQUEST. "
+                   "PR sẽ lưu Draft — không thể submit.")
+
     # ── Navigation ───────────────────────────────────────────
     st.divider()
     n1, n2, n3 = st.columns([1, 1, 1.5])
@@ -1085,9 +1109,14 @@ def _wiz_step3_review(project_id, project, est):
         st.rerun()
     if n2.button("💾 Save as Draft", use_container_width=True, key="wiz_save_draft"):
         _wiz_do_create(project_id, project, est, submit_now=False)
-    if n3.button("✅ Create & Submit for Approval", type="primary",
-                 use_container_width=True, key="wiz_confirm_submit"):
-        _wiz_do_create(project_id, project, est, submit_now=True)
+    if has_chain:
+        if n3.button("✅ Create & Submit for Approval", type="primary",
+                     use_container_width=True, key="wiz_confirm_submit"):
+            _wiz_do_create(project_id, project, est, submit_now=True)
+    else:
+        n3.button("✅ Create & Submit", disabled=True,
+                  use_container_width=True, key="wiz_confirm_submit_dis",
+                  help="Approval chain chưa được cấu hình")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1783,6 +1812,7 @@ def _dialog_confirm_po(pr_id: int):
 # ALL PROJECTS — Overview Dashboard (P1.1)
 # ══════════════════════════════════════════════════════════════════
 
+@st.fragment
 def _render_overview(f_status_filter, f_priority_filter):
     """Cross-project PR dashboard."""
     all_df = get_pr_list_df(status=None if f_status_filter == "All" else f_status_filter)
@@ -1865,13 +1895,15 @@ def _render_overview(f_status_filter, f_priority_filter):
                 c3.markdown(f"{PRIORITY_ICONS.get(pri, '')} **{pri}**")
                 if st.button("Review & Act", type="primary", key=f"ov_review_{row['pr_id']}",
                              use_container_width=False):
-                    _dialog_approval_action(int(row['pr_id']))
+                    st.session_state['open_pr_approve'] = int(row['pr_id'])
+                    st.rerun(scope="app")
 
 
 # ══════════════════════════════════════════════════════════════════
 # TAB — My PRs (enhanced with quick actions P3.2)
 # ══════════════════════════════════════════════════════════════════
 
+@st.fragment
 def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
     my_df = get_pr_list_df(
         project_id=project_id_filter,
@@ -1943,14 +1975,14 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
         # Always: View
         if cols[col_idx].button("👁️ View", type="primary", use_container_width=True, key="my_view"):
             st.session_state['open_pr_view'] = int(row['pr_id'])
-            st.rerun()
+            st.rerun(scope="app")
         col_idx += 1
 
         # DRAFT / REVISION_REQUESTED: Edit, Submit
         if row['status'] in ('DRAFT', 'REVISION_REQUESTED'):
             if cols[col_idx].button("✏️ Edit", use_container_width=True, key="my_edit"):
                 st.session_state['open_pr_edit'] = int(row['pr_id'])
-                st.rerun()
+                st.rerun(scope="app")
             col_idx += 1
 
             item_count = int(row.get('item_count', 0) or 0)
@@ -1978,7 +2010,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
                                     budget_data=_budget,
                                 )
                         st.cache_data.clear()
-                        st.rerun()
+                        st.rerun(scope="app")
                     else:
                         st.error(result['message'])
                 col_idx += 1
@@ -1987,7 +2019,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
         elif row['status'] == 'APPROVED' and not row.get('po_id'):
             if cols[col_idx].button("🛒 Create PO", use_container_width=True, key="my_po"):
                 st.session_state['confirm_create_po'] = int(row['pr_id'])
-                st.rerun()
+                st.rerun(scope="app")
             col_idx += 1
 
         # Deselect (always last)
@@ -2000,6 +2032,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
 # TAB — Pending Approval (P1.3: redesigned with dataframe pattern)
 # ══════════════════════════════════════════════════════════════════
 
+@st.fragment
 def _render_pending_tab():
     pending_df = get_pending_for_approver(emp_int_id)
 
@@ -2071,7 +2104,8 @@ def _render_pending_tab():
 
         ab1, ab2, ab3 = st.columns([1, 1, 2])
         if ab1.button("✅ Review & Act", type="primary", use_container_width=True, key="pend_review"):
-            _dialog_approval_action(int(row['pr_id']))
+            st.session_state['open_pr_approve'] = int(row['pr_id'])
+            st.rerun(scope="app")
         if ab2.button("✖ Deselect", use_container_width=True, key="pend_desel"):
             st.session_state['_pending_key'] = st.session_state.get('_pending_key', 0) + 1
             st.rerun()
@@ -2089,6 +2123,7 @@ def _render_pending_tab():
 # TAB — All PRs (enhanced)
 # ══════════════════════════════════════════════════════════════════
 
+@st.fragment
 def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
     all_df = get_pr_list_df(
         project_id=project_id_filter,
@@ -2158,7 +2193,7 @@ def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
         ab1, ab2, ab3 = st.columns([1, 1, 2])
         if ab1.button("👁️ View", type="primary", use_container_width=True, key="all_view"):
             st.session_state['open_pr_view'] = int(row['pr_id'])
-            st.rerun()
+            st.rerun(scope="app")
         if ab2.button("✖ Deselect", use_container_width=True, key="all_desel"):
             st.session_state['_all_pr_key'] = st.session_state.get('_all_pr_key', 0) + 1
             st.rerun()
@@ -2304,3 +2339,8 @@ if 'confirm_cancel_pr' in st.session_state:
 if 'confirm_create_po' in st.session_state:
     pid = st.session_state.pop('confirm_create_po')
     _dialog_confirm_po(pid)
+
+# Approval Action (from fragment tabs)
+if 'open_pr_approve' in st.session_state:
+    pid = st.session_state.pop('open_pr_approve')
+    _dialog_approval_action(pid)
