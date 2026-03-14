@@ -145,75 +145,132 @@ def get_pr_items_df(pr_id: int) -> pd.DataFrame:
 
 
 def create_pr(data: Dict, created_by: str) -> int:
-    """Create PR header. Returns new PR id."""
-    sql = """
-        INSERT INTO il_purchase_requests (
-            pr_number, project_id, estimate_id, requester_id,
-            vendor_id, vendor_contact_id,
-            currency_id, exchange_rate,
-            priority, pr_type, cogs_category,
-            required_date, justification,
-            status, created_by, modified_by
-        ) VALUES (
-            :pr_number, :project_id, :estimate_id, :requester_id,
-            :vendor_id, :vendor_contact_id,
-            :currency_id, :exchange_rate,
-            :priority, :pr_type, :cogs_category,
-            :required_date, :justification,
-            'DRAFT', :created_by, :created_by
-        )
     """
+    Create PR header. Returns new PR id.
+    Nullable FK columns (vendor_id, vendor_contact_id, estimate_id) are
+    excluded from INSERT when None to avoid FK constraint issues.
+    """
+    # ── Build dynamic INSERT — only include non-None FK columns ──
+    base_cols = [
+        'pr_number', 'project_id', 'requester_id',
+        'currency_id', 'exchange_rate',
+        'priority', 'pr_type', 'cogs_category',
+        'required_date', 'justification',
+    ]
+    base_vals = [
+        ':pr_number', ':project_id', ':requester_id',
+        ':currency_id', ':exchange_rate',
+        ':priority', ':pr_type', ':cogs_category',
+        ':required_date', ':justification',
+    ]
+
+    # Optional FK columns — only include when value is not None
+    optional_fks = [
+        ('estimate_id',       data.get('estimate_id')),
+        ('vendor_id',         data.get('vendor_id')),
+        ('vendor_contact_id', data.get('vendor_contact_id')),
+    ]
+    params = {k: data.get(k) for k in [
+        'pr_number', 'project_id', 'requester_id',
+        'currency_id', 'exchange_rate',
+        'priority', 'pr_type', 'cogs_category',
+        'required_date', 'justification',
+    ]}
+    for col, val in optional_fks:
+        if val is not None:
+            base_cols.append(col)
+            base_vals.append(f':{col}')
+            params[col] = val
+
+    # Always add status + audit
+    base_cols += ['status', 'created_by', 'modified_by']
+    base_vals += ["'DRAFT'", ':created_by', ':created_by']
+    params['created_by'] = created_by
+
+    sql = f"""
+        INSERT INTO il_purchase_requests ({', '.join(base_cols)})
+        VALUES ({', '.join(base_vals)})
+    """
+    logger.debug(f"create_pr SQL: {sql}")
+    logger.debug(f"create_pr params: {params}")
+
     engine = _get_engine()
     with engine.connect() as conn:
-        result = conn.execute(text(sql), {**data, 'created_by': created_by})
+        result = conn.execute(text(sql), params)
         conn.commit()
         return result.lastrowid
 
 
 def update_pr(pr_id: int, data: Dict, modified_by: str) -> bool:
-    """Update PR header (only DRAFT or REVISION_REQUESTED)."""
-    sql = """
+    """Update PR header (only DRAFT or REVISION_REQUESTED).
+    Nullable FK columns set to NULL explicitly when value is None.
+    """
+    # Build SET clauses — handle nullable FKs carefully
+    set_parts = []
+    params: Dict = {'id': pr_id, 'modified_by': modified_by}
+
+    # Non-FK fields (always included)
+    for col in ['priority', 'pr_type', 'cogs_category', 'required_date',
+                'justification', 'currency_id', 'exchange_rate']:
+        set_parts.append(f"{col} = :{col}")
+        params[col] = data.get(col)
+
+    # Nullable FK fields — use NULL literal when None to avoid FK lookup
+    for col in ['vendor_id', 'vendor_contact_id']:
+        val = data.get(col)
+        if val is not None:
+            set_parts.append(f"{col} = :{col}")
+            params[col] = val
+        else:
+            set_parts.append(f"{col} = NULL")
+
+    set_parts.append("modified_by = :modified_by")
+    set_parts.append("version = version + 1")
+
+    sql = f"""
         UPDATE il_purchase_requests SET
-            vendor_id = :vendor_id,
-            vendor_contact_id = :vendor_contact_id,
-            currency_id = :currency_id,
-            exchange_rate = :exchange_rate,
-            priority = :priority,
-            pr_type = :pr_type,
-            cogs_category = :cogs_category,
-            required_date = :required_date,
-            justification = :justification,
-            modified_by = :modified_by,
-            version = version + 1
+            {', '.join(set_parts)}
         WHERE id = :id AND delete_flag = 0
           AND status IN ('DRAFT', 'REVISION_REQUESTED')
     """
-    rows = _execute_update(sql, {**data, 'id': pr_id, 'modified_by': modified_by})
+    rows = _execute_update(sql, params)
     return rows > 0
 
 
 def create_pr_item(data: Dict, created_by: str) -> int:
-    """Add line item to PR."""
-    sql = """
-        INSERT INTO il_purchase_request_items (
-            pr_id, estimate_line_item_id, costbook_detail_id,
-            product_id, item_description, brand_name, pt_code,
-            vendor_id, vendor_name, vendor_quote_ref,
-            quantity, uom, unit_cost, currency_id, exchange_rate,
-            cogs_category, specifications, notes, view_order,
-            created_by
-        ) VALUES (
-            :pr_id, :estimate_line_item_id, :costbook_detail_id,
-            :product_id, :item_description, :brand_name, :pt_code,
-            :vendor_id, :vendor_name, :vendor_quote_ref,
-            :quantity, :uom, :unit_cost, :currency_id, :exchange_rate,
-            :cogs_category, :specifications, :notes, :view_order,
-            :created_by
-        )
+    """Add line item to PR.
+    Nullable FK columns excluded from INSERT when None.
     """
+    # Required columns (always included)
+    base_cols = [
+        'pr_id', 'item_description', 'brand_name', 'pt_code',
+        'vendor_name', 'vendor_quote_ref',
+        'quantity', 'uom', 'unit_cost', 'exchange_rate',
+        'cogs_category', 'specifications', 'notes', 'view_order',
+    ]
+    params = {col: data.get(col) for col in base_cols}
+
+    # Optional FK columns — only include when not None
+    optional_fks = ['estimate_line_item_id', 'costbook_detail_id',
+                    'product_id', 'vendor_id', 'currency_id']
+    for col in optional_fks:
+        val = data.get(col)
+        if val is not None:
+            base_cols.append(col)
+            params[col] = val
+
+    # Audit
+    base_cols.append('created_by')
+    params['created_by'] = created_by
+
+    col_str = ', '.join(base_cols)
+    val_str = ', '.join(f':{c}' for c in base_cols)
+
+    sql = f"INSERT INTO il_purchase_request_items ({col_str}) VALUES ({val_str})"
+
     engine = _get_engine()
     with engine.connect() as conn:
-        result = conn.execute(text(sql), {**data, 'created_by': created_by})
+        result = conn.execute(text(sql), params)
         conn.commit()
         return result.lastrowid
 

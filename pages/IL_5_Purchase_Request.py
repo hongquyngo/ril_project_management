@@ -359,20 +359,23 @@ def _age_icon(submitted_date) -> str:
 # DIALOGS — Create PR (smart flow: type→auto-suggest, rate auto)
 # ══════════════════════════════════════════════════════════════════
 
-# Type → COGS mapping (auto-set when user picks type)
+# Type → COGS mapping for PR HEADER table
+# Header enum: ('A','B','C','D','E','F','MIXED')
+# Schema comment: EQUIPMENT=A, FABRICATION=C, SERVICE=D/E, MIXED=multiple
 _TYPE_COGS_MAP = {
     'EQUIPMENT':   'A',
     'FABRICATION': 'C',
-    'SERVICE':     'SERVICE',
+    'SERVICE':     'D',      # Service/labor → D (Direct Labor) in header
     'MIXED':       'MIXED',
 }
 
-# COGS category filter for estimate items
+# COGS category filter for ESTIMATE ITEMS (items enum: 'A','C','SERVICE')
+# Maps header cogs_category → which item categories to look for
 _COGS_FILTER_MAP = {
-    'A':       ['A'],
-    'C':       ['C'],
-    'SERVICE': ['SERVICE'],
-    'MIXED':   ['A', 'C', 'SERVICE'],
+    'A':     ['A'],
+    'C':     ['C'],
+    'D':     ['SERVICE'],       # Header D → items SERVICE
+    'MIXED': ['A', 'C', 'SERVICE'],
 }
 
 
@@ -471,8 +474,9 @@ def _dialog_create_pr(project_id: int):
                                  "SERVICE = labor/consulting, MIXED = combined")
     # Auto-set COGS from type
     auto_cogs = _TYPE_COGS_MAP.get(pr_type, 'A')
-    tc2.text_input("COGS Category", value=auto_cogs, disabled=True,
-                   help="Auto-set from PR Type")
+    _cogs_labels = {'A': 'A — Equipment', 'C': 'C — Fabrication', 'D': 'D — Service/Labor', 'MIXED': 'MIXED'}
+    tc2.text_input("COGS Category", value=_cogs_labels.get(auto_cogs, auto_cogs), disabled=True,
+                   help="Auto-set from PR Type. A=Equipment, C=Fabrication, D=Service, MIXED=Multiple")
 
     # ── Analyze estimate items for this type ──
     analysis = {}
@@ -600,7 +604,6 @@ def _dialog_create_pr(project_id: int):
                 'estimate_id': est['id'] if est else None,
                 'requester_id': emp_int_id,
                 'vendor_id': vendor_id,
-                'vendor_contact_id': None,
                 'currency_id': currency_id,
                 'exchange_rate': exc_rate,
                 'priority': priority,
@@ -1129,9 +1132,11 @@ def _dialog_pr_edit(pr_id: int):
             pr_type = eh2.selectbox("Type", types, index=type_idx)
 
             eh3, eh4 = st.columns(2)
-            cogs_opts = ['A', 'C', 'MIXED', 'SERVICE']
+            # Header enum: ('A','B','C','D','E','F','MIXED') — show practical options
+            cogs_opts = ['A', 'C', 'D', 'MIXED']
             cogs_idx = cogs_opts.index(pr.get('cogs_category', 'A')) if pr.get('cogs_category') in cogs_opts else 0
-            cogs_cat = eh3.selectbox("COGS Category", cogs_opts, index=cogs_idx)
+            cogs_cat = eh3.selectbox("COGS Category", cogs_opts, index=cogs_idx,
+                                      help="A=Equipment, C=Fabrication, D=Service/Labor, MIXED=Multiple")
             req_date = eh4.date_input("Required Date",
                                        value=pd.to_datetime(pr['required_date']).date() if pr.get('required_date') else None)
 
@@ -1140,7 +1145,6 @@ def _dialog_pr_edit(pr_id: int):
             if st.form_submit_button("💾 Save Header", type="primary", use_container_width=True):
                 ok = update_pr(pr_id, {
                     'vendor_id': pr.get('vendor_id'),
-                    'vendor_contact_id': pr.get('vendor_contact_id'),
                     'currency_id': pr.get('currency_id'),
                     'exchange_rate': pr.get('exchange_rate'),
                     'priority': priority,
