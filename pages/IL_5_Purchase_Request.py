@@ -39,6 +39,13 @@ from utils.il_project.pr_queries import (
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
+from utils.il_project.email_notify import (
+    notify_pr_submitted,
+    notify_pr_approved,
+    notify_pr_rejected,
+    notify_pr_revision_requested,
+    notify_po_created,
+)
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -348,6 +355,18 @@ def _dialog_approval_action(pr_id: int):
         result = approve_pr(pr_id, emp_int_id, comments)
         if result['success']:
             st.success(result['message'])
+            approver_name = st.session_state.get('user_fullname', '')
+            notify_pr_approved(
+                pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
+                total_vnd=float(pr.get('total_amount_vnd') or 0),
+                requester_email=pr.get('requester_email', ''),
+                requester_name=pr.get('requester_name', ''),
+                approver_name=approver_name,
+                approval_level=pr['current_approval_level'],
+                is_final=result.get('final', False),
+                next_approver_name=result.get('next_approver_name'),
+                next_approver_email=result.get('next_approver_email'),
+            )
             if not result.get('final') and result.get('next_approver_name'):
                 st.info(f"📧 Next approver: {result['next_approver_name']}")
             st.cache_data.clear()
@@ -360,6 +379,14 @@ def _dialog_approval_action(pr_id: int):
             st.warning("Please provide a reason for rejection.")
         else:
             if reject_pr(pr_id, emp_int_id, comments):
+                notify_pr_rejected(
+                    pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
+                    total_vnd=float(pr.get('total_amount_vnd') or 0),
+                    requester_email=pr.get('requester_email', ''),
+                    requester_name=pr.get('requester_name', ''),
+                    approver_name=st.session_state.get('user_fullname', ''),
+                    rejection_reason=comments,
+                )
                 st.success("PR rejected.")
                 st.cache_data.clear()
                 st.rerun()
@@ -371,6 +398,14 @@ def _dialog_approval_action(pr_id: int):
             st.warning("Please provide revision notes.")
         else:
             if request_revision(pr_id, emp_int_id, comments):
+                notify_pr_revision_requested(
+                    pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
+                    total_vnd=float(pr.get('total_amount_vnd') or 0),
+                    requester_email=pr.get('requester_email', ''),
+                    requester_name=pr.get('requester_name', ''),
+                    approver_name=st.session_state.get('user_fullname', ''),
+                    revision_notes=comments,
+                )
                 st.success("Revision requested — PR sent back to PM.")
                 st.cache_data.clear()
                 st.rerun()
@@ -479,6 +514,16 @@ def _dialog_pr_detail(pr_id: int):
                 st.success(result['message'])
                 if result.get('approver_name'):
                     st.info(f"📧 Sent to: **{result['approver_name']}** ({result.get('approver_email', '')})")
+                    # Email notification
+                    notify_pr_submitted(
+                        pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
+                        project_name=pr.get('project_name', ''), requester_name=pr.get('requester_name', ''),
+                        total_vnd=float(pr.get('total_amount_vnd') or 0),
+                        item_count=len(items_df), priority=pr.get('priority', 'NORMAL'),
+                        justification=pr.get('justification', ''),
+                        approver_name=result['approver_name'], approver_email=result['approver_email'],
+                        approval_level=1, max_level=result.get('max_level', 1),
+                    )
                 st.cache_data.clear()
                 st.rerun()
             else:
@@ -490,6 +535,14 @@ def _dialog_pr_detail(pr_id: int):
             result = create_po_from_pr(pr_id, 1, keycloak_id)  # buyer_company_id=1 (ROZITEK)
             if result['success']:
                 st.success(f"✅ {result['message']}")
+                notify_po_created(
+                    pr_number=pr['pr_number'], po_number=result['po_number'],
+                    project_code=pr.get('project_code', ''),
+                    total_vnd=float(pr.get('total_amount_vnd') or 0),
+                    vendor_name=pr.get('vendor_name', ''),
+                    requester_email=pr.get('requester_email', ''),
+                    requester_name=pr.get('requester_name', ''),
+                )
                 st.cache_data.clear()
                 st.rerun()
             else:

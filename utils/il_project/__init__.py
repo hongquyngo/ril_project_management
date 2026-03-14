@@ -97,6 +97,14 @@ from .currency import (
     clear_cache as clear_rate_cache,
 )
 
+from .email_notify import (
+    notify_pr_submitted,
+    notify_pr_approved,
+    notify_pr_rejected,
+    notify_pr_revision_requested,
+    notify_po_created,
+)
+
 from .pr_queries import (
     # PR Number
     generate_pr_number,
@@ -168,6 +176,9 @@ __all__ = [
     'get_rate', 'get_rate_to_vnd', 'convert_to_vnd',
     'fmt_rate', 'rate_status', 'get_currency_list',
     'RateResult', 'clear_rate_cache',
+    # ── Email Notifications ──
+    'notify_pr_submitted', 'notify_pr_approved', 'notify_pr_rejected',
+    'notify_pr_revision_requested', 'notify_po_created',
     # ── Purchase Request ──
     'generate_pr_number',
     'get_pr_list_df', 'get_pending_for_approver', 'get_pr', 'get_pr_items_df',

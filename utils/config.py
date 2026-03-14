@@ -243,18 +243,24 @@ class Config:
         }
         
         # Email - Support multiple accounts
+        # Fallback chain: OUTBOUND_EMAIL_SENDER → EMAIL_SENDER (legacy .env key)
+        _email_sender   = os.getenv("EMAIL_SENDER")
+        _email_password = os.getenv("EMAIL_PASSWORD")
+        _smtp_host      = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        _smtp_port      = int(os.getenv("SMTP_PORT", "587"))
+
         self._email_config = {
             "inbound": EmailConfig(
-                sender=os.getenv("INBOUND_EMAIL_SENDER"),
-                password=os.getenv("INBOUND_EMAIL_PASSWORD"),
-                smtp_host=os.getenv("SMTP_HOST", "smtp.gmail.com"),
-                smtp_port=int(os.getenv("SMTP_PORT", "587"))
+                sender=os.getenv("INBOUND_EMAIL_SENDER", _email_sender),
+                password=os.getenv("INBOUND_EMAIL_PASSWORD", _email_password),
+                smtp_host=_smtp_host,
+                smtp_port=_smtp_port,
             ),
             "outbound": EmailConfig(
-                sender=os.getenv("OUTBOUND_EMAIL_SENDER"),
-                password=os.getenv("OUTBOUND_EMAIL_PASSWORD"),
-                smtp_host=os.getenv("SMTP_HOST", "smtp.gmail.com"),
-                smtp_port=int(os.getenv("SMTP_PORT", "587"))
+                sender=os.getenv("OUTBOUND_EMAIL_SENDER", _email_sender),
+                password=os.getenv("OUTBOUND_EMAIL_PASSWORD", _email_password),
+                smtp_host=_smtp_host,
+                smtp_port=_smtp_port,
             )
         }
         
