@@ -464,9 +464,10 @@ def _init_pr_wizard(project_id: int):
 
 
 def _cleanup_pr_wizard():
-    """Remove all wizard keys from session_state."""
+    """Remove all wizard keys + dialog trigger from session_state."""
     for k in [k for k in st.session_state if k.startswith('pr_wiz_')]:
         del st.session_state[k]
+    st.session_state.pop('open_create_pr', None)
 
 
 def _wiz_step_bar(step: int):
@@ -2280,8 +2281,8 @@ else:
 # DIALOG TRIGGERS
 # ══════════════════════════════════════════════════════════════════
 
-# Create PR
-if st.session_state.pop('open_create_pr', False) and project_id:
+# Create PR — use 'get' (not pop) so dialog survives st.rerun() in wizard steps
+if st.session_state.get('open_create_pr') and project_id:
     _dialog_create_pr(project_id)
 
 # View PR (P1.2)
