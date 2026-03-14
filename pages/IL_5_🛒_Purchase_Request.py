@@ -54,9 +54,13 @@ auth = AuthManager()
 
 st.set_page_config(page_title="Purchase Request", page_icon="🛒", layout="wide")
 auth.require_auth()
-user_id    = str(auth.get_user_id())
-emp_int_id = auth.get_user_id()
+user_id    = str(auth.get_user_id())       # users.id as string — for audit (created_by)
+emp_int_id = st.session_state.get('employee_id')  # employees.id — for FK requester_id, PM checks
 is_admin   = auth.is_admin()
+
+if not emp_int_id:
+    st.error("⚠️ Employee ID not found in session. Please re-login.")
+    st.stop()
 
 
 # ── Lookups (cached) ─────────────────────────────────────────────
@@ -1129,19 +1133,41 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
     items  = st.session_state['pr_wiz_items']
 
     try:
-        # 0. Re-validate FKs (data may be stale from Step 1) ───
+        # 0. Pre-validate all FK values before INSERT ──────────
+        from utils.db import execute_query as _eq
+
         estimate_id = header.get('estimate_id')
         if estimate_id:
-            fresh_est = get_active_estimate(project_id)
-            if not fresh_est or fresh_est['id'] != estimate_id:
-                logger.warning(f"Estimate {estimate_id} no longer active — using fresh")
-                estimate_id = fresh_est['id'] if fresh_est else None
+            chk = _eq("SELECT id FROM il_project_estimates WHERE id = :id",
+                       {'id': estimate_id})
+            if not chk:
+                logger.warning(f"estimate_id={estimate_id} invalid FK — setting NULL")
+                estimate_id = None
 
         vendor_id = header.get('vendor_id')
+        if vendor_id:
+            chk = _eq("SELECT id FROM companies WHERE id = :id AND delete_flag = 0",
+                       {'id': vendor_id})
+            if not chk:
+                logger.warning(f"vendor_id={vendor_id} invalid FK — setting NULL")
+                vendor_id = None
 
-        # Re-generate PR number to avoid race condition (another user
-        # may have created a PR since Step 1)
+        currency_id = header.get('currency_id')
+        if currency_id:
+            chk = _eq("SELECT id FROM currencies WHERE id = :id AND delete_flag = 0",
+                       {'id': currency_id})
+            if not chk:
+                st.error(f"❌ currency_id={currency_id} not found."); return
+
+        # Re-generate PR number (another user may have taken it since Step 1)
         pr_number = generate_pr_number()
+
+        logger.info(
+            f"PR wizard INSERT: project={project_id}, requester={emp_int_id}, "
+            f"estimate={estimate_id}, vendor={vendor_id}, "
+            f"currency={currency_id} ({header.get('currency_code')}), "
+            f"rate={header.get('exchange_rate')}"
+        )
 
         # 1. Create header ─────────────────────────────────────
         new_id = create_pr({
@@ -1151,12 +1177,12 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
             'estimate_id':   estimate_id,
             'vendor_id':     vendor_id,
             'vendor_contact_id': None,
-            'currency_id':   header['currency_id'],
+            'currency_id':   currency_id,
             'exchange_rate': header['exchange_rate'],
             'priority':      header['priority'],
             'pr_type':       header['pr_type'],
             'cogs_category': header['cogs_category'],
-            'required_date': header.get('required_date'),
+            'required_date': header.get('required_date') or None,
             'justification': header.get('justification') or None,
         }, user_id)
 
@@ -1229,23 +1255,23 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
 
     except Exception as e:
         err_str = str(e)
-        # FK constraint failure — most likely estimate_id is stale
+        # FK constraint failure — retry without optional FKs
         if 'IntegrityError' in err_str and '1216' in err_str:
-            logger.warning(f"FK constraint failed — retrying without estimate_id: {e}")
+            logger.warning(f"FK constraint failed — retrying without estimate/vendor: {e}")
             try:
                 new_id = create_pr({
                     'pr_number':     pr_number,
                     'project_id':    project_id,
                     'requester_id':  emp_int_id,
-                    'estimate_id':   None,       # ← skip FK
-                    'vendor_id':     None,        # ← skip FK
+                    'estimate_id':   None,       # ← skip
+                    'vendor_id':     None,        # ← skip
                     'vendor_contact_id': None,
-                    'currency_id':   header['currency_id'],
+                    'currency_id':   currency_id,
                     'exchange_rate': header['exchange_rate'],
                     'priority':      header['priority'],
                     'pr_type':       header['pr_type'],
                     'cogs_category': header['cogs_category'],
-                    'required_date': header.get('required_date'),
+                    'required_date': header.get('required_date') or None,
                     'justification': header.get('justification') or None,
                 }, user_id)
 
@@ -1253,19 +1279,19 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
                     try:
                         create_pr_item({
                             'pr_id': new_id,
-                            'estimate_line_item_id': it.get('estimate_line_item_id'),
-                            'costbook_detail_id': it.get('costbook_detail_id'),
-                            'product_id': it.get('product_id'),
+                            'estimate_line_item_id': None,  # ← skip FK
+                            'costbook_detail_id': None,     # ← skip FK
+                            'product_id': None,             # ← skip FK
                             'item_description': it.get('item_description', ''),
                             'brand_name': it.get('brand_name', ''),
                             'pt_code': it.get('pt_code', ''),
-                            'vendor_id': it.get('vendor_id'),
+                            'vendor_id': None,
                             'vendor_name': it.get('vendor_name', ''),
                             'vendor_quote_ref': it.get('vendor_quote_ref', ''),
                             'quantity': it.get('quantity', 1),
                             'uom': it.get('uom', 'Pcs'),
                             'unit_cost': it.get('unit_cost', 0),
-                            'currency_id': it.get('currency_id') or header['currency_id'],
+                            'currency_id': it.get('currency_id') or currency_id,
                             'exchange_rate': it.get('exchange_rate', header['exchange_rate']),
                             'cogs_category': it.get('cogs_category', 'A'),
                             'specifications': it.get('specifications'),
@@ -1289,14 +1315,16 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
         else:
             st.error(f"❌ Creation failed: {e}")
             logger.error(f"PR wizard create failed: {e}")
-            # Show debug info for troubleshooting
+            # Debug info for troubleshooting
             with st.expander("🔧 Debug Info"):
                 st.code(f"project_id: {project_id}\n"
                         f"requester_id: {emp_int_id}\n"
-                        f"estimate_id: {header.get('estimate_id')}\n"
-                        f"vendor_id: {header.get('vendor_id')}\n"
-                        f"currency_id: {header.get('currency_id')}\n"
-                        f"pr_number: {header.get('pr_number')}\n"
+                        f"estimate_id: {estimate_id}\n"
+                        f"vendor_id: {vendor_id}\n"
+                        f"currency_id: {currency_id}\n"
+                        f"currency_code: {header.get('currency_code')}\n"
+                        f"exchange_rate: {header.get('exchange_rate')}\n"
+                        f"pr_number: {pr_number}\n"
                         f"error: {err_str}")
 
 
@@ -1870,7 +1898,7 @@ def _dialog_confirm_po(pr_id: int):
     st.markdown("A PO will be created in the ERP system and linked to this PR.")
     c1, c2 = st.columns(2)
     if c1.button("🛒 Yes, Create PO", type="primary", use_container_width=True):
-        keycloak_id = st.session_state.get('keycloak_id', user_id)
+        keycloak_id = st.session_state.get('user_keycloak_id', user_id)
         result = create_po_from_pr(pr_id, 1, keycloak_id)
         if result['success']:
             st.success(f"✅ {result['message']}")
