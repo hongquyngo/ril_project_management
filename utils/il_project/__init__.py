@@ -135,6 +135,8 @@ from .pr_queries import (
     # Permission Checks
     is_project_pm,
     is_approver_for_pr,
+    # Budget Comparison
+    get_budget_vs_pr,
 )
 
 __all__ = [
@@ -188,4 +190,5 @@ __all__ = [
     'get_importable_estimate_items',
     'create_po_from_pr',
     'is_project_pm', 'is_approver_for_pr',
+    'get_budget_vs_pr',
 ]

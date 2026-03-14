@@ -650,6 +650,208 @@ def get_pr_approval_history(pr_id: int) -> List[Dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# BUDGET vs PR — Estimate / PR Comparison by COGS Category
+# ══════════════════════════════════════════════════════════════════════
+
+# Estimate field → COGS category mapping
+_EST_FIELD_MAP = {
+    'A': 'a_equipment_cost',
+    'B': 'b_logistics_import',
+    'C': 'c_custom_fabrication',
+    'D': 'd_direct_labor',
+    'E': 'e_travel_site_oh',
+    'F': 'f_warranty_reserve',
+}
+
+_COGS_LABELS = {
+    'A': 'A — Equipment',
+    'B': 'B — Logistics & Import',
+    'C': 'C — Fabrication',
+    'D': 'D — Direct Labor',
+    'E': 'E — Travel & Site OH',
+    'F': 'F — Warranty Reserve',
+}
+
+
+def get_budget_vs_pr(project_id: int) -> Dict:
+    """
+    Compare Estimate budget (A→F) vs PR committed amounts by COGS category.
+
+    Returns:
+        {
+            'has_data': bool,
+            'estimate_version': int,
+            'categories': [
+                {
+                    'category': 'A',
+                    'label': 'A — Equipment',
+                    'estimated': float,
+                    'pr_committed': float,
+                    'remaining': float,
+                    'pct_used': float,       # 0–100+
+                    'pr_count': int,         # number of PRs touching this category
+                    'status': 'ok'|'warning'|'over',
+                    'prs': [                 # drill-down: individual PRs
+                        {'pr_number': ..., 'vendor': ..., 'amount_vnd': ..., 'status': ...,
+                         'items': [{'desc': ..., 'qty': ..., 'cost': ..., 'vnd': ...}]},
+                    ],
+                },
+                ...
+            ],
+            'total_estimated': float,
+            'total_committed': float,
+            'total_remaining': float,
+            'total_pct_used': float,
+        }
+    """
+    # ── Get active estimate ──
+    from .queries import get_active_estimate
+    est = get_active_estimate(project_id)
+    if not est:
+        return {'has_data': False, 'categories': [], 'estimate_version': 0,
+                'total_estimated': 0, 'total_committed': 0, 'total_remaining': 0, 'total_pct_used': 0}
+
+    # ── Get all active PR items for this project, grouped ──
+    pr_items_raw = _execute_query("""
+        SELECT
+            pr.id AS pr_id,
+            pr.pr_number,
+            pr.status AS pr_status,
+            pr.vendor_id,
+            COALESCE(v.english_name, '') AS vendor_name,
+            pri.id AS item_id,
+            pri.cogs_category,
+            pri.item_description,
+            pri.quantity,
+            pri.unit_cost,
+            COALESCE(cur.code, 'VND') AS currency_code,
+            pri.exchange_rate,
+            pri.amount_vnd
+        FROM il_purchase_request_items pri
+        JOIN il_purchase_requests pr ON pri.pr_id = pr.id
+        LEFT JOIN companies v        ON pr.vendor_id = v.id
+        LEFT JOIN currencies cur     ON pri.currency_id = cur.id
+        WHERE pr.project_id = :pid
+          AND pr.delete_flag = 0
+          AND pri.delete_flag = 0
+          AND pr.status NOT IN ('CANCELLED', 'REJECTED')
+        ORDER BY pri.cogs_category, pr.pr_number, pri.view_order
+    """, {'pid': project_id})
+
+    # ── Organize items by category → by PR ──
+    # Structure: {category: {pr_id: {'pr_number': ..., 'items': [...], 'total': ...}}}
+    cat_pr_map: Dict[str, Dict[int, Dict]] = {}
+    for row in pr_items_raw:
+        cat = row.get('cogs_category', 'A') or 'A'
+        # Normalize: SERVICE items → map to nearest (or keep separate)
+        pr_id = row['pr_id']
+
+        if cat not in cat_pr_map:
+            cat_pr_map[cat] = {}
+        if pr_id not in cat_pr_map[cat]:
+            cat_pr_map[cat][pr_id] = {
+                'pr_number': row['pr_number'],
+                'vendor': row.get('vendor_name', ''),
+                'status': row['pr_status'],
+                'items': [],
+                'total_vnd': 0,
+            }
+        item_vnd = float(row.get('amount_vnd', 0) or 0)
+        cat_pr_map[cat][pr_id]['items'].append({
+            'desc': (row.get('item_description', '') or '')[:50],
+            'qty': float(row.get('quantity', 0) or 0),
+            'cost': float(row.get('unit_cost', 0) or 0),
+            'ccy': row.get('currency_code', 'VND'),
+            'vnd': item_vnd,
+        })
+        cat_pr_map[cat][pr_id]['total_vnd'] += item_vnd
+
+    # ── Build category comparison rows ──
+    categories = []
+    total_est = 0.0
+    total_committed = 0.0
+
+    for cat_key in ['A', 'B', 'C', 'D', 'E', 'F']:
+        est_field = _EST_FIELD_MAP[cat_key]
+        est_val = float(est.get(est_field, 0) or 0)
+        total_est += est_val
+
+        # Sum committed from PRs
+        pr_data = cat_pr_map.get(cat_key, {})
+        committed = sum(p['total_vnd'] for p in pr_data.values())
+        total_committed += committed
+
+        remaining = est_val - committed
+        pct_used = (committed / est_val * 100) if est_val > 0 else (100.0 if committed > 0 else 0)
+
+        # Status
+        if est_val <= 0 and committed <= 0:
+            status = 'empty'
+        elif pct_used > 100:
+            status = 'over'
+        elif pct_used > 85:
+            status = 'warning'
+        else:
+            status = 'ok'
+
+        # Drill-down: flatten PR data
+        prs_drill = []
+        for pid, pdata in pr_data.items():
+            prs_drill.append({
+                'pr_number': pdata['pr_number'],
+                'vendor': pdata['vendor'],
+                'amount_vnd': pdata['total_vnd'],
+                'status': pdata['status'],
+                'items': pdata['items'],
+            })
+
+        categories.append({
+            'category': cat_key,
+            'label': _COGS_LABELS[cat_key],
+            'estimated': est_val,
+            'pr_committed': committed,
+            'remaining': remaining,
+            'pct_used': pct_used,
+            'pr_count': len(pr_data),
+            'status': status,
+            'prs': prs_drill,
+        })
+
+    # Handle SERVICE items (not in A–F but may appear in PRs)
+    if 'SERVICE' in cat_pr_map:
+        svc_data = cat_pr_map['SERVICE']
+        svc_committed = sum(p['total_vnd'] for p in svc_data.values())
+        total_committed += svc_committed
+        prs_drill = [{'pr_number': p['pr_number'], 'vendor': p['vendor'],
+                       'amount_vnd': p['total_vnd'], 'status': p['status'],
+                       'items': p['items']} for p in svc_data.values()]
+        categories.append({
+            'category': 'SVC',
+            'label': 'Service Items',
+            'estimated': 0,
+            'pr_committed': svc_committed,
+            'remaining': -svc_committed,
+            'pct_used': 100.0 if svc_committed > 0 else 0,
+            'pr_count': len(svc_data),
+            'status': 'info',
+            'prs': prs_drill,
+        })
+
+    total_remaining = total_est - total_committed
+    total_pct = (total_committed / total_est * 100) if total_est > 0 else 0
+
+    return {
+        'has_data': True,
+        'estimate_version': est.get('estimate_version', 0),
+        'categories': categories,
+        'total_estimated': total_est,
+        'total_committed': total_committed,
+        'total_remaining': total_remaining,
+        'total_pct_used': total_pct,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # IMPORT FROM ESTIMATE
 # ══════════════════════════════════════════════════════════════════════
 

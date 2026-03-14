@@ -204,6 +204,95 @@ def _info_row(label: str, value: str) -> str:
     </tr>'''
 
 
+def _budget_comparison_table(budget_data: Optional[Dict] = None) -> str:
+    """
+    Generate HTML table: Estimate Budget vs PR Committed by COGS category.
+    budget_data comes from pr_queries.get_budget_vs_pr().
+    Shows A–F rows with status colors.
+    """
+    if not budget_data or not budget_data.get('has_data'):
+        return ''
+
+    categories = budget_data.get('categories', [])
+    if not categories:
+        return ''
+
+    def _status_color(status: str) -> str:
+        return {'ok': '#16a34a', 'warning': '#d97706', 'over': '#dc2626',
+                'empty': '#9ca3af', 'info': '#6366f1'}.get(status, '#6b7280')
+
+    def _status_icon(status: str) -> str:
+        return {'ok': '🟢', 'warning': '🟡', 'over': '🔴',
+                'empty': '⚪', 'info': '🔵'}.get(status, '⚪')
+
+    header = '''
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:13px;">
+        <tr style="background:#f3f4f6;">
+            <th style="padding:8px;text-align:left;">Category</th>
+            <th style="padding:8px;text-align:right;">Estimated</th>
+            <th style="padding:8px;text-align:right;">PR Committed</th>
+            <th style="padding:8px;text-align:right;">Remaining</th>
+            <th style="padding:8px;text-align:center;">Used %</th>
+            <th style="padding:8px;text-align:center;">Status</th>
+        </tr>'''
+
+    rows_html = ''
+    for cat in categories:
+        est_v = cat.get('estimated', 0)
+        com_v = cat.get('pr_committed', 0)
+        rem_v = cat.get('remaining', 0)
+        pct = cat.get('pct_used', 0)
+        status = cat.get('status', 'empty')
+
+        # Skip empty categories (no estimate and no PR)
+        if est_v == 0 and com_v == 0:
+            continue
+
+        color = _status_color(status)
+        icon = _status_icon(status)
+
+        # Highlight row if over budget
+        row_bg = ''
+        if status == 'over':
+            row_bg = 'background:#fef2f2;'
+        elif status == 'warning':
+            row_bg = 'background:#fffbeb;'
+
+        rows_html += f'''
+        <tr style="{row_bg}">
+            <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-weight:500;">{cat.get('label', cat['category'])}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;">{_fmt_vnd(est_v)}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;">{_fmt_vnd(com_v)}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;color:{color};">{_fmt_vnd(rem_v) if rem_v >= 0 else f'<strong>({_fmt_vnd(abs(rem_v))})</strong>'}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;color:{color};font-weight:600;">{pct:.0f}%</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;">{icon}</td>
+        </tr>'''
+
+    # Total row
+    t_est = budget_data.get('total_estimated', 0)
+    t_com = budget_data.get('total_committed', 0)
+    t_rem = budget_data.get('total_remaining', 0)
+    t_pct = budget_data.get('total_pct_used', 0)
+    t_color = '#dc2626' if t_pct > 100 else '#d97706' if t_pct > 85 else '#16a34a'
+
+    rows_html += f'''
+    <tr style="background:#f9fafb;font-weight:700;">
+        <td style="padding:8px;border-top:2px solid #d1d5db;">TOTAL</td>
+        <td style="padding:8px;border-top:2px solid #d1d5db;text-align:right;">{_fmt_vnd(t_est)}</td>
+        <td style="padding:8px;border-top:2px solid #d1d5db;text-align:right;">{_fmt_vnd(t_com)}</td>
+        <td style="padding:8px;border-top:2px solid #d1d5db;text-align:right;color:{t_color};">{_fmt_vnd(t_rem)}</td>
+        <td style="padding:8px;border-top:2px solid #d1d5db;text-align:center;color:{t_color};">{t_pct:.0f}%</td>
+        <td style="padding:8px;border-top:2px solid #d1d5db;text-align:center;">{'🔴' if t_pct > 100 else '🟡' if t_pct > 85 else '🟢'}</td>
+    </tr>'''
+
+    title_html = f'''
+    <div style="margin:16px 0 4px 0;font-size:13px;font-weight:600;color:#374151;">
+        📊 Budget vs PR Committed (Est Rev {budget_data.get('estimate_version', '—')})
+    </div>'''
+
+    return title_html + header + rows_html + '</table>'
+
+
 # ══════════════════════════════════════════════════════════════════════
 # PUBLIC API — Notification Triggers
 # ══════════════════════════════════════════════════════════════════════
@@ -222,9 +311,10 @@ def notify_pr_submitted(
     approval_level: int,
     max_level: int,
     items: Optional[list] = None,
+    budget_data: Optional[Dict] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification to approver when PR is submitted."""
+    """Send notification to approver when PR is submitted. Includes budget comparison."""
     if not _is_configured():
         return False
 
@@ -251,6 +341,8 @@ def notify_pr_submitted(
     
     {_items_table(items or [])}
     
+    {_budget_comparison_table(budget_data)}
+    
     <p style="color:#6b7280;font-size:13px;">
         Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
     </p>'''
@@ -273,12 +365,13 @@ def notify_pr_approved(
     is_final: bool,
     next_approver_name: Optional[str] = None,
     next_approver_email: Optional[str] = None,
+    budget_data: Optional[Dict] = None,
     app_url: Optional[str] = None,
 ) -> bool:
     """
     Send notification when PR is approved.
-    - To requester: always
-    - To next approver: if not final (multi-level)
+    - To requester: always (with budget comparison)
+    - To next approver: if not final (multi-level, with budget comparison)
     """
     if not _is_configured():
         return False
@@ -305,7 +398,9 @@ def notify_pr_approved(
         {_info_row('Status', status_html)}
     </table>
     
-    <p>{action_note}</p>'''
+    <p>{action_note}</p>
+    
+    {_budget_comparison_table(budget_data)}'''
 
     ok1 = _send_email(
         to_emails=[requester_email],
@@ -329,7 +424,9 @@ def notify_pr_approved(
         
         <p style="color:#6b7280;font-size:13px;">
             Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
-        </p>'''
+        </p>
+        
+        {_budget_comparison_table(budget_data)}'''
 
         ok2 = _send_email(
             to_emails=[next_approver_email],

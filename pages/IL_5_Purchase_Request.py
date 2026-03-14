@@ -37,6 +37,7 @@ from utils.il_project.pr_queries import (
     get_importable_estimate_items,
     create_po_from_pr,
     is_project_pm, is_approver_for_pr,
+    get_budget_vs_pr,
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
@@ -178,38 +179,153 @@ def _render_approval_progress(pr: dict, history: list):
 
 
 # ══════════════════════════════════════════════════════════════════
-# HELPER — Budget tracking (P2.3)
+# HELPER — Budget Comparison: Estimate vs PR (with drill-down)
 # ══════════════════════════════════════════════════════════════════
 
-def _render_budget_context(project_id: int, cogs_category: str = None):
-    """Show estimate budget vs PR committed amount."""
-    est = get_active_estimate(project_id)
-    if not est:
-        return
+_STATUS_ICONS_BUDGET = {'ok': '🟢', 'warning': '🟡', 'over': '🔴', 'empty': '⚪', 'info': '🔵'}
+_STATUS_COLORS_BUDGET = {'ok': 'green', 'warning': 'orange', 'over': 'red', 'empty': 'gray', 'info': 'blue'}
 
-    # Get all active PRs for this project
-    all_prs = get_pr_list_df(project_id=project_id)
-    if all_prs.empty:
-        return
 
-    active_prs = all_prs[all_prs['status'].isin(['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'PO_CREATED'])]
-    committed_vnd = float(active_prs['total_amount_vnd'].sum()) if not active_prs.empty else 0
-    est_cogs = float(est.get('total_cogs', 0) or 0)
+def _render_budget_comparison(project_id: int, mode: str = 'full', current_pr_id: int = None):
+    """
+    Render Estimate vs PR budget comparison with drill-down.
 
-    if est_cogs > 0:
-        pct = committed_vnd / est_cogs
-        remaining = est_cogs - committed_vnd
-        bc1, bc2 = st.columns([3, 1])
-        bc1.progress(
-            min(pct, 1.0),
-            text=f"PR Committed: {fmt_vnd(committed_vnd)} / {fmt_vnd(est_cogs)} ({pct * 100:.0f}%)"
-        )
-        if pct > 1.0:
-            bc2.error(f"⚠️ Over by {fmt_vnd(committed_vnd - est_cogs)}")
-        elif pct > 0.85:
-            bc2.warning(f"Remaining: {fmt_vnd(remaining)}")
-        else:
-            bc2.caption(f"Remaining: {fmt_vnd(remaining)}")
+    Args:
+        project_id: project to analyze
+        mode: 'full' = table + drill-down, 'compact' = progress bar only, 'inline' = table no drill-down
+        current_pr_id: highlight this PR in drill-down (optional)
+    """
+    budget = get_budget_vs_pr(project_id)
+    if not budget.get('has_data'):
+        return budget  # Return even if empty so caller knows
+
+    # ── Compact mode: just a progress bar ──
+    if mode == 'compact':
+        t_est = budget['total_estimated']
+        t_com = budget['total_committed']
+        if t_est > 0:
+            pct = t_com / t_est
+            bc1, bc2 = st.columns([3, 1])
+            bc1.progress(
+                min(pct, 1.0),
+                text=f"PR Committed: {fmt_vnd(t_com)} / {fmt_vnd(t_est)} ({pct * 100:.0f}%)"
+            )
+            if pct > 1.0:
+                bc2.error(f"⚠️ Over by {fmt_vnd(t_com - t_est)}")
+            elif pct > 0.85:
+                bc2.warning(f"Remaining: {fmt_vnd(t_est - t_com)}")
+            else:
+                bc2.caption(f"Remaining: {fmt_vnd(t_est - t_com)}")
+        return budget
+
+    # ── Full / Inline mode: comparison table ──
+    st.markdown(f"##### 📊 Budget vs PR Committed (Estimate Rev {budget.get('estimate_version', '—')})")
+
+    categories = budget.get('categories', [])
+    # Filter out empty rows for display
+    visible_cats = [c for c in categories if c['estimated'] > 0 or c['pr_committed'] > 0]
+
+    if not visible_cats:
+        st.caption("No budget data or PR activity yet.")
+        return budget
+
+    # Build summary table
+    rows = []
+    for cat in visible_cats:
+        icon = _STATUS_ICONS_BUDGET.get(cat['status'], '⚪')
+        pct_str = f"{cat['pct_used']:.0f}%"
+        rem = cat['remaining']
+        rem_str = fmt_vnd(rem) if rem >= 0 else f"**({fmt_vnd(abs(rem))})**"
+
+        rows.append({
+            '●': icon,
+            'Category': cat['label'],
+            'Estimated': f"{cat['estimated']:,.0f}" if cat['estimated'] > 0 else '—',
+            'PR Committed': f"{cat['pr_committed']:,.0f}" if cat['pr_committed'] > 0 else '—',
+            'Remaining': f"{rem:,.0f}" if rem >= 0 else f"({abs(rem):,.0f})",
+            'Used %': pct_str,
+            'PRs': cat['pr_count'],
+        })
+
+    # Total row
+    t = budget
+    rows.append({
+        '●': '🔴' if t['total_pct_used'] > 100 else '🟡' if t['total_pct_used'] > 85 else '🟢',
+        'Category': '**TOTAL**',
+        'Estimated': f"{t['total_estimated']:,.0f}",
+        'PR Committed': f"{t['total_committed']:,.0f}",
+        'Remaining': f"{t['total_remaining']:,.0f}" if t['total_remaining'] >= 0 else f"({abs(t['total_remaining']):,.0f})",
+        'Used %': f"{t['total_pct_used']:.0f}%",
+        'PRs': '',
+    })
+
+    st.dataframe(
+        pd.DataFrame(rows), width="stretch", hide_index=True,
+        column_config={
+            '●': st.column_config.TextColumn('', width=30),
+            'Category': st.column_config.TextColumn('Category'),
+            'Estimated': st.column_config.TextColumn('Estimated (VND)'),
+            'PR Committed': st.column_config.TextColumn('PR Committed (VND)'),
+            'Remaining': st.column_config.TextColumn('Remaining (VND)'),
+            'Used %': st.column_config.TextColumn('Used %', width=70),
+            'PRs': st.column_config.NumberColumn('#PRs', width=55),
+        },
+    )
+
+    # Legend
+    st.caption("🟢 < 85% &nbsp;|&nbsp; 🟡 85–100% &nbsp;|&nbsp; 🔴 > 100% (over budget)")
+
+    # ── Drill-down (full mode only) ──
+    if mode == 'full':
+        drillable = [c for c in visible_cats if c['pr_count'] > 0]
+        if drillable:
+            with st.expander("🔍 Drill-down — View PR details by category", expanded=False):
+                for cat in drillable:
+                    icon = _STATUS_ICONS_BUDGET.get(cat['status'], '⚪')
+                    st.markdown(f"**{icon} {cat['label']}** — "
+                                f"{fmt_vnd(cat['pr_committed'])} / {fmt_vnd(cat['estimated'])} "
+                                f"({cat['pct_used']:.0f}%, {cat['pr_count']} PR{'s' if cat['pr_count'] > 1 else ''})")
+
+                    for pr in cat.get('prs', []):
+                        pr_icon = PR_STATUS_ICONS.get(pr['status'], '⚪')
+                        is_current = False
+                        if current_pr_id:
+                            # Can't match by ID directly, match by pr_number approximation
+                            pass
+                        highlight = '**' if is_current else ''
+                        st.caption(
+                            f"&nbsp;&nbsp;&nbsp;&nbsp;{pr_icon} {highlight}{pr['pr_number']}{highlight} — "
+                            f"{pr.get('vendor', '—')} — {fmt_vnd(pr['amount_vnd'])} "
+                            f"({pr['status']})"
+                        )
+
+                        # Item-level detail
+                        items = pr.get('items', [])
+                        if items:
+                            item_rows = []
+                            for it in items:
+                                item_rows.append({
+                                    'Product': it.get('desc', ''),
+                                    'Qty': f"{it.get('qty', 0):.1f}",
+                                    'Unit Cost': f"{it.get('cost', 0):,.2f}",
+                                    'CCY': it.get('ccy', ''),
+                                    'VND': f"{it.get('vnd', 0):,.0f}",
+                                })
+                            st.dataframe(
+                                pd.DataFrame(item_rows),
+                                width="stretch", hide_index=True,
+                                height=min(35 * len(item_rows) + 38, 200),
+                                column_config={
+                                    'Product': st.column_config.TextColumn('Product'),
+                                    'Qty': st.column_config.TextColumn('Qty', width=50),
+                                    'Unit Cost': st.column_config.TextColumn('Cost', width=100),
+                                    'CCY': st.column_config.TextColumn('CCY', width=45),
+                                    'VND': st.column_config.TextColumn('VND'),
+                                },
+                            )
+                    st.markdown("---")
+
+    return budget
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -240,8 +356,88 @@ def _age_icon(submitted_date) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# DIALOGS — Create PR (P3.6: improved with immediate item import)
+# DIALOGS — Create PR (smart flow: type→auto-suggest, rate auto)
 # ══════════════════════════════════════════════════════════════════
+
+# Type → COGS mapping (auto-set when user picks type)
+_TYPE_COGS_MAP = {
+    'EQUIPMENT':   'A',
+    'FABRICATION': 'C',
+    'SERVICE':     'SERVICE',
+    'MIXED':       'MIXED',
+}
+
+# COGS category filter for estimate items
+_COGS_FILTER_MAP = {
+    'A':       ['A'],
+    'C':       ['C'],
+    'SERVICE': ['SERVICE'],
+    'MIXED':   ['A', 'C', 'SERVICE'],
+}
+
+
+def _analyze_estimate_for_pr(est_id: int, cogs_filter: list) -> dict:
+    """
+    Analyze estimate line items for PR auto-fill suggestions.
+    Returns: {
+        items: list, item_count: int, total_vnd: float,
+        dominant_vendor: str, dominant_currency: str,
+        vendor_breakdown: dict, preview_rows: list
+    }
+    """
+    all_items = get_importable_estimate_items(est_id)
+    # Filter by COGS category
+    items = [it for it in all_items
+             if it.get('cogs_category', '') in cogs_filter
+             and it.get('already_in_pr', 0) == 0]
+
+    if not items:
+        return {'items': [], 'item_count': 0, 'total_vnd': 0,
+                'dominant_vendor': '', 'dominant_currency': 'VND',
+                'vendor_breakdown': {}, 'preview_rows': []}
+
+    # Total VND
+    total_vnd = sum(float(it.get('amount_cost_vnd', 0) or 0) for it in items)
+
+    # Vendor breakdown (by total VND)
+    vendor_totals: dict = {}
+    for it in items:
+        vn = (it.get('vendor_name', '') or '').strip()
+        if vn:
+            vendor_totals[vn] = vendor_totals.get(vn, 0) + float(it.get('amount_cost_vnd', 0) or 0)
+
+    dominant_vendor = max(vendor_totals, key=vendor_totals.get) if vendor_totals else ''
+
+    # Dominant currency (most items)
+    cur_counts: dict = {}
+    for it in items:
+        cc = it.get('cost_currency_code', 'VND') or 'VND'
+        cur_counts[cc] = cur_counts.get(cc, 0) + 1
+    dominant_currency = max(cur_counts, key=cur_counts.get) if cur_counts else 'VND'
+
+    # Preview rows (top items for display)
+    preview_rows = []
+    for it in items[:15]:
+        preview_rows.append({
+            'Cat': it.get('cogs_category', ''),
+            'Product': (it.get('item_description', '') or '')[:35],
+            'Vendor': (it.get('vendor_name', '') or '')[:20],
+            'Qty': it.get('quantity', 0),
+            'Cost': f"{it.get('unit_cost', 0):,.2f}",
+            'CCY': it.get('cost_currency_code', ''),
+            'VND': f"{float(it.get('amount_cost_vnd', 0) or 0):,.0f}",
+        })
+
+    return {
+        'items': items,
+        'item_count': len(items),
+        'total_vnd': total_vnd,
+        'dominant_vendor': dominant_vendor,
+        'dominant_currency': dominant_currency,
+        'vendor_breakdown': vendor_totals,
+        'preview_rows': preview_rows,
+    }
+
 
 @st.dialog("🛒 New Purchase Request", width="large")
 def _dialog_create_pr(project_id: int):
@@ -252,71 +448,150 @@ def _dialog_create_pr(project_id: int):
     if not is_project_pm(project_id, emp_int_id) and not is_admin:
         st.warning("Only the PM of this project can create a PR."); return
 
+    # ── Header context ──
     st.markdown(f"**Project:** `{project['project_code']}` — {project['project_name']}")
     st.caption(f"Customer: {project.get('customer_name', '—')} | Status: **{project['status']}**")
 
-    # Show estimate budget context
     est = get_active_estimate(project_id)
     if est:
         est_cogs = float(est.get('total_cogs', 0) or 0)
         if est_cogs > 0:
             st.info(f"💰 Estimate Budget: **{fmt_vnd(est_cogs)}** (Rev {est.get('estimate_version', '—')})")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 1 — Type Selection (OUTSIDE form → reactive auto-fill)
+    # ══════════════════════════════════════════════════════════════
     st.divider()
+    st.markdown("##### ① Select PR Type")
+
+    tc1, tc2 = st.columns(2)
+    pr_type = tc1.selectbox("Type", ['EQUIPMENT', 'FABRICATION', 'SERVICE', 'MIXED'],
+                            key="cr_type",
+                            help="EQUIPMENT = A (hardware/sensors), FABRICATION = C (racking/metalwork), "
+                                 "SERVICE = labor/consulting, MIXED = combined")
+    # Auto-set COGS from type
+    auto_cogs = _TYPE_COGS_MAP.get(pr_type, 'A')
+    tc2.text_input("COGS Category", value=auto_cogs, disabled=True,
+                   help="Auto-set from PR Type")
+
+    # ── Analyze estimate items for this type ──
+    analysis = {}
+    importable_items = []
+    if est:
+        cogs_filter = _COGS_FILTER_MAP.get(auto_cogs, ['A', 'C', 'SERVICE'])
+        analysis = _analyze_estimate_for_pr(est['id'], cogs_filter)
+        importable_items = analysis.get('items', [])
+
+        if analysis['item_count'] > 0:
+            # Show analysis summary
+            ac1, ac2, ac3 = st.columns(3)
+            ac1.metric("Available Items", analysis['item_count'])
+            ac2.metric("Total Cost", fmt_vnd(analysis['total_vnd']))
+            if analysis['dominant_vendor']:
+                ac3.metric("Top Vendor", analysis['dominant_vendor'][:20])
+
+            # Vendor breakdown (if multiple)
+            if len(analysis.get('vendor_breakdown', {})) > 1:
+                vb = analysis['vendor_breakdown']
+                parts = [f"{v}: {fmt_vnd(a)}" for v, a in
+                         sorted(vb.items(), key=lambda x: -x[1])[:4]]
+                st.caption(f"Vendor breakdown: {' | '.join(parts)}")
+
+            # Preview items (collapsible)
+            with st.expander(f"📋 Preview {analysis['item_count']} items to import", expanded=False):
+                if analysis['preview_rows']:
+                    st.dataframe(
+                        pd.DataFrame(analysis['preview_rows']),
+                        width="stretch", hide_index=True,
+                        height=min(35 * len(analysis['preview_rows']) + 38, 250),
+                    )
+                    if analysis['item_count'] > 15:
+                        st.caption(f"... and {analysis['item_count'] - 15} more items")
+        else:
+            st.caption(f"ℹ️ No importable estimate items for category **{auto_cogs}**. "
+                       "You can add items manually after creating the PR.")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 2 — PR Details (form)
+    # ══════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("##### ② PR Details")
+
+    # Pre-compute suggested values from analysis
+    suggested_vendor = analysis.get('dominant_vendor', '')
+    suggested_currency = analysis.get('dominant_currency', 'VND')
 
     with st.form("create_pr_form"):
-        # ── Header fields ──
+        # Row 1: PR number + Priority
         h1, h2 = st.columns(2)
         pr_number = generate_pr_number()
         h1.text_input("PR Number", value=pr_number, disabled=True)
         priority = h2.selectbox("Priority", ['NORMAL', 'LOW', 'HIGH', 'URGENT'])
 
-        h3, h4, h5 = st.columns(3)
-        pr_type = h3.selectbox("Type", ['EQUIPMENT', 'FABRICATION', 'SERVICE', 'MIXED'])
-        cogs_cat = h4.selectbox("COGS Category", ['A', 'C', 'MIXED', 'SERVICE'])
-        req_date = h5.date_input("Required Date", value=None)
-
-        # Vendor (with manual fallback — P3.6)
+        # Row 2: Vendor + Currency
         v1, v2 = st.columns(2)
-        vendor_names_list = ["(Select later)"] + [v['name'] for v in vendors] + ["— Enter manually —"]
-        vendor_sel = v1.selectbox("Primary Vendor", vendor_names_list)
+        vendor_names_list = ["(Select later)"] + [v['name'] for v in vendors]
+        # Auto-select suggested vendor if found in list
+        vendor_default_idx = 0
+        if suggested_vendor:
+            for i, vn in enumerate(vendor_names_list):
+                if vn == suggested_vendor:
+                    vendor_default_idx = i
+                    break
+        vendor_sel = v1.selectbox("Primary Vendor", vendor_names_list, index=vendor_default_idx,
+                                  help=f"💡 Suggested: {suggested_vendor}" if suggested_vendor else None)
         vendor_id = None
-        vendor_name_manual = ""
-        if vendor_sel == "— Enter manually —":
-            vendor_name_manual = v2.text_input("Vendor Name", key="cr_vendor_manual")
-        elif vendor_sel not in ("(Select later)", "— Enter manually —"):
+        if vendor_sel != "(Select later)":
             vendor_id = next((v['id'] for v in vendors if v['name'] == vendor_sel), None)
 
         cur_opts = [c['code'] for c in currencies]
-        cur_sel = v2.selectbox("Currency", cur_opts,
-                               index=cur_opts.index('VND') if 'VND' in cur_opts else 0,
-                               key="cr_currency") if vendor_sel != "— Enter manually —" else \
-                  st.selectbox("Currency", cur_opts,
-                               index=cur_opts.index('VND') if 'VND' in cur_opts else 0,
-                               key="cr_currency2")
+        # Auto-select suggested currency
+        cur_default_idx = cur_opts.index(suggested_currency) if suggested_currency in cur_opts else (
+            cur_opts.index('VND') if 'VND' in cur_opts else 0)
+        cur_sel = v2.selectbox("Currency", cur_opts, index=cur_default_idx)
         currency_id = currencies[cur_opts.index(cur_sel)]['id']
 
-        # Exchange rate
+        # Row 3: Exchange rate (AUTO — read-only display)
         _rate_res = get_rate_to_vnd(cur_sel)
-        exc_rate = st.number_input(
-            f"Exchange Rate (1 {cur_sel} = ? VND)",
-            value=_rate_res.rate if _rate_res.ok else 1.0,
-            min_value=0.0, format="%.4f"
-        )
+        exc_rate = _rate_res.rate if _rate_res.ok else 1.0
+        _badges = {'same': 'ℹ️ Same currency', 'api': '✅ Live API', 'cache': '✅ Cached',
+                   'db': '🔵 DB rate', 'fallback': '⚠️ Fallback'}
+        rate_badge = _badges.get(_rate_res.source, _rate_res.source)
 
-        justification = st.text_area("Justification / Business Reason", height=80,
+        if cur_sel == 'VND':
+            st.caption(f"💱 Currency: VND — no conversion needed")
+        else:
+            rc1, rc2 = st.columns([2, 1])
+            rc1.text_input(f"Exchange Rate (1 {cur_sel} = ? VND)",
+                           value=f"{exc_rate:,.4f}", disabled=True,
+                           help="Auto-fetched. Rate is locked to ensure consistency.")
+            rc2.caption(f"\n{rate_badge}")
+            if not _rate_res.ok:
+                st.warning(f"⚠️ {_rate_res.warning or 'Could not fetch live rate. Using reference rate.'}")
+
+        # Row 4: Required date + Justification
+        req_date = st.date_input("Required Date", value=None,
+                                  help="Ngày cần hàng. Để trống nếu không urgent.")
+        justification = st.text_area("Justification / Business Reason", height=70,
                                       help="Mô tả lý do mua hàng, phục vụ phase nào của project")
 
-        # Option: auto-import from estimate after create
+        # Row 5: Import option
         auto_import = False
-        if est:
+        if importable_items:
             auto_import = st.checkbox(
-                "📋 Auto-import items from active estimate after creation",
+                f"📋 Auto-import {len(importable_items)} items from estimate (Rev {est.get('estimate_version', '?')})",
                 value=True,
-                help="Tự động import line items từ estimate hiện tại vào PR"
+                help=f"Import {len(importable_items)} available items ({auto_cogs}) "
+                     f"totaling {fmt_vnd(analysis.get('total_vnd', 0))}"
             )
+        elif est:
+            st.caption("ℹ️ No new items to import (all already in PRs, or no items for this category)")
 
         submitted = st.form_submit_button("💾 Create PR", type="primary", use_container_width=True)
 
+    # ══════════════════════════════════════════════════════════════
+    # STEP 3 — Create + auto-import
+    # ══════════════════════════════════════════════════════════════
     if submitted:
         try:
             new_id = create_pr({
@@ -330,17 +605,15 @@ def _dialog_create_pr(project_id: int):
                 'exchange_rate': exc_rate,
                 'priority': priority,
                 'pr_type': pr_type,
-                'cogs_category': cogs_cat,
+                'cogs_category': auto_cogs,
                 'required_date': req_date,
                 'justification': justification or None,
             }, user_id)
 
-            # Auto-import from estimate (P3.6)
-            if auto_import and est:
-                items = get_importable_estimate_items(est['id'])
-                available = [it for it in items if it.get('already_in_pr', 0) == 0]
-                count = 0
-                for i, it in enumerate(available):
+            # Auto-import from estimate
+            import_count = 0
+            if auto_import and importable_items:
+                for i, it in enumerate(importable_items):
                     try:
                         create_pr_item({
                             'pr_id': new_id,
@@ -363,15 +636,18 @@ def _dialog_create_pr(project_id: int):
                             'notes': 'Imported from estimate',
                             'view_order': i,
                         }, user_id)
-                        count += 1
+                        import_count += 1
                     except Exception:
                         pass
-                if count > 0:
+                if import_count > 0:
                     recalc_pr_totals(new_id)
 
-            st.success(f"✅ PR {pr_number} created!" +
-                       (f" ({count} items imported)" if auto_import and est else ""))
-            st.session_state['open_pr_view'] = new_id
+            msg = f"✅ PR {pr_number} created!"
+            if import_count > 0:
+                msg += f" ({import_count} items imported, {fmt_vnd(analysis.get('total_vnd', 0))})"
+            st.success(msg)
+            # Go to edit mode so user can review imported items
+            st.session_state['open_pr_edit' if auto_import and import_count > 0 else 'open_pr_view'] = new_id
             st.cache_data.clear()
             st.rerun()
         except Exception as e:
@@ -548,6 +824,10 @@ def _dialog_approval_action(pr_id: int):
     if pr.get('justification'):
         st.info(f"📝 **Justification:** {pr['justification']}")
 
+    # Budget vs PR Comparison (inline — approver needs to see budget impact)
+    st.divider()
+    _render_budget_comparison(pr['project_id'], mode='full', current_pr_id=pr_id)
+
     # Approval history
     if history:
         st.divider()
@@ -569,6 +849,7 @@ def _dialog_approval_action(pr_id: int):
         if result['success']:
             st.success(result['message'])
             approver_name = st.session_state.get('user_fullname', '')
+            _budget = get_budget_vs_pr(pr['project_id'])
             notify_pr_approved(
                 pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
                 total_vnd=float(pr.get('total_amount_vnd') or 0),
@@ -579,6 +860,7 @@ def _dialog_approval_action(pr_id: int):
                 is_final=result.get('final', False),
                 next_approver_name=result.get('next_approver_name'),
                 next_approver_email=result.get('next_approver_email'),
+                budget_data=_budget,
             )
             if not result.get('final') and result.get('next_approver_name'):
                 st.info(f"📧 Next approver: {result['next_approver_name']}")
@@ -704,6 +986,10 @@ def _dialog_pr_view(pr_id: int):
         st.divider()
         st.markdown(f"**Justification:** {pr['justification']}")
 
+    # ── Budget vs PR Comparison (full with drill-down) ──
+    st.divider()
+    _render_budget_comparison(pr['project_id'], mode='full', current_pr_id=pr_id)
+
     # ── Approval History ──
     if history:
         st.divider()
@@ -725,6 +1011,7 @@ def _dialog_pr_view(pr_id: int):
                 st.success(result['message'])
                 if result.get('approver_name'):
                     st.info(f"📧 Sent to: **{result['approver_name']}** ({result.get('approver_email', '')})")
+                    _budget = get_budget_vs_pr(pr['project_id'])
                     notify_pr_submitted(
                         pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
                         project_name=pr.get('project_name', ''), requester_name=pr.get('requester_name', ''),
@@ -733,6 +1020,7 @@ def _dialog_pr_view(pr_id: int):
                         justification=pr.get('justification', ''),
                         approver_name=result['approver_name'], approver_email=result['approver_email'],
                         approval_level=1, max_level=result.get('max_level', 1),
+                        budget_data=_budget,
                     )
                 st.cache_data.clear()
                 st.rerun()
@@ -772,6 +1060,9 @@ def _dialog_pr_edit(pr_id: int):
 
     if pr.get('revision_notes') and pr['status'] == 'REVISION_REQUESTED':
         st.warning(f"🔄 **Revision feedback:** {pr['revision_notes']}")
+
+    # ── Budget context (inline — no drill-down to keep edit dialog focused) ──
+    _render_budget_comparison(pr['project_id'], mode='inline')
 
     # ── Item Management ──
     items_df = get_pr_items_df(pr_id)
@@ -873,6 +1164,7 @@ def _dialog_pr_edit(pr_id: int):
             if result['success']:
                 st.success(result['message'])
                 if result.get('approver_name'):
+                    _budget = get_budget_vs_pr(pr['project_id'])
                     notify_pr_submitted(
                         pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
                         project_name=pr.get('project_name', ''), requester_name=pr.get('requester_name', ''),
@@ -881,6 +1173,7 @@ def _dialog_pr_edit(pr_id: int):
                         justification=pr.get('justification', ''),
                         approver_name=result['approver_name'], approver_email=result['approver_email'],
                         approval_level=1, max_level=result.get('max_level', 1),
+                        budget_data=_budget,
                     )
                 st.cache_data.clear()
                 st.rerun()
@@ -1133,6 +1426,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
                         if result.get('approver_name'):
                             pr_full = get_pr(int(row['pr_id']))
                             if pr_full:
+                                _budget = get_budget_vs_pr(int(row.get('project_id') or pr_full['project_id']))
                                 notify_pr_submitted(
                                     pr_number=row['pr_number'],
                                     project_code=row.get('project_code', ''),
@@ -1145,6 +1439,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
                                     approver_name=result['approver_name'],
                                     approver_email=result['approver_email'],
                                     approval_level=1, max_level=result.get('max_level', 1),
+                                    budget_data=_budget,
                                 )
                         st.cache_data.clear()
                         st.rerun()
@@ -1423,8 +1718,8 @@ else:
         f"Status: **{project['status']}**"
     )
 
-    # Budget tracking bar (P2.3)
-    _render_budget_context(project_id)
+    # Budget tracking bar (compact)
+    _render_budget_comparison(project_id, mode='compact')
 
     # Tabs
     tab_my, tab_pending, tab_all = st.tabs([
