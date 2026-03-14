@@ -518,7 +518,8 @@ def _wiz_step1_setup(project_id, project, est):
 
     st.markdown("##### ① PR Setup")
 
-    # Type selector (outside form for reactivity) ─────────────
+    # ── Reactive selectors (OUTSIDE form — instant rerun) ────
+    # Type + COGS
     tc1, tc2 = st.columns(2)
     types = ['EQUIPMENT', 'FABRICATION', 'SERVICE', 'MIXED']
     type_idx = types.index(header['pr_type']) if header.get('pr_type') in types else 0
@@ -533,7 +534,7 @@ def _wiz_step1_setup(project_id, project, est):
     tc2.text_input("COGS Category", value=_cogs_lbl.get(auto_cogs, auto_cogs),
                    disabled=True, help="Auto-set from PR Type")
 
-    # Quick preview of matching estimate items ─────────────
+    # Quick preview of matching estimate items
     if est:
         cogs_filter = _COGS_FILTER_MAP.get(auto_cogs, ['A', 'C', 'SERVICE'])
         analysis = _analyze_estimate_for_pr(est['id'], cogs_filter)
@@ -544,47 +545,48 @@ def _wiz_step1_setup(project_id, project, est):
             st.caption(f"ℹ️ No importable estimate items for **{auto_cogs}** — "
                        "you can add items manually in the next step.")
 
-    # Form fields ──────────────────────────────────────────────
+    # Currency + Exchange Rate (reactive — updates immediately on change)
+    cc1, cc2 = st.columns(2)
+    cur_opts = [c['code'] for c in currencies]
+    cur_default = header.get('currency_code', 'VND')
+    cur_idx = cur_opts.index(cur_default) if cur_default in cur_opts else (
+        cur_opts.index('VND') if 'VND' in cur_opts else 0)
+    cur_sel = cc1.selectbox("Currency", cur_opts, index=cur_idx, key="wiz_s1_cur")
+    currency_id = currencies[cur_opts.index(cur_sel)]['id']
+
+    _rate_res = get_rate_to_vnd(cur_sel)
+    exc_rate = _rate_res.rate if _rate_res.ok else 1.0
+    if cur_sel != 'VND':
+        _badges = {'same': 'ℹ️', 'api': '✅ Live', 'cache': '✅ Cache',
+                   'db': '🔵 DB', 'fallback': '⚠️ Fallback'}
+        cc2.text_input(
+            f"Rate (1 {cur_sel} → VND)",
+            value=f"{exc_rate:,.4f}  ({_badges.get(_rate_res.source, _rate_res.source)})",
+            disabled=True,
+        )
+        if not _rate_res.ok:
+            st.warning(_rate_res.warning or 'Using reference rate — verify before use.')
+    else:
+        cc2.text_input("Rate", value="VND — no conversion needed", disabled=True)
+
+    # ── Form fields (submitted together) ─────────────────────
     with st.form("wiz_step1_form"):
         h1, h2 = st.columns(2)
-        pr_number = generate_pr_number()
+        # Reuse PR number if already generated (user may have gone Back)
+        pr_number = header.get('pr_number') or generate_pr_number()
         h1.text_input("PR Number (auto)", value=pr_number, disabled=True)
         priorities = ['NORMAL', 'LOW', 'HIGH', 'URGENT']
         pri_idx = priorities.index(header['priority']) if header.get('priority') in priorities else 0
         priority = h2.selectbox("Priority", priorities, index=pri_idx)
 
-        # Vendor ───────────────────────────────────────────────
-        v1, v2 = st.columns(2)
+        # Vendor
         vendor_names_list = ["(Select later)"] + [v['name'] for v in vendors]
         vd_idx = 0
         if header.get('vendor_name') and header['vendor_name'] in vendor_names_list:
             vd_idx = vendor_names_list.index(header['vendor_name'])
-        vendor_sel = v1.selectbox("Primary Vendor", vendor_names_list, index=vd_idx)
+        vendor_sel = st.selectbox("Primary Vendor", vendor_names_list, index=vd_idx)
 
-        # Currency ─────────────────────────────────────────────
-        cur_opts = [c['code'] for c in currencies]
-        cur_default = header.get('currency_code', 'VND')
-        cur_idx = cur_opts.index(cur_default) if cur_default in cur_opts else (
-            cur_opts.index('VND') if 'VND' in cur_opts else 0)
-        cur_sel = v2.selectbox("Currency", cur_opts, index=cur_idx)
-        currency_id = currencies[cur_opts.index(cur_sel)]['id']
-
-        # Exchange rate (read-only) ────────────────────────────
-        _rate_res = get_rate_to_vnd(cur_sel)
-        exc_rate = _rate_res.rate if _rate_res.ok else 1.0
-        if cur_sel != 'VND':
-            rc1, rc2 = st.columns([2, 1])
-            rc1.text_input(f"Exchange Rate (1 {cur_sel} → VND)",
-                           value=f"{exc_rate:,.4f}", disabled=True)
-            _badges = {'same': 'ℹ️', 'api': '✅ Live', 'cache': '✅ Cache',
-                       'db': '🔵 DB', 'fallback': '⚠️ Fallback'}
-            rc2.caption(f"\n{_badges.get(_rate_res.source, '')} {_rate_res.source}")
-            if not _rate_res.ok:
-                st.warning(_rate_res.warning or 'Using reference rate — verify before use.')
-        else:
-            st.caption("💱 VND — no conversion needed")
-
-        # Date + justification ─────────────────────────────────
+        # Date + justification
         req_date = st.date_input("Required Date", value=header.get('required_date'),
                                  help="Ngày cần hàng. Để trống nếu không urgent.")
         justification = st.text_area("Justification / Business Reason",
