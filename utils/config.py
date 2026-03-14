@@ -95,6 +95,24 @@ class EmailConfig:
         return bool(self.sender and self.password)
 
 
+@dataclass
+class MisaConfig:
+    """MISA accounting integration configuration"""
+    app_id: Optional[str] = None
+    access_code: Optional[str] = None
+    org_company_code: Optional[str] = None
+    
+    def is_configured(self) -> bool:
+        return bool(self.app_id and self.access_code and self.org_company_code)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'app_id': self.app_id,
+            'access_code': self.access_code,
+            'org_company_code': self.org_company_code,
+        }
+
+
 class Config:
     """
     Centralized configuration management
@@ -172,25 +190,33 @@ class Config:
             "exchange_rate": api_secrets.get("EXCHANGE_RATE_API_KEY")
         }
         
-        # Email - Support multiple accounts
+        # Email - single account (matches .env: EMAIL_SENDER / EMAIL_PASSWORD)
         email_secrets = st.secrets.get("EMAIL", {})
+        _sender   = email_secrets.get("EMAIL_SENDER")
+        _password = email_secrets.get("EMAIL_PASSWORD")
+        _smtp_h   = email_secrets.get("SMTP_HOST", "smtp.gmail.com")
+        _smtp_p   = int(email_secrets.get("SMTP_PORT", 587))
         self._email_config = {
             "inbound": EmailConfig(
-                sender=email_secrets.get("INBOUND_EMAIL_SENDER"),
-                password=email_secrets.get("INBOUND_EMAIL_PASSWORD"),
-                smtp_host=email_secrets.get("SMTP_HOST", "smtp.gmail.com"),
-                smtp_port=int(email_secrets.get("SMTP_PORT", 587))
+                sender=_sender, password=_password,
+                smtp_host=_smtp_h, smtp_port=_smtp_p,
             ),
             "outbound": EmailConfig(
-                sender=email_secrets.get("OUTBOUND_EMAIL_SENDER"),
-                password=email_secrets.get("OUTBOUND_EMAIL_PASSWORD"),
-                smtp_host=email_secrets.get("SMTP_HOST", "smtp.gmail.com"),
-                smtp_port=int(email_secrets.get("SMTP_PORT", 587))
+                sender=_sender, password=_password,
+                smtp_host=_smtp_h, smtp_port=_smtp_p,
             )
         }
         
         # Google Cloud
         self._google_service_account = dict(st.secrets.get("gcp_service_account", {}))
+        
+        # MISA
+        misa_secrets = st.secrets.get("MISA_CONFIG", {})
+        self._misa_config = MisaConfig(
+            app_id=misa_secrets.get("MISA_APP_ID"),
+            access_code=misa_secrets.get("MISA_ACCESS_CODE"),
+            org_company_code=misa_secrets.get("MISA_ORG_COMPANY_CODE"),
+        )
         
         logger.info("☁️ Running in STREAMLIT CLOUD")
     
@@ -242,25 +268,19 @@ class Config:
             "exchange_rate": os.getenv("EXCHANGE_RATE_API_KEY")
         }
         
-        # Email - Support multiple accounts
-        # Fallback chain: OUTBOUND_EMAIL_SENDER → EMAIL_SENDER (legacy .env key)
-        _email_sender   = os.getenv("EMAIL_SENDER")
-        _email_password = os.getenv("EMAIL_PASSWORD")
-        _smtp_host      = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        _smtp_port      = int(os.getenv("SMTP_PORT", "587"))
-
+        # Email - single account (matches .env: EMAIL_SENDER / EMAIL_PASSWORD)
+        _sender   = os.getenv("EMAIL_SENDER")
+        _password = os.getenv("EMAIL_PASSWORD")
+        _smtp_h   = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        _smtp_p   = int(os.getenv("SMTP_PORT", "587"))
         self._email_config = {
             "inbound": EmailConfig(
-                sender=os.getenv("INBOUND_EMAIL_SENDER", _email_sender),
-                password=os.getenv("INBOUND_EMAIL_PASSWORD", _email_password),
-                smtp_host=_smtp_host,
-                smtp_port=_smtp_port,
+                sender=_sender, password=_password,
+                smtp_host=_smtp_h, smtp_port=_smtp_p,
             ),
             "outbound": EmailConfig(
-                sender=os.getenv("OUTBOUND_EMAIL_SENDER", _email_sender),
-                password=os.getenv("OUTBOUND_EMAIL_PASSWORD", _email_password),
-                smtp_host=_smtp_host,
-                smtp_port=_smtp_port,
+                sender=_sender, password=_password,
+                smtp_host=_smtp_h, smtp_port=_smtp_p,
             )
         }
         
@@ -273,6 +293,13 @@ class Config:
                     self._google_service_account = json.load(f)
             except Exception as e:
                 logger.warning(f"Could not load Google credentials: {e}")
+        
+        # MISA
+        self._misa_config = MisaConfig(
+            app_id=os.getenv("MISA_APP_ID"),
+            access_code=os.getenv("MISA_ACCESS_CODE"),
+            org_company_code=os.getenv("MISA_ORG_COMPANY_CODE"),
+        )
         
         logger.info("💻 Running in LOCAL environment")
     
@@ -411,6 +438,18 @@ class Config:
             logger.info(f"   ℹ️  Google Service Account: Not configured (optional)")
         
         # ═══════════════════════════════════════════════════════════════
+        # MISA
+        # ═══════════════════════════════════════════════════════════════
+        logger.info("─" * 55)
+        logger.info("📊 MISA CONFIGURATION")
+        
+        if self._misa_config.is_configured():
+            logger.info(f"   ✅ App ID: {self._misa_config.app_id[:12]}...")
+            logger.info(f"   ✅ Company: {self._misa_config.org_company_code}")
+        else:
+            logger.info(f"   ℹ️  MISA: Not configured (optional)")
+        
+        # ═══════════════════════════════════════════════════════════════
         # SUMMARY
         # ═══════════════════════════════════════════════════════════════
         logger.info("─" * 55)
@@ -450,6 +489,10 @@ class Config:
     def get_google_service_account(self) -> Dict[str, Any]:
         """Get Google service account configuration"""
         return self._google_service_account.copy()
+    
+    def get_misa_config(self) -> Dict[str, Any]:
+        """Get MISA accounting integration configuration"""
+        return self._misa_config.to_dict()
     
     def get_app_setting(self, key: str, default: Any = None) -> Any:
         """Get application setting with default"""
@@ -504,6 +547,11 @@ class Config:
     def google_service_account(self) -> Dict[str, Any]:
         """Backward compatible property"""
         return self._google_service_account.copy()
+    
+    @property
+    def misa_config(self) -> Dict[str, Any]:
+        """MISA accounting integration config"""
+        return self._misa_config.to_dict()
 
 
 # ==================== SINGLETON INSTANCE ====================
@@ -525,6 +573,9 @@ OUTBOUND_EMAIL_CONFIG = config.get_email_config("outbound")
 EMAIL_SENDER = config.get_email_config("outbound").get("sender")
 EMAIL_PASSWORD = config.get_email_config("outbound").get("password")
 
+# MISA exports
+MISA_CONFIG = config.get_misa_config()
+
 __all__ = [
     'config',
     'Config',
@@ -538,4 +589,5 @@ __all__ = [
     'EMAIL_PASSWORD',
     'INBOUND_EMAIL_CONFIG',
     'OUTBOUND_EMAIL_CONFIG',
+    'MISA_CONFIG',
 ]
