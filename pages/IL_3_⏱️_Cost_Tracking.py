@@ -39,8 +39,12 @@ auth = AuthManager()
 st.set_page_config(page_title="Cost Tracking", page_icon="⏱️", layout="wide")
 auth.require_auth()
 user_id    = str(auth.get_user_id())
-emp_int_id = auth.get_user_id()
+emp_int_id = st.session_state.get('employee_id')  # employees.id — for FK approved_by
 is_pm      = st.session_state.get('user_role') in ('admin', 'manager')
+
+if not emp_int_id:
+    st.error("⚠️ Employee ID not found in session. Please re-login.")
+    st.stop()
 
 
 # ── Lookups (cached) ──────────────────────────────────────────────────────────
