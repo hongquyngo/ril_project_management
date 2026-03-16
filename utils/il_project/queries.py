@@ -556,25 +556,65 @@ def update_expense(expense_id: int, data: Dict, modified_by: str) -> bool:
 
 
 def update_expense_attachment(expense_id: int, s3_key: str, filename: str, modified_by: str) -> bool:
-    """Store S3 key + filename after uploading expense attachment."""
-    rows = execute_update("""
-        UPDATE il_project_expenses
-        SET attachment_s3_key = :key, attachment_filename = :name,
-            version = version + 1
-        WHERE id = :id AND delete_flag = 0
-    """, {'id': expense_id, 'key': s3_key, 'name': filename})
-    return rows > 0
+    """
+    Store S3 key + filename after uploading expense attachment.
+
+    NOTE: DDL may not have attachment columns on il_project_expenses.
+    If columns are missing, run migration:
+        ALTER TABLE il_project_expenses
+            ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL,
+            ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;
+    """
+    try:
+        rows = execute_update("""
+            UPDATE il_project_expenses
+            SET attachment_s3_key = :key, attachment_filename = :name,
+                version = version + 1
+            WHERE id = :id AND delete_flag = 0
+        """, {'id': expense_id, 'key': s3_key, 'name': filename})
+        return rows > 0
+    except Exception as e:
+        if 'Unknown column' in str(e):
+            logger.error(
+                f"il_project_expenses missing attachment columns. "
+                f"Run: ALTER TABLE il_project_expenses "
+                f"ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL, "
+                f"ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;"
+            )
+        else:
+            logger.error(f"update_expense_attachment failed: {e}")
+        return False
 
 
 def update_labor_attachment(log_id: int, s3_key: str, filename: str, modified_by: str) -> bool:
-    """Store S3 key + filename after uploading labor log attachment."""
-    rows = execute_update("""
-        UPDATE il_project_labor_logs
-        SET attachment_s3_key = :key, attachment_filename = :name,
-            version = version + 1
-        WHERE id = :id AND delete_flag = 0
-    """, {'id': log_id, 'key': s3_key, 'name': filename})
-    return rows > 0
+    """
+    Store S3 key + filename after uploading labor log attachment.
+
+    NOTE: DDL may not have attachment columns on il_project_labor_logs.
+    If columns are missing, run migration:
+        ALTER TABLE il_project_labor_logs
+            ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL,
+            ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;
+    """
+    try:
+        rows = execute_update("""
+            UPDATE il_project_labor_logs
+            SET attachment_s3_key = :key, attachment_filename = :name,
+                version = version + 1
+            WHERE id = :id AND delete_flag = 0
+        """, {'id': log_id, 'key': s3_key, 'name': filename})
+        return rows > 0
+    except Exception as e:
+        if 'Unknown column' in str(e):
+            logger.error(
+                f"il_project_labor_logs missing attachment columns. "
+                f"Run: ALTER TABLE il_project_labor_logs "
+                f"ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL, "
+                f"ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;"
+            )
+        else:
+            logger.error(f"update_labor_attachment failed: {e}")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════

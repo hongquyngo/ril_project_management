@@ -1138,7 +1138,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
 
         estimate_id = header.get('estimate_id')
         if estimate_id:
-            chk = _eq("SELECT id FROM il_project_estimates WHERE id = :id",
+            chk = _eq("SELECT id FROM il_project_cogs_estimate WHERE id = :id AND delete_flag = 0",
                        {'id': estimate_id})
             if not chk:
                 logger.warning(f"estimate_id={estimate_id} invalid FK — setting NULL")
@@ -1255,18 +1255,25 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
 
     except Exception as e:
         err_str = str(e)
+        # Safely get variables that may not have been assigned before the error
+        _est_id = header.get('estimate_id')
+        _vendor_id = header.get('vendor_id')
+        _currency_id = header.get('currency_id')
+        _pr_number = locals().get('pr_number', '(not generated)')
+
         # FK constraint failure — retry without optional FKs
         if 'IntegrityError' in err_str and '1216' in err_str:
             logger.warning(f"FK constraint failed — retrying without estimate/vendor: {e}")
             try:
+                retry_pr_number = generate_pr_number()
                 new_id = create_pr({
-                    'pr_number':     pr_number,
+                    'pr_number':     retry_pr_number,
                     'project_id':    project_id,
                     'requester_id':  emp_int_id,
                     'estimate_id':   None,       # ← skip
                     'vendor_id':     None,        # ← skip
                     'vendor_contact_id': None,
-                    'currency_id':   currency_id,
+                    'currency_id':   _currency_id,
                     'exchange_rate': header['exchange_rate'],
                     'priority':      header['priority'],
                     'pr_type':       header['pr_type'],
@@ -1291,7 +1298,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
                             'quantity': it.get('quantity', 1),
                             'uom': it.get('uom', 'Pcs'),
                             'unit_cost': it.get('unit_cost', 0),
-                            'currency_id': it.get('currency_id') or currency_id,
+                            'currency_id': it.get('currency_id') or _currency_id,
                             'exchange_rate': it.get('exchange_rate', header['exchange_rate']),
                             'cogs_category': it.get('cogs_category', 'A'),
                             'specifications': it.get('specifications'),
@@ -1319,12 +1326,12 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
             with st.expander("🔧 Debug Info"):
                 st.code(f"project_id: {project_id}\n"
                         f"requester_id: {emp_int_id}\n"
-                        f"estimate_id: {estimate_id}\n"
-                        f"vendor_id: {vendor_id}\n"
-                        f"currency_id: {currency_id}\n"
+                        f"estimate_id: {_est_id}\n"
+                        f"vendor_id: {_vendor_id}\n"
+                        f"currency_id: {_currency_id}\n"
                         f"currency_code: {header.get('currency_code')}\n"
                         f"exchange_rate: {header.get('exchange_rate')}\n"
-                        f"pr_number: {pr_number}\n"
+                        f"pr_number: {_pr_number}\n"
                         f"error: {err_str}")
 
 

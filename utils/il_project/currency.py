@@ -289,12 +289,14 @@ def _persist_to_db(result: RateResult) -> None:
         with engine.connect() as conn:
             conn.execute(text("""
                 INSERT INTO exchange_rates
-                    (from_currency_code, to_currency_code, rate_value, rate_date, source, delete_flag)
+                    (from_currency_code, to_currency_code, rate_value, rate_date, delete_flag,
+                     created_by, created_date)
                 VALUES
-                    (:from_ccy, :to_ccy, :rate, :date, 'API_AUTO', 0)
+                    (:from_ccy, :to_ccy, :rate, :date, 0,
+                     'SYSTEM_RATE_SYNC', NOW())
                 ON DUPLICATE KEY UPDATE
-                    rate_value = :rate,
-                    source     = 'API_AUTO'
+                    rate_value    = :rate,
+                    modified_date = NOW()
             """), {
                 "from_ccy": result.from_currency,
                 "to_ccy":   result.to_currency,
