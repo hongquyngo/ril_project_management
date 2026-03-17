@@ -283,6 +283,62 @@ def delete_pr_item(item_id: int) -> bool:
     return rows > 0
 
 
+def reduce_pr_item(item_id: int, new_quantity: float, new_unit_cost: float,
+                   modified_by: str) -> Dict:
+    """
+    Reduce quantity and/or unit_cost of a PR item on an APPROVED PR.
+    Only allows values <= original. Used for post-approval scope reduction.
+
+    Returns: {success, message, old_qty, old_cost, new_qty, new_cost}
+    """
+    try:
+        rows = _execute_query("""
+            SELECT pri.id, pri.quantity, pri.unit_cost, pri.exchange_rate,
+                   pr.status, pr.id AS pr_id
+            FROM il_purchase_request_items pri
+            JOIN il_purchase_requests pr ON pri.pr_id = pr.id
+            WHERE pri.id = :iid AND pri.delete_flag = 0 AND pr.delete_flag = 0
+        """, {'iid': item_id})
+
+        if not rows:
+            return {'success': False, 'message': 'Item not found'}
+
+        item = rows[0]
+        if item['status'] != 'APPROVED':
+            return {'success': False, 'message': f"PR status is {item['status']} — reduce only allowed on APPROVED"}
+
+        old_qty = float(item['quantity'])
+        old_cost = float(item['unit_cost'])
+
+        if new_quantity > old_qty:
+            return {'success': False,
+                    'message': f'Quantity {new_quantity} exceeds original {old_qty} — only reduction allowed'}
+        if new_unit_cost > old_cost:
+            return {'success': False,
+                    'message': f'Unit cost {new_unit_cost} exceeds original {old_cost} — only reduction allowed'}
+        if new_quantity <= 0:
+            return {'success': False, 'message': 'Quantity must be > 0. Use Cancel PR to remove entirely.'}
+
+        _execute_update("""
+            UPDATE il_purchase_request_items
+            SET quantity = :qty, unit_cost = :cost, modified_date = NOW()
+            WHERE id = :iid
+        """, {'qty': new_quantity, 'cost': new_unit_cost, 'iid': item_id})
+
+        # Recalc PR totals
+        recalc_pr_totals(item['pr_id'])
+
+        return {
+            'success': True,
+            'message': f'Item updated: qty {old_qty}→{new_quantity}, cost {old_cost}→{new_unit_cost}',
+            'old_qty': old_qty, 'old_cost': old_cost,
+            'new_qty': new_quantity, 'new_cost': new_unit_cost,
+        }
+    except Exception as e:
+        logger.error(f"reduce_pr_item failed: {e}")
+        return {'success': False, 'message': str(e)}
+
+
 def recalc_pr_totals(pr_id: int) -> bool:
     """Recalculate total_amount and total_amount_vnd from items."""
     rows = _execute_update("""
@@ -304,12 +360,13 @@ def recalc_pr_totals(pr_id: int) -> bool:
 
 
 def cancel_pr(pr_id: int, modified_by: str) -> bool:
-    """Cancel PR. Allowed from DRAFT, REVISION_REQUESTED, or PENDING_APPROVAL."""
+    """Cancel PR. Allowed from DRAFT, REVISION_REQUESTED, PENDING_APPROVAL, or APPROVED."""
     rows = _execute_update("""
         UPDATE il_purchase_requests
         SET status = 'CANCELLED', modified_by = :m, version = version + 1
         WHERE id = :id AND delete_flag = 0
-          AND status IN ('DRAFT', 'REVISION_REQUESTED', 'PENDING_APPROVAL')
+          AND status IN ('DRAFT', 'REVISION_REQUESTED', 'PENDING_APPROVAL', 'APPROVED')
+          AND po_id IS NULL
     """, {'id': pr_id, 'm': modified_by})
     return rows > 0
 

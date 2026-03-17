@@ -31,6 +31,7 @@ from utils.il_project.pr_queries import (
     generate_pr_number,
     get_pr_list_df, get_pending_for_approver, get_pr, get_pr_items_df,
     create_pr, update_pr, create_pr_item, delete_pr_item, recalc_pr_totals,
+    reduce_pr_item,
     cancel_pr,
     submit_pr, approve_pr, reject_pr, request_revision,
     get_pr_approval_history, get_approval_chain, determine_max_level,
@@ -1736,9 +1737,14 @@ def _dialog_pr_view(pr_id: int):
 
     is_pm_of_project = is_project_pm(pr['project_id'], emp_int_id)
     is_my_pr = pr['requester_id'] == emp_int_id
+    is_approved = pr['status'] == 'APPROVED'
+    has_po = bool(pr.get('po_id'))
     can_edit = (is_my_pr or is_admin) and pr['status'] in ('DRAFT', 'REVISION_REQUESTED')
+    can_edit_approved = (is_my_pr or is_pm_of_project or is_admin) and is_approved and not has_po
     can_submit = (is_pm_of_project or is_admin) and pr['status'] in ('DRAFT', 'REVISION_REQUESTED')
-    can_cancel = (is_my_pr or is_pm_of_project or is_admin) and pr['status'] in ('DRAFT', 'REVISION_REQUESTED', 'PENDING_APPROVAL')
+    can_cancel = ((is_my_pr or is_pm_of_project or is_admin)
+                  and pr['status'] in ('DRAFT', 'REVISION_REQUESTED', 'PENDING_APPROVAL', 'APPROVED')
+                  and not has_po)
 
     # ── Header ──
     hc1, hc2 = st.columns([5, 1])
@@ -1747,6 +1753,11 @@ def _dialog_pr_view(pr_id: int):
     if can_edit:
         if hc2.button("✏️ Edit", type="primary", use_container_width=True):
             st.session_state['open_pr_edit'] = pr_id
+            st.rerun()
+    elif can_edit_approved:
+        if hc2.button("📉 Reduce", type="primary", use_container_width=True,
+                      help="Giảm số lượng/đơn giá (chỉ giảm, không tăng)"):
+            st.session_state['open_pr_reduce'] = pr_id
             st.rerun()
 
     st.caption(f"Project: **{pr['project_code']}** — {pr['project_name']} | "
@@ -2056,6 +2067,102 @@ def _dialog_pr_edit(pr_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════
+# DIALOG — Reduce PR Items (APPROVED status — scope reduction only)
+# ══════════════════════════════════════════════════════════════════
+
+@st.dialog("📉 Reduce PR Items", width="large")
+def _dialog_pr_reduce(pr_id: int):
+    """
+    Restricted edit for APPROVED PRs.
+    Only allows REDUCING quantity and/or unit_cost per item.
+    No adding, no deleting, no increasing.
+    """
+    pr = get_pr(pr_id)
+    if not pr:
+        st.error("PR not found."); return
+
+    if pr['status'] != 'APPROVED':
+        st.warning(f"Reduce mode chỉ áp dụng cho PR đã APPROVED (hiện tại: {pr['status']})")
+        return
+
+    if pr.get('po_id'):
+        st.error("PO đã được tạo — không thể giảm nữa.")
+        return
+
+    # Permission check
+    is_pm_of_project = is_project_pm(pr['project_id'], emp_int_id)
+    is_my_pr = pr['requester_id'] == emp_int_id
+    if not (is_my_pr or is_pm_of_project or is_admin):
+        st.error("⛔ Bạn không có quyền điều chỉnh PR này.")
+        return
+
+    st.markdown(f"### ✅ {pr['pr_number']} — Reduce Mode")
+    st.caption(f"Project: {pr['project_code']} | Vendor: {pr.get('vendor_name', '—')} | "
+               f"Current Total: **{fmt_vnd(pr.get('total_amount_vnd'))}**")
+    st.info("📉 **Chế độ giảm scope** — Chỉ có thể giảm số lượng hoặc đơn giá. "
+            "Không thể tăng hoặc thêm item mới.")
+
+    # ── Items table ──
+    items_df = get_pr_items_df(pr_id)
+    if items_df.empty:
+        st.warning("PR không có items."); return
+
+    st.subheader(f"📋 Items ({len(items_df)})")
+
+    for _, row in items_df.iterrows():
+        item_id = int(row['id'])
+        desc = (row.get('item_description', '') or '')[:60]
+        orig_qty = float(row['quantity'])
+        orig_cost = float(row['unit_cost'])
+        ccy = row.get('currency_code', 'VND') or 'VND'
+        orig_vnd = float(row.get('amount_vnd', 0) or 0)
+
+        with st.container(border=True):
+            st.markdown(f"**{row.get('cogs_category', '')}** — {desc}")
+            st.caption(f"Hiện tại: **{orig_qty:.1f}** × **{orig_cost:,.2f} {ccy}** "
+                       f"= **{fmt_vnd(orig_vnd)}**")
+
+            rc1, rc2, rc3 = st.columns([1, 1, 1])
+            new_qty = rc1.number_input(
+                "Qty (max)", value=orig_qty,
+                min_value=0.01, max_value=orig_qty,
+                step=0.01, format="%.2f",
+                key=f"reduce_qty_{item_id}",
+            )
+            new_cost = rc2.number_input(
+                f"Cost (max) {ccy}", value=orig_cost,
+                min_value=0.01, max_value=orig_cost,
+                step=0.01, format="%.2f",
+                key=f"reduce_cost_{item_id}",
+            )
+
+            changed = new_qty < orig_qty or new_cost < orig_cost
+            if changed:
+                rate = float(row.get('exchange_rate', 1) or 1)
+                new_vnd = new_qty * new_cost * rate
+                savings = orig_vnd - new_vnd
+                rc3.markdown(f"<br>💰 Giảm **{fmt_vnd(savings)}**", unsafe_allow_html=True)
+
+                if rc3.button("✅ Apply", key=f"reduce_apply_{item_id}", type="primary"):
+                    result = reduce_pr_item(item_id, new_qty, new_cost, user_id)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+            else:
+                rc3.caption("(Không thay đổi)")
+
+    # ── Summary ──
+    st.divider()
+    sc1, sc2 = st.columns(2)
+    sc1.metric("Current Total", fmt_vnd(pr.get('total_amount_vnd')))
+    if sc2.button("👁️ View PR", use_container_width=True):
+        st.session_state['open_pr_view'] = pr_id
+        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════
 # CONFIRM DIALOGS (P3.5)
 # ══════════════════════════════════════════════════════════════════
 
@@ -2064,8 +2171,18 @@ def _dialog_confirm_cancel(pr_id: int):
     pr = get_pr(pr_id)
     if not pr:
         st.error("PR not found."); return
+
+    if pr.get('po_id'):
+        st.error("PO đã được tạo — không thể cancel PR này.")
+        return
+
     st.warning(f"Are you sure you want to cancel **{pr['pr_number']}**?")
     st.caption(f"Total: {fmt_vnd(pr.get('total_amount_vnd'))} | Items: {pr.get('item_count', '—')}")
+
+    if pr['status'] == 'APPROVED':
+        st.error("⚠️ **PR này đã được APPROVED.** Cancel sẽ hủy bỏ toàn bộ approval. "
+                 "Nếu chỉ muốn giảm scope, dùng nút 📉 Reduce thay vì Cancel.")
+
     st.markdown("This action **cannot be undone**.")
     _cancel_cc = _cc_email_selector("cancel_pr", label="📧 CC thêm (optional)")
     c1, c2 = st.columns(2)
@@ -2884,6 +3001,11 @@ if 'open_pr_view' in st.session_state:
 if 'open_pr_edit' in st.session_state:
     pid = st.session_state.pop('open_pr_edit')
     _dialog_pr_edit(pid)
+
+# Reduce PR Items (APPROVED status — reduce only)
+if 'open_pr_reduce' in st.session_state:
+    pid = st.session_state.pop('open_pr_reduce')
+    _dialog_pr_reduce(pid)
 
 # Confirm Cancel (P3.5)
 if 'confirm_cancel_pr' in st.session_state:

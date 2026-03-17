@@ -121,6 +121,7 @@ from .pr_queries import (
     create_pr_item,
     delete_pr_item,
     recalc_pr_totals,
+    reduce_pr_item,
     cancel_pr,
     # Approval Workflow
     get_approval_chain,
@@ -196,7 +197,8 @@ __all__ = [
     # ── Purchase Request ──
     'generate_pr_number',
     'get_pr_list_df', 'get_pending_for_approver', 'get_pr', 'get_pr_items_df',
-    'create_pr', 'update_pr', 'create_pr_item', 'delete_pr_item', 'recalc_pr_totals', 'cancel_pr',
+    'create_pr', 'update_pr', 'create_pr_item', 'delete_pr_item', 'recalc_pr_totals',
+    'reduce_pr_item', 'cancel_pr',
     'get_approval_chain', 'determine_max_level', 'get_current_approver',
     'submit_pr', 'approve_pr', 'reject_pr', 'request_revision', 'get_pr_approval_history',
     'get_importable_estimate_items',
