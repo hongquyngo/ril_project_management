@@ -329,7 +329,21 @@ class Config:
             "ENABLE_EMAIL_NOTIFICATIONS": os.getenv("ENABLE_EMAIL_NOTIFICATIONS", "true").lower() == "true",
             "ENABLE_CALENDAR_INTEGRATION": os.getenv("ENABLE_CALENDAR_INTEGRATION", "true").lower() == "true",
             "ENABLE_DEBUG_MODE": os.getenv("ENABLE_DEBUG_MODE", "false").lower() == "true",
+            
+            # App URL (for deep links in email notifications)
+            "APP_BASE_URL": os.getenv("APP_BASE_URL", ""),
         }
+
+        # Cloud override: secrets.toml [APP] section takes precedence
+        if self.is_cloud:
+            try:
+                import streamlit as st
+                app_secrets = st.secrets.get("APP", {})
+                cloud_url = app_secrets.get("BASE_URL", "")
+                if cloud_url:
+                    self._app_config["APP_BASE_URL"] = cloud_url
+            except Exception:
+                pass
     
     def _log_config_status(self):
         """Log configuration status with detailed validation (V2 style)"""
@@ -576,6 +590,9 @@ EMAIL_PASSWORD = config.get_email_config("outbound").get("password")
 # MISA exports
 MISA_CONFIG = config.get_misa_config()
 
+# App URL (for deep links in email notifications)
+APP_BASE_URL = config.get_app_setting("APP_BASE_URL", "")
+
 __all__ = [
     'config',
     'Config',
@@ -583,6 +600,7 @@ __all__ = [
     'DB_CONFIG',
     'AWS_CONFIG',
     'APP_CONFIG',
+    'APP_BASE_URL',
     'EXCHANGE_RATE_API_KEY',
     'GOOGLE_SERVICE_ACCOUNT_JSON',
     'EMAIL_SENDER',

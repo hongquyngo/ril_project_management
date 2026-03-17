@@ -294,6 +294,46 @@ def _budget_comparison_table(budget_data: Optional[Dict] = None) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# DEEP LINK URL BUILDER
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_base_url() -> str:
+    """
+    Get the app base URL for deep links.
+    Reads from config singleton (APP_BASE_URL in _app_config).
+    Source: .env (local) or secrets.toml [APP].BASE_URL (cloud).
+    Returns empty string if not configured (email skips the button).
+    """
+    try:
+        from ..config import config
+        return (config.get_app_setting('APP_BASE_URL', '') or '').rstrip('/')
+    except Exception:
+        return ''
+
+
+def build_pr_deep_link(pr_id: int, action: str = 'view') -> Optional[str]:
+    """
+    Build deep link URL to a specific PR with action.
+
+    Actions: view, approve, edit
+    Example: https://ril-projects.streamlit.app/IL_5_🛒_Purchase_Request?pr_id=123&action=approve
+
+    Returns None if base URL not configured (email will skip the button).
+    """
+    base = _get_base_url()
+    if not base:
+        return None
+    # Ensure we point to the PR page
+    page_path = 'IL_5_%F0%9F%9B%92_Purchase_Request'
+    # Handle base URL that may or may not include the page
+    if page_path in base:
+        url = base
+    else:
+        url = f"{base}/{page_path}"
+    return f"{url}?pr_id={pr_id}&action={action}"
+
+
+# ══════════════════════════════════════════════════════════════════════
 # CC MERGE HELPER
 # ══════════════════════════════════════════════════════════════════════
 

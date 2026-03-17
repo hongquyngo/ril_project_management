@@ -55,7 +55,49 @@ logger = logging.getLogger(__name__)
 auth = AuthManager()
 
 st.set_page_config(page_title="Purchase Request", page_icon="🛒", layout="wide")
-auth.require_auth()
+
+# ── Deep link: capture query params BEFORE auth check ─────────────
+# Session state survives across login → deep link triggers after auth
+_qp = st.query_params
+if _qp.get('pr_id'):
+    st.session_state['_deep_link'] = {
+        'pr_id': _qp.get('pr_id'),
+        'action': _qp.get('action', 'view'),
+    }
+    st.query_params.clear()
+
+# ── Auth: inline login when accessed via deep link ────────────────
+if not auth.check_session():
+    _has_deep_link = '_deep_link' in st.session_state
+    if _has_deep_link:
+        # Show inline login form (user clicked link from email)
+        st.title("🛒 Purchase Request")
+        st.info("🔗 Bạn được chuyển đến từ email thông báo. Vui lòng đăng nhập để tiếp tục.")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            with st.form("pr_deep_link_login", clear_on_submit=False):
+                st.markdown("#### 🔐 Login")
+                _dl_user = st.text_input("Username", placeholder="Enter your username")
+                _dl_pass = st.text_input("Password", type="password", placeholder="Enter your password")
+                _dl_submit = st.form_submit_button("🔑 Login", type="primary", use_container_width=True)
+            if _dl_submit:
+                if _dl_user and _dl_pass:
+                    with st.spinner("Authenticating..."):
+                        _ok, _result = auth.authenticate(_dl_user, _dl_pass)
+                    if _ok:
+                        auth.login(_result)
+                        st.success("✅ Login successful!")
+                        st.rerun()  # Rerun → now authenticated → deep link handler triggers
+                    else:
+                        st.error(_result.get("error", "Authentication failed"))
+                else:
+                    st.warning("Please enter both username and password")
+        st.stop()
+    else:
+        # Normal flow — redirect to main page
+        st.warning("⚠️ Please login to access this page")
+        st.stop()
+
 user_id    = str(auth.get_user_id())       # users.id as string — for audit (created_by)
 emp_int_id = st.session_state.get('employee_id')  # employees.id — for FK requester_id, PM checks
 is_admin   = auth.is_admin()
@@ -125,6 +167,14 @@ def _cc_email_selector(key_suffix: str, label: str = "CC (optional)") -> list:
     # Extract emails from selected labels
     email_map = {f"{e['name']} ({e['email']})": e['email'] for e in emp_list}
     return [email_map[s] for s in selected if s in email_map]
+
+
+# ── Deep link URL builder ────────────────────────────────────────
+
+def _pr_link(pr_id: int, action: str = 'view') -> str:
+    """Build deep link URL for a PR. Returns None if not configured."""
+    from utils.il_project.email_notify import build_pr_deep_link
+    return build_pr_deep_link(pr_id, action)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1293,6 +1343,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False, cc_emails
                         requester_email=_get_employee_email(emp_int_id),
                         cc_emails=cc_emails,
                         budget_data=_budget,
+                        app_url=_pr_link(new_id, 'approve'),
                     )
             else:
                 st.warning(f"PR created as Draft — submit failed: {result['message']}")
@@ -1598,6 +1649,7 @@ def _dialog_approval_action(pr_id: int):
                 pm_email=get_project_pm_email(pr['project_id']),
                 cc_emails=_approval_cc,
                 budget_data=_budget,
+                app_url=_pr_link(pr_id, 'view'),
             )
             if not result.get('final') and result.get('next_approver_name'):
                 st.info(f"📧 Next approver: {result['next_approver_name']}")
@@ -1620,6 +1672,7 @@ def _dialog_approval_action(pr_id: int):
                     rejection_reason=comments,
                     pm_email=get_project_pm_email(pr['project_id']),
                     cc_emails=_approval_cc,
+                    app_url=_pr_link(pr_id, 'edit'),
                 )
                 st.success("PR rejected.")
                 st.cache_data.clear()
@@ -1641,6 +1694,7 @@ def _dialog_approval_action(pr_id: int):
                     revision_notes=comments,
                     pm_email=get_project_pm_email(pr['project_id']),
                     cc_emails=_approval_cc,
+                    app_url=_pr_link(pr_id, 'edit'),
                 )
                 st.success("Revision requested — PR sent back to PM.")
                 st.cache_data.clear()
@@ -1768,6 +1822,7 @@ def _dialog_pr_view(pr_id: int):
                         requester_email=pr.get('requester_email', ''),
                         cc_emails=_view_cc,
                         budget_data=_budget,
+                        app_url=_pr_link(pr_id, 'approve'),
                     )
                 st.cache_data.clear()
                 st.rerun()
@@ -1926,6 +1981,7 @@ def _dialog_pr_edit(pr_id: int):
                         requester_email=pr.get('requester_email', ''),
                         cc_emails=_edit_cc,
                         budget_data=_budget,
+                        app_url=_pr_link(pr_id, 'approve'),
                     )
                 st.cache_data.clear()
                 st.rerun()
@@ -1979,6 +2035,7 @@ def _dialog_confirm_cancel(pr_id: int):
                 pending_approver_email=_pending_approver_email,
                 pending_approver_name=_pending_approver_name,
                 cc_emails=_cancel_cc,
+                app_url=_pr_link(pr_id, 'view'),
             )
             st.cache_data.clear()
             st.rerun()
@@ -2012,6 +2069,7 @@ def _dialog_confirm_po(pr_id: int):
                 requester_name=pr.get('requester_name', ''),
                 pm_email=get_project_pm_email(pr['project_id']),
                 cc_emails=_po_cc,
+                app_url=_pr_link(pr_id, 'view'),
             )
             st.cache_data.clear()
             st.rerun()
@@ -2279,6 +2337,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
                                     approval_level=1, max_level=result.get('max_level', 1),
                                     requester_email=pr_full.get('requester_email', ''),
                                     budget_data=_budget,
+                                    app_url=_pr_link(int(row['pr_id']), 'approve'),
                                 )
                         st.cache_data.clear()
                         st.rerun(scope="app")
@@ -2530,6 +2589,24 @@ with st.sidebar:
                 for _k in [k for k in st.session_state if k.startswith('pr_wiz_')]:
                     del st.session_state[_k]
                 st.session_state['open_create_pr'] = True
+
+
+# ── Deep link handler (from email — saved in session state before auth) ──
+_dl = st.session_state.pop('_deep_link', None)
+if _dl:
+    try:
+        _deep_pr_id = int(_dl['pr_id'])
+        _deep_action = _dl.get('action', 'view')
+        _action_map = {
+            'view':    'open_pr_view',
+            'approve': 'open_pr_approve',
+            'edit':    'open_pr_edit',
+        }
+        _ss_key = _action_map.get(_deep_action, 'open_pr_view')
+        st.session_state[_ss_key] = _deep_pr_id
+        st.rerun()
+    except (ValueError, TypeError):
+        pass
 
 
 # ── Main content ─────────────────────────────────────────────────
