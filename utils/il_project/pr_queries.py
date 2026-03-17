@@ -1267,17 +1267,19 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
     """
     Create a PO in purchase_orders + product_purchase_orders from an approved PR.
 
-    Fixed to match legacy ERP (Java/Hibernate) schema requirements:
-      - PO header: all FK columns populated, correct delete_flag type
-      - PO line items: product_id (required!), product_costbook_id, UOM fields
-      - PO number: format PO{YYYYMMDD}-{po_id}-{seller_id} (dash-separated)
+    Enriches PO data from multiple sources to match purchase_order_full_view:
+      - PO header: costbook → payment_term, trade_term, contacts, countries
+                   vendor company → seller info, from_country
+                   buyer company → ship_to, bill_to, to_country
+      - PO items:  costbook_details → MOQ, SPQ, UOM, conversion, VAT
+                   products → pt_code, uom
 
-    Pre-condition: call validate_po_readiness() first — all items must have product_id.
+    Pre-condition: call validate_po_readiness() first.
 
     Args:
         pr_id: IL purchase request ID
         buyer_company_id: Prostech/Rozitek company ID
-        created_by_keycloak: keycloak_id of the creator
+        created_by_keycloak: keycloak_id of the creator (must match employees.keycloak_id)
 
     Returns: {success, po_id, po_number, message}
     """
@@ -1298,16 +1300,25 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
             if not pr.vendor_id:
                 return {'success': False, 'message': 'PR has no vendor — cannot create PO'}
 
-            # ── 2. Get PR items + verify product_id ────────────────
+            # ── 2. Get PR items + product + costbook enrichment ────
             items = conn.execute(text("""
                 SELECT
                     pri.*,
                     cur.code AS item_ccy_code,
                     p.pt_code AS product_pt_code,
-                    p.uom AS product_uom
+                    p.uom AS product_uom,
+                    -- Costbook detail enrichment
+                    cd.minimum_order_quantity AS cb_moq,
+                    cd.standard_pack_quantity AS cb_spq,
+                    cd.purchase_uom AS cb_purchase_uom,
+                    cd.product_uom AS cb_product_uom,
+                    cd.conversion AS cb_conversion,
+                    cd.vat AS cb_vat,
+                    cd.costbook_id AS cb_costbook_id
                 FROM il_purchase_request_items pri
                 LEFT JOIN currencies cur ON pri.currency_id = cur.id
                 LEFT JOIN products p ON pri.product_id = p.id
+                LEFT JOIN costbook_details cd ON pri.costbook_detail_id = cd.id
                 WHERE pri.pr_id = :prid AND pri.delete_flag = 0
                 ORDER BY pri.view_order, pri.id
             """), {'prid': pr_id}).fetchall()
@@ -1323,27 +1334,43 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     'message': f'{len(missing_product)} item(s) missing product link: {descs}...'
                 }
 
-            # ── 3. Insert PO header ────────────────────────────────
+            # ── 3. Lookup costbook header for PO enrichment ────────
+            #    Find dominant costbook (most items linked to same costbook)
+            cb_ids = [it.cb_costbook_id for it in items if it.cb_costbook_id]
+            cb_header = None
+            if cb_ids:
+                # Most frequent costbook_id
+                from collections import Counter
+                dominant_cb_id = Counter(cb_ids).most_common(1)[0][0]
+                cb_header = conn.execute(text("""
+                    SELECT
+                        cb.payment_term_id,
+                        cb.trade_term_id,
+                        cb.vendor_contact_id AS seller_contact_id,
+                        cb.buyer_contact_id,
+                        cb.from_country_id,
+                        cb.to_country_id
+                    FROM costbooks cb
+                    WHERE cb.id = :cbid AND cb.delete_flag = 0
+                """), {'cbid': dominant_cb_id}).fetchone()
+
+            # ── 4. Lookup buyer/vendor company for ship-to/bill-to ─
+            buyer_info = conn.execute(text("""
+                SELECT id, country_id, state_province_id
+                FROM companies WHERE id = :bid
+            """), {'bid': buyer_company_id}).fetchone()
+
+            vendor_info = conn.execute(text("""
+                SELECT id, country_id, state_province_id
+                FROM companies WHERE id = :vid
+            """), {'vid': pr.vendor_id}).fetchone()
+
+            # ── 5. Insert PO header (fully enriched) ───────────────
             today_str = datetime.now().strftime('%Y%m%d')
             seller_id = pr.vendor_id
 
-            po_result = conn.execute(text("""
-                INSERT INTO purchase_orders (
-                    po_date, po_number, po_type, purchase_order_type,
-                    buyer_company_id, seller_company_id,
-                    currency_id, usd_exchange_rate,
-                    po_note, external_ref_number,
-                    created_by, created_date,
-                    delete_flag, version
-                ) VALUES (
-                    NOW(), :po_num, 'INTERNAL', 'REGULAR_ORDER',
-                    :buyer, :seller,
-                    :cur, :rate,
-                    :note, :ext_ref,
-                    :by, NOW(),
-                    b'0', 0
-                )
-            """), {
+            # Build params — always present
+            po_params = {
                 'po_num': '__TEMP__',
                 'buyer': buyer_company_id,
                 'seller': seller_id,
@@ -1352,7 +1379,50 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 'note': f'Auto-created from PR {pr.pr_number}',
                 'ext_ref': pr.pr_number,
                 'by': created_by_keycloak,
-            })
+                # Ship-to & bill-to default to buyer company
+                'ship_to_company': buyer_company_id,
+                'bill_to_company': buyer_company_id,
+                # Countries from costbook or vendor/buyer
+                'from_country': (cb_header.from_country_id if cb_header and cb_header.from_country_id
+                                 else (vendor_info.country_id if vendor_info else None)),
+                'to_country': (cb_header.to_country_id if cb_header and cb_header.to_country_id
+                               else (buyer_info.country_id if buyer_info else None)),
+                'from_state': (vendor_info.state_province_id if vendor_info else None),
+                'to_state': (buyer_info.state_province_id if buyer_info else None),
+                # Contacts & terms from costbook
+                'seller_contact': (cb_header.seller_contact_id if cb_header else None),
+                'buyer_contact': (cb_header.buyer_contact_id if cb_header else None),
+                'payment_term': (cb_header.payment_term_id if cb_header else None),
+                'trade_term': (cb_header.trade_term_id if cb_header else None),
+            }
+
+            po_result = conn.execute(text("""
+                INSERT INTO purchase_orders (
+                    po_date, po_number, po_type, purchase_order_type,
+                    buyer_company_id, seller_company_id,
+                    buyer_contact_id, seller_contact_id,
+                    ship_to_company_id, bill_to_company_id,
+                    currency_id, usd_exchange_rate,
+                    payment_term_id, trade_term_id,
+                    from_country_id, to_country_id,
+                    from_state_province_id, to_state_province_id,
+                    po_note, external_ref_number,
+                    created_by, created_date,
+                    delete_flag, version
+                ) VALUES (
+                    NOW(), :po_num, 'INTERNAL', 'REGULAR_ORDER',
+                    :buyer, :seller,
+                    :buyer_contact, :seller_contact,
+                    :ship_to_company, :bill_to_company,
+                    :cur, :rate,
+                    :payment_term, :trade_term,
+                    :from_country, :to_country,
+                    :from_state, :to_state,
+                    :note, :ext_ref,
+                    :by, NOW(),
+                    b'0', 0
+                )
+            """), po_params)
             po_id = po_result.lastrowid
 
             # Update PO number: PO{date}-{po_id}-{seller_id}
@@ -1361,15 +1431,21 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 "UPDATE purchase_orders SET po_number = :num WHERE id = :id"
             ), {'num': po_number, 'id': po_id})
 
-            # ── 4. Insert PO line items ────────────────────────────
+            # ── 6. Insert PO line items (enriched from costbook) ───
             for item in items:
                 unit_cost = float(item.unit_cost or 0)
                 qty = float(item.quantity or 0)
                 rate = float(item.exchange_rate or 1)
                 cur_id = item.currency_id or pr.currency_id
+
                 pt_code = item.product_pt_code or item.pt_code or ''
-                uom = item.uom or ''
-                p_uom = item.product_uom or uom
+                std_uom = item.product_uom or item.uom or ''
+                buy_uom = item.cb_purchase_uom or std_uom
+                conversion = item.cb_conversion or None
+                moq = float(item.cb_moq) if item.cb_moq else None
+                spq = float(item.cb_spq) if item.cb_spq else None
+                vat = float(item.cb_vat) if item.cb_vat else None
+                customer_code = item.vendor_quote_ref or None
 
                 conn.execute(text("""
                     INSERT INTO product_purchase_orders (
@@ -1378,7 +1454,9 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         exchange_rate, distributor_buy_price,
                         product_currency_id, product_pn,
                         purchase_quantity, purchase_unit_cost, original_purchase_unit_cost,
-                        purchaseuom, product_uom,
+                        purchaseuom, product_uom, conversion,
+                        minimum_order_quantity, standard_pack_quantity,
+                        vat_gst, customer_code,
                         created_date, delete_flag, version
                     ) VALUES (
                         :po_id, :prod_id, :costbook_id,
@@ -1386,7 +1464,9 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         :rate, :cost,
                         :cur_id, :pn,
                         :qty, :cost, :cost,
-                        :p_uom, :uom,
+                        :buy_uom, :std_uom, :conversion,
+                        :moq, :spq,
+                        :vat, :cust_code,
                         NOW(), b'0', 0
                     )
                 """), {
@@ -1398,11 +1478,16 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     'rate': rate,
                     'cur_id': cur_id,
                     'pn': pt_code,
-                    'p_uom': p_uom,
-                    'uom': uom,
+                    'buy_uom': buy_uom,
+                    'std_uom': std_uom,
+                    'conversion': conversion,
+                    'moq': moq,
+                    'spq': spq,
+                    'vat': vat,
+                    'cust_code': customer_code,
                 })
 
-            # ── 5. Update PR → link to PO ──────────────────────────
+            # ── 7. Update PR → link to PO ──────────────────────────
             conn.execute(text("""
                 UPDATE il_purchase_requests SET
                     status = 'PO_CREATED',
@@ -1412,7 +1497,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 WHERE id = :id
             """), {'id': pr_id, 'po_id': po_id, 'm': created_by_keycloak})
 
-            # ── 6. Link PO to il_project_documents ─────────────────
+            # ── 8. Link PO to il_project_documents ─────────────────
             conn.execute(text("""
                 INSERT INTO il_project_documents (
                     project_id, document_type, document_id, document_number,
