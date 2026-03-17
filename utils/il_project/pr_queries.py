@@ -15,7 +15,61 @@ from datetime import date, datetime
 import pandas as pd
 from sqlalchemy import text
 
+import re
+
 logger = logging.getLogger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# UOM CONVERSION HELPER
+# ══════════════════════════════════════════════════════════════════════
+
+def _parse_conversion_factor(conversion_str: str) -> Optional[float]:
+    """
+    Parse costbook/PO conversion string → numeric factor.
+    Factor means: 1 buying unit = factor × standard units.
+
+    Supported formats:
+        "10"        → 10.0
+        "1:10"      → 10.0
+        "1:100"     → 100.0
+        "0.5"       → 0.5
+        "1 Box = 10 Pcs" → 10.0  (extracts RHS number)
+        None / ""   → None (no conversion = same UOM)
+
+    Returns None if unparseable (caller treats as 1:1).
+    """
+    if not conversion_str:
+        return None
+    s = str(conversion_str).strip()
+    if not s:
+        return None
+
+    # Try simple number: "10", "0.5"
+    try:
+        v = float(s)
+        if v > 0:
+            return v
+    except ValueError:
+        pass
+
+    # Try ratio: "1:10", "1:100"
+    m = re.match(r'^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$', s)
+    if m:
+        left, right = float(m.group(1)), float(m.group(2))
+        if left > 0:
+            return right / left
+        return None
+
+    # Try "X unit = Y unit": extract the numbers
+    m = re.search(r'=\s*(\d+(?:\.\d+)?)', s)
+    if m:
+        v = float(m.group(1))
+        if v > 0:
+            return v
+
+    logger.debug(f"Could not parse conversion: '{conversion_str}'")
+    return None
 
 
 def _get_engine():
@@ -1548,6 +1602,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     ship_to, bill_to,
                     po_note, external_ref_number,
                     created_by, created_date,
+                    updated_by, updated_date,
                     delete_flag, version
                 ) VALUES (
                     NOW(), :po_num, 'INTERNAL', :po_order_type,
@@ -1563,6 +1618,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     :ship_to, :bill_to,
                     :note, :ext_ref,
                     :by, NOW(),
+                    :by, NOW(),
                     b'0', 0
                 )
             """), po_params)
@@ -1576,8 +1632,8 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
 
             # ── 6. Insert PO line items (enriched from costbook) ───
             for item in items:
-                unit_cost = float(item.unit_cost or 0)
-                qty = float(item.quantity or 0)
+                buy_cost = float(item.unit_cost or 0)   # buying UOM cost (from PR)
+                buy_qty = float(item.quantity or 0)      # buying UOM qty (from PR)
                 rate = float(item.exchange_rate or 1)
                 cur_id = item.currency_id or pr.currency_id
 
@@ -1589,6 +1645,19 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 spq = float(item.cb_spq) if item.cb_spq else None
                 vat = float(item.cb_vat) if item.cb_vat else None
                 customer_code = item.vendor_quote_ref or None
+
+                # ── Dual UOM: convert buying → standard ────────────
+                # View expects: quantity = standard, purchase_quantity = buying
+                # unit_cost = standard, purchase_unit_cost = buying
+                # Factor: 1 buying unit = factor × standard units
+                conv_factor = _parse_conversion_factor(conversion)
+                if conv_factor and conv_factor != 1.0 and buy_uom != std_uom:
+                    std_qty = round(buy_qty * conv_factor, 4)
+                    std_cost = round(buy_cost / conv_factor, 4) if conv_factor > 0 else buy_cost
+                else:
+                    # Same UOM or no conversion — buying = standard
+                    std_qty = buy_qty
+                    std_cost = buy_cost
 
                 # Per-item settings from UI (ETD, ETA, stock_owner)
                 _isettings = _item_settings.get(str(item.id), _item_settings.get(item.id, {}))
@@ -1605,9 +1674,9 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     INSERT INTO product_purchase_orders (
                         purchase_order_id, product_id, product_costbook_id,
                         quantity, unit_cost, original_unit_cost,
+                        purchase_quantity, purchase_unit_cost, original_purchase_unit_cost,
                         exchange_rate, distributor_buy_price,
                         product_currency_id, product_pn,
-                        purchase_quantity, purchase_unit_cost, original_purchase_unit_cost,
                         purchaseuom, product_uom, conversion,
                         minimum_order_quantity, standard_pack_quantity,
                         vat_gst, customer_code,
@@ -1616,10 +1685,10 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         created_date, delete_flag, version
                     ) VALUES (
                         :po_id, :prod_id, :costbook_id,
-                        :qty, :cost, :cost,
-                        :rate, :cost,
+                        :std_qty, :std_cost, :std_cost,
+                        :buy_qty, :buy_cost, :buy_cost,
+                        :rate, :buy_cost,
                         :cur_id, :pn,
-                        :qty, :cost, :cost,
                         :buy_uom, :std_uom, :conversion,
                         :moq, :spq,
                         :vat, :cust_code,
@@ -1631,8 +1700,10 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     'po_id': po_id,
                     'prod_id': item.product_id,
                     'costbook_id': item.costbook_detail_id,
-                    'qty': qty,
-                    'cost': unit_cost,
+                    'std_qty': std_qty,
+                    'std_cost': std_cost,
+                    'buy_qty': buy_qty,
+                    'buy_cost': buy_cost,
                     'rate': rate,
                     'cur_id': cur_id,
                     'pn': pt_code,
