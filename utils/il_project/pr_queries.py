@@ -1087,6 +1087,22 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
 
 
 # ══════════════════════════════════════════════════════════════════════
+# PROJECT HELPERS
+# ══════════════════════════════════════════════════════════════════════
+
+def get_project_pm_email(project_id: int) -> Optional[str]:
+    """Get PM's email for a project. Used for CC notifications."""
+    rows = _execute_query("""
+        SELECT e.email
+        FROM il_projects p
+        JOIN employees e ON p.pm_employee_id = e.id
+        WHERE p.id = :pid AND p.delete_flag = 0
+        LIMIT 1
+    """, {'pid': project_id})
+    return rows[0]['email'] if rows else None
+
+
+# ══════════════════════════════════════════════════════════════════════
 # PERMISSION CHECK
 # ══════════════════════════════════════════════════════════════════════
 

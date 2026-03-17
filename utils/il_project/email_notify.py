@@ -294,6 +294,28 @@ def _budget_comparison_table(budget_data: Optional[Dict] = None) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# FINANCE TEAM EMAILS — for PO notifications
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_finance_emails() -> List[str]:
+    """
+    Get finance team emails for PO notifications.
+    Reads from config key FINANCE_TEAM_EMAILS (comma-separated).
+    Returns empty list if not configured (non-critical).
+    """
+    try:
+        from ..config import config
+        raw = ''
+        if hasattr(config, 'finance_team_emails'):
+            raw = config.finance_team_emails or ''
+        elif hasattr(config, 'get'):
+            raw = config.get('FINANCE_TEAM_EMAILS', '') or ''
+        return [e.strip() for e in raw.split(',') if e.strip() and '@' in e]
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════
 # PUBLIC API — Notification Triggers
 # ══════════════════════════════════════════════════════════════════════
 
@@ -310,6 +332,7 @@ def notify_pr_submitted(
     approver_email: str,
     approval_level: int,
     max_level: int,
+    requester_email: Optional[str] = None,
     items: Optional[list] = None,
     budget_data: Optional[Dict] = None,
     app_url: Optional[str] = None,
@@ -347,10 +370,12 @@ def notify_pr_submitted(
         Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
     </p>'''
 
+    _cc = [requester_email] if requester_email else None
     return _send_email(
         to_emails=[approver_email],
         subject=f"[PR Approval] {pr_number} — {project_code} — {_fmt_vnd(total_vnd)}",
         html_body=_base_template("Purchase Request — Pending Approval", body, app_url),
+        cc_emails=_cc,
     )
 
 
@@ -365,12 +390,14 @@ def notify_pr_approved(
     is_final: bool,
     next_approver_name: Optional[str] = None,
     next_approver_email: Optional[str] = None,
+    pm_email: Optional[str] = None,
     budget_data: Optional[Dict] = None,
     app_url: Optional[str] = None,
 ) -> bool:
     """
     Send notification when PR is approved.
     - To requester: always (with budget comparison)
+    - CC PM: when final approval (so PM knows PO can be created)
     - To next approver: if not final (multi-level, with budget comparison)
     """
     if not _is_configured():
@@ -402,10 +429,12 @@ def notify_pr_approved(
     
     {_budget_comparison_table(budget_data)}'''
 
+    _cc_pm = [pm_email] if is_final and pm_email and pm_email != requester_email else None
     ok1 = _send_email(
         to_emails=[requester_email],
         subject=f"[PR {'Approved' if is_final else 'Approved L' + str(approval_level)}] {pr_number} — {_fmt_vnd(total_vnd)}",
         html_body=_base_template("Purchase Request — Approved", body_requester, app_url),
+        cc_emails=_cc_pm,
     )
     success = success and ok1
 
@@ -446,9 +475,10 @@ def notify_pr_rejected(
     requester_name: str,
     approver_name: str,
     rejection_reason: str,
+    pm_email: Optional[str] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification to requester when PR is rejected."""
+    """Send notification to requester when PR is rejected. CC PM if different."""
     if not _is_configured():
         return False
 
@@ -472,10 +502,12 @@ def notify_pr_rejected(
         Bạn có thể tạo PR mới hoặc liên hệ {approver_name} để thảo luận thêm.
     </p>'''
 
+    _cc_pm = [pm_email] if pm_email and pm_email != requester_email else None
     return _send_email(
         to_emails=[requester_email],
         subject=f"[PR Rejected] {pr_number} — {project_code}",
         html_body=_base_template("Purchase Request — Rejected", body, app_url),
+        cc_emails=_cc_pm,
     )
 
 
@@ -487,9 +519,10 @@ def notify_pr_revision_requested(
     requester_name: str,
     approver_name: str,
     revision_notes: str,
+    pm_email: Optional[str] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification to requester when revision is requested."""
+    """Send notification to requester when revision is requested. CC PM if different."""
     if not _is_configured():
         return False
 
@@ -513,10 +546,12 @@ def notify_pr_revision_requested(
         Vui lòng đăng nhập ERP, chỉnh sửa PR và submit lại.
     </p>'''
 
+    _cc_pm = [pm_email] if pm_email and pm_email != requester_email else None
     return _send_email(
         to_emails=[requester_email],
         subject=f"[PR Revision] {pr_number} — Cần chỉnh sửa",
         html_body=_base_template("Purchase Request — Revision Requested", body, app_url),
+        cc_emails=_cc_pm,
     )
 
 
@@ -529,11 +564,22 @@ def notify_po_created(
     requester_email: str,
     requester_name: str,
     finance_emails: Optional[List[str]] = None,
+    pm_email: Optional[str] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification when PO is created from approved PR."""
+    """Send notification when PO is created from approved PR.
+    CC finance team (auto from config) + PM (if not requester).
+    """
     if not _is_configured():
         return False
+
+    # Auto-populate finance emails if not provided
+    if not finance_emails:
+        finance_emails = _get_finance_emails()
+    # Add PM to CC if not the requester
+    cc_list = list(finance_emails or [])
+    if pm_email and pm_email != requester_email and pm_email not in cc_list:
+        cc_list.append(pm_email)
 
     body = f'''
     <p>Xin chào <strong>{requester_name}</strong>,</p>
@@ -553,7 +599,59 @@ def notify_po_created(
 
     return _send_email(
         to_emails=[requester_email],
-        cc_emails=finance_emails,
+        cc_emails=cc_list or None,
         subject=f"[PO Created] {po_number} from {pr_number} — {vendor_name or project_code}",
         html_body=_base_template("Purchase Order Created", body, app_url),
+    )
+
+
+def notify_pr_cancelled(
+    pr_number: str,
+    project_code: str,
+    total_vnd: float,
+    requester_email: str,
+    requester_name: str,
+    cancelled_by: str,
+    pm_email: Optional[str] = None,
+    pending_approver_email: Optional[str] = None,
+    pending_approver_name: Optional[str] = None,
+    app_url: Optional[str] = None,
+) -> bool:
+    """
+    Send notification when PR is cancelled.
+    - To requester: always (confirmation)
+    - CC PM: if PM ≠ requester
+    - CC pending approver: if PR was PENDING_APPROVAL (so they know it's withdrawn)
+    """
+    if not _is_configured():
+        return False
+
+    body = f'''
+    <p>Xin chào <strong>{requester_name}</strong>,</p>
+    <p>Purchase Request đã bị hủy:</p>
+    
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
+        {_info_row('Project', project_code)}
+        {_info_row('Amount', _fmt_vnd(total_vnd))}
+        {_info_row('Cancelled by', cancelled_by)}
+        {_info_row('Status', '<span style="color:#6b7280;font-weight:700;">⬛ CANCELLED</span>')}
+    </table>
+    
+    <p style="color:#6b7280;font-size:13px;">
+        PR này đã bị hủy và không thể khôi phục. Bạn có thể tạo PR mới nếu cần.
+    </p>'''
+
+    # Build CC list
+    cc = []
+    if pm_email and pm_email != requester_email:
+        cc.append(pm_email)
+    if pending_approver_email and pending_approver_email not in cc and pending_approver_email != requester_email:
+        cc.append(pending_approver_email)
+
+    return _send_email(
+        to_emails=[requester_email],
+        subject=f"[PR Cancelled] {pr_number} — {project_code}",
+        html_body=_base_template("Purchase Request — Cancelled", body, app_url),
+        cc_emails=cc or None,
     )

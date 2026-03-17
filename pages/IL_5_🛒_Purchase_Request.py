@@ -37,6 +37,7 @@ from utils.il_project.pr_queries import (
     get_importable_estimate_items,
     create_po_from_pr,
     is_project_pm, is_approver_for_pr,
+    get_project_pm_email,
     get_budget_vs_pr,
 )
 from utils.il_project.currency import get_rate_to_vnd
@@ -47,6 +48,7 @@ from utils.il_project.email_notify import (
     notify_pr_rejected,
     notify_pr_revision_requested,
     notify_po_created,
+    notify_pr_cancelled,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,21 @@ def _load():
 
 proj_df, employees, currencies, companies, vendors = _load()
 emp_map  = {e['id']: e['full_name'] for e in employees}
+
+
+def _get_employee_email(employee_id: int) -> str:
+    """Get employee email by ID. Cached per session."""
+    cache_key = f'_emp_email_{employee_id}'
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    try:
+        from utils.db import execute_query as _eq
+        rows = _eq("SELECT email FROM employees WHERE id = :id LIMIT 1", {'id': employee_id})
+        email = rows[0]['email'] if rows else ''
+        st.session_state[cache_key] = email
+        return email
+    except Exception:
+        return ''
 cur_map  = {c['id']: c['code'] for c in currencies}
 
 
@@ -1239,6 +1256,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
                         approver_email=result['approver_email'],
                         approval_level=1,
                         max_level=result.get('max_level', 1),
+                        requester_email=_get_employee_email(emp_int_id),
                         budget_data=_budget,
                     )
             else:
@@ -1541,6 +1559,7 @@ def _dialog_approval_action(pr_id: int):
                 is_final=result.get('final', False),
                 next_approver_name=result.get('next_approver_name'),
                 next_approver_email=result.get('next_approver_email'),
+                pm_email=get_project_pm_email(pr['project_id']),
                 budget_data=_budget,
             )
             if not result.get('final') and result.get('next_approver_name'):
@@ -1562,6 +1581,7 @@ def _dialog_approval_action(pr_id: int):
                     requester_name=pr.get('requester_name', ''),
                     approver_name=st.session_state.get('user_fullname', ''),
                     rejection_reason=comments,
+                    pm_email=get_project_pm_email(pr['project_id']),
                 )
                 st.success("PR rejected.")
                 st.cache_data.clear()
@@ -1581,6 +1601,7 @@ def _dialog_approval_action(pr_id: int):
                     requester_name=pr.get('requester_name', ''),
                     approver_name=st.session_state.get('user_fullname', ''),
                     revision_notes=comments,
+                    pm_email=get_project_pm_email(pr['project_id']),
                 )
                 st.success("Revision requested — PR sent back to PM.")
                 st.cache_data.clear()
@@ -1701,6 +1722,7 @@ def _dialog_pr_view(pr_id: int):
                         justification=pr.get('justification', ''),
                         approver_name=result['approver_name'], approver_email=result['approver_email'],
                         approval_level=1, max_level=result.get('max_level', 1),
+                        requester_email=pr.get('requester_email', ''),
                         budget_data=_budget,
                     )
                 st.cache_data.clear()
@@ -1855,6 +1877,7 @@ def _dialog_pr_edit(pr_id: int):
                         justification=pr.get('justification', ''),
                         approver_name=result['approver_name'], approver_email=result['approver_email'],
                         approval_level=1, max_level=result.get('max_level', 1),
+                        requester_email=pr.get('requester_email', ''),
                         budget_data=_budget,
                     )
                 st.cache_data.clear()
@@ -1885,8 +1908,29 @@ def _dialog_confirm_cancel(pr_id: int):
     st.markdown("This action **cannot be undone**.")
     c1, c2 = st.columns(2)
     if c1.button("🗑 Yes, Cancel PR", type="primary", use_container_width=True):
+        # Capture pending approver BEFORE cancel (status changes after)
+        _pending_approver_email = None
+        _pending_approver_name = None
+        if pr['status'] == 'PENDING_APPROVAL':
+            from utils.il_project.pr_queries import get_current_approver
+            cur_app = get_current_approver(pr_id)
+            if cur_app:
+                _pending_approver_email = cur_app.get('approver_email')
+                _pending_approver_name = cur_app.get('approver_name')
+
         if cancel_pr(pr_id, user_id):
             st.success("PR cancelled.")
+            notify_pr_cancelled(
+                pr_number=pr['pr_number'],
+                project_code=pr.get('project_code', ''),
+                total_vnd=float(pr.get('total_amount_vnd') or 0),
+                requester_email=pr.get('requester_email', ''),
+                requester_name=pr.get('requester_name', ''),
+                cancelled_by=st.session_state.get('user_fullname', ''),
+                pm_email=get_project_pm_email(pr['project_id']),
+                pending_approver_email=_pending_approver_email,
+                pending_approver_name=_pending_approver_name,
+            )
             st.cache_data.clear()
             st.rerun()
         else:
@@ -1916,6 +1960,7 @@ def _dialog_confirm_po(pr_id: int):
                 vendor_name=pr.get('vendor_name', ''),
                 requester_email=pr.get('requester_email', ''),
                 requester_name=pr.get('requester_name', ''),
+                pm_email=get_project_pm_email(pr['project_id']),
             )
             st.cache_data.clear()
             st.rerun()
@@ -2181,6 +2226,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
                                     approver_name=result['approver_name'],
                                     approver_email=result['approver_email'],
                                     approval_level=1, max_level=result.get('max_level', 1),
+                                    requester_email=pr_full.get('requester_email', ''),
                                     budget_data=_budget,
                                 )
                         st.cache_data.clear()

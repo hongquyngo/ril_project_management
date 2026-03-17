@@ -103,6 +103,7 @@ from .email_notify import (
     notify_pr_rejected,
     notify_pr_revision_requested,
     notify_po_created,
+    notify_pr_cancelled,
 )
 
 from .pr_queries import (
@@ -135,6 +136,7 @@ from .pr_queries import (
     # Permission Checks
     is_project_pm,
     is_approver_for_pr,
+    get_project_pm_email,
     # Budget Comparison
     get_budget_vs_pr,
 )
@@ -181,6 +183,7 @@ __all__ = [
     # ── Email Notifications ──
     'notify_pr_submitted', 'notify_pr_approved', 'notify_pr_rejected',
     'notify_pr_revision_requested', 'notify_po_created',
+    'notify_pr_cancelled',
     # ── Purchase Request ──
     'generate_pr_number',
     'get_pr_list_df', 'get_pending_for_approver', 'get_pr', 'get_pr_items_df',
@@ -190,5 +193,6 @@ __all__ = [
     'get_importable_estimate_items',
     'create_po_from_pr',
     'is_project_pm', 'is_approver_for_pr',
+    'get_project_pm_email',
     'get_budget_vs_pr',
 ]
