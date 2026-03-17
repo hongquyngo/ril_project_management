@@ -2239,261 +2239,137 @@ def _dialog_confirm_po(pr_id: int):
     # ── Permission gate: PM or Admin only ──────────────────────────
     _is_pm = is_project_pm(pr['project_id'], emp_int_id)
     if not _is_pm and not is_admin:
-        st.error("⛔ Chỉ PM của project hoặc Admin mới có thể tạo PO.")
+        st.error("⛔ Only the project PM or Admin can create a PO.")
         return
 
-    # ── Step 1: Auto-resolve product_id from linked sources ────────
-    resolve_result = resolve_product_ids(pr_id)
-    if resolve_result['resolved_count'] > 0:
+    # ── Step 1: Auto-resolve (ONE TIME per dialog open) ────────────
+    _resolve_key = f'_po_resolved_{pr_id}'
+    if _resolve_key not in st.session_state:
+        resolve_result = resolve_product_ids(pr_id)
+        st.session_state[_resolve_key] = resolve_result
+    else:
+        resolve_result = st.session_state[_resolve_key]
+    if resolve_result.get('resolved_count', 0) > 0:
         st.success(f"✅ Auto-linked {resolve_result['resolved_count']} item(s) "
                    f"to products (from costbook/estimate)")
 
     # ── Step 2: Validate PO readiness ──────────────────────────────
     validation = validate_po_readiness(pr_id)
-
-    # Show warnings (non-blocking)
     for w in validation.get('warnings', []):
         st.warning(f"⚠️ {w}")
 
-    # ── Step 3: Handle items without product_id ────────────────────
+    # ── Step 3: Product linking (fragment — self-contained rerun) ──
     missing_items = validation.get('items_without_product', [])
-
     if missing_items:
-        st.divider()
-        st.error(f"❌ **{len(missing_items)} item(s) chưa link Product** — "
-                 f"Legacy ERP cần product_id cho mỗi PO line item.")
-        st.caption("Link product cho từng item bên dưới, hoặc quay lại Edit PR để bổ sung.")
+        _frag_product_linking(pr_id, missing_items)
 
-        for i, mi in enumerate(missing_items):
-            item_id = mi['item_id']
-            desc = mi.get('description', '(no description)')
-
-            with st.container(border=True):
-                st.markdown(f"**#{i+1}** — {desc}")
-
-                # Search + link product
-                search_key = f"prod_search_{item_id}"
-                keyword = st.text_input(
-                    f"🔍 Tìm product", key=search_key,
-                    placeholder="Nhập tên, PT code, hoặc mô tả...",
-                    help="Search trong bảng products của ERP"
-                )
-
-                if keyword and len(keyword) >= 2:
-                    results = search_products_for_linking(keyword)
-                    if results:
-                        options = {
-                            f"{r['pt_code'] or '—'} | {r['name']} ({r.get('brand_name', '')})"
-                            .strip(' ()'): r['id']
-                            for r in results
-                        }
-                        sel = st.selectbox(
-                            "Chọn product",
-                            ["(Chọn...)"] + list(options.keys()),
-                            key=f"prod_sel_{item_id}",
-                        )
-                        if sel != "(Chọn...)":
-                            pid = options[sel]
-                            if st.button(f"🔗 Link", key=f"prod_link_{item_id}",
-                                         type="primary"):
-                                ok = link_product_to_pr_item(item_id, pid)
-                                if ok:
-                                    st.success(f"✅ Linked!")
-                                    st.rerun()
-                                else:
-                                    st.error("Link failed.")
-                    else:
-                        st.caption("Không tìm thấy product phù hợp.")
-                elif keyword:
-                    st.caption("Nhập ít nhất 2 ký tự để tìm kiếm.")
-
-    # ── Step 4: Show blockers (other than missing product) ─────────
+    # Blockers (other than missing product)
     other_blockers = [b for b in validation.get('blockers', [])
                       if 'missing product' not in b.lower()]
     for b in other_blockers:
         st.error(f"❌ {b}")
 
-    # ══════════════════════════════════════════════════════════════
-    # Only show header settings + item details when PO is ready
-    # ══════════════════════════════════════════════════════════════
     if not validation['ready']:
         st.divider()
         c1, c2 = st.columns(2)
         c1.button("🛒 Create PO", disabled=True, use_container_width=True,
-                  help="Resolve tất cả blockers ở trên trước khi tạo PO")
+                  help="Resolve all blockers above before creating PO")
         if c2.button("✖ Cancel", use_container_width=True):
+            _cleanup_po_dialog(pr_id)
             st.rerun()
         return
 
-    # ── Load enrichment data from costbook ─────────────────────────
-    enrichment = get_po_enrichment_data(pr_id)
-    cb_defaults = enrichment.get('costbook_defaults', {})
-    enriched_items = enrichment.get('items', [])
+    # ══════════════════════════════════════════════════════════════
+    # LOAD ALL DATA ONCE — cache in session_state
+    # ══════════════════════════════════════════════════════════════
+    _data_key = f'_po_data_{pr_id}'
+    if _data_key not in st.session_state:
+        st.session_state[_data_key] = {
+            'enrichment': get_po_enrichment_data(pr_id),
+            'payment_terms': get_payment_terms(),
+            'trade_terms': get_trade_terms(),
+            'buyer_contacts': get_contacts_for_company(1),
+            'auto_addr': get_company_address(1),
+            'items_df': get_pr_items_df(pr_id),
+            'cc_employees': _get_employees_with_email(),
+        }
+    _d = st.session_state[_data_key]
+    enrichment      = _d['enrichment']
+    cb_defaults     = enrichment.get('costbook_defaults', {})
+    enriched_items  = enrichment.get('items', [])
+    payment_terms_list = _d['payment_terms']
+    trade_terms_list   = _d['trade_terms']
+    buyer_contacts     = _d['buyer_contacts']
+    _auto_addr         = _d['auto_addr']
+    items_df           = _d['items_df']
+    cc_emp_list        = _d['cc_employees']
+
+    # ── Pre-calculate defaults for form (BEFORE form renders) ──────
+    from datetime import timedelta
+
+    _pr_required = pr.get('required_date')
+    if _pr_required and not isinstance(_pr_required, str):
+        _default_etd_val = _pr_required
+    elif _pr_required:
+        try:
+            _default_etd_val = pd.to_datetime(_pr_required).date()
+        except Exception:
+            _default_etd_val = date.today() + timedelta(days=7)
+    else:
+        _default_etd_val = date.today() + timedelta(days=7)
+
+    # Pre-calculate per-item ETA defaults from lead_time
+    _item_eta_defaults = {}
+    for eit in enriched_items:
+        lt_num = eit.get('cb_lead_time_number', '')
+        lt_min = eit.get('cb_lead_time_min')
+        lt_max = eit.get('cb_lead_time_max')
+        lt_uom = eit.get('cb_lead_time_uom', '')
+        _lt_days = 0
+        try:
+            _lt_val = int(lt_max or lt_num or lt_min or 0)
+            _lt_u = (lt_uom or '').lower()
+            if 'week' in _lt_u:
+                _lt_days = _lt_val * 7
+            elif 'month' in _lt_u:
+                _lt_days = _lt_val * 30
+            else:
+                _lt_days = _lt_val
+        except (ValueError, TypeError):
+            _lt_days = 0
+        if _lt_days <= 0:
+            _lt_days = 14
+        _item_eta_defaults[eit.get('item_id')] = _default_etd_val + timedelta(days=_lt_days)
+
+    # ── Build option lists (computed once) ─────────────────────────
+    pt_names = ["(Auto from costbook)"] + [t['name'] for t in payment_terms_list]
+    _pt_default_name = cb_defaults.get('payment_term_name', '')
+    _pt_idx = pt_names.index(_pt_default_name) if _pt_default_name in pt_names else 0
+
+    tt_names = ["(Auto from costbook)"] + [t['name'] for t in trade_terms_list]
+    _tt_default_name = cb_defaults.get('trade_term_name', '')
+    _tt_idx = tt_names.index(_tt_default_name) if _tt_default_name in tt_names else 0
+
+    bc_options = ["(None)"] + [
+        f"{c['full_name'].strip()} ({c.get('position', '') or c.get('email', '')})"
+        for c in buyer_contacts
+    ]
+
+    emp_options = ["(None)"] + [f"{e['full_name']} (ID:{e['id']})" for e in employees]
+    _pm_option = next((o for o in emp_options if f"ID:{emp_int_id})" in o), emp_options[0])
+    _pm_idx = emp_options.index(_pm_option) if _pm_option in emp_options else 0
+
+    _cb_notes = cb_defaults.get('important_notes_text', '')
+
+    cc_options = [f"{e['name']} ({e['email']})" for e in cc_emp_list]
+    cc_email_map = {f"{e['name']} ({e['email']})": e['email'] for e in cc_emp_list}
 
     # ══════════════════════════════════════════════════════════════
-    # ④ PO Header Settings
-    # ══════════════════════════════════════════════════════════════
-    st.divider()
-    st.markdown("##### ④ PO Header Settings")
-
-    with st.container(border=True):
-        # Row 1: Payment Term + Trade Term
-        h1, h2 = st.columns(2)
-        payment_terms_list = get_payment_terms()
-        pt_names = ["(Auto from costbook)"] + [t['name'] for t in payment_terms_list]
-        _pt_default_name = cb_defaults.get('payment_term_name', '')
-        _pt_idx = pt_names.index(_pt_default_name) if _pt_default_name in pt_names else 0
-        sel_pt = h1.selectbox("Payment Term", pt_names, index=_pt_idx, key="po_payment_term",
-                              help=f"Costbook default: {_pt_default_name or '—'}")
-
-        trade_terms_list = get_trade_terms()
-        tt_names = ["(Auto from costbook)"] + [t['name'] for t in trade_terms_list]
-        _tt_default_name = cb_defaults.get('trade_term_name', '')
-        _tt_idx = tt_names.index(_tt_default_name) if _tt_default_name in tt_names else 0
-        sel_tt = h2.selectbox("Trade Term (Incoterm)", tt_names, index=_tt_idx, key="po_trade_term",
-                              help=f"Costbook default: {_tt_default_name or '—'}")
-
-        # Row 2: Contacts (buyer side — ship-to / bill-to)
-        _buyer_company_id = 1  # Prostech/Rozitek — same as create_po_from_pr default
-        buyer_contacts = get_contacts_for_company(_buyer_company_id)
-        bc_options = ["(None)"] + [
-            f"{c['full_name'].strip()} ({c.get('position', '') or c.get('email', '')})"
-            for c in buyer_contacts
-        ]
-        _bc_default_name = cb_defaults.get('buyer_contact_name', '').strip()
-
-        h3, h4 = st.columns(2)
-        sel_ship_contact = h3.selectbox("Ship-to Contact", bc_options, key="po_ship_contact",
-                                        help="Người nhận hàng tại công ty mua")
-        sel_bill_contact = h4.selectbox("Bill-to Contact", bc_options, key="po_bill_contact",
-                                        help="Người liên hệ thanh toán")
-
-        # Row 3: Addresses (auto-fill from company, editable)
-        _auto_addr = get_company_address(_buyer_company_id)
-        h5, h6 = st.columns(2)
-        ship_to_addr = h5.text_input("Ship-to Address", value=_auto_addr, key="po_ship_to",
-                                     help="Địa chỉ giao hàng (auto từ company)")
-        bill_to_addr = h6.text_input("Bill-to Address", value=_auto_addr, key="po_bill_to",
-                                     help="Địa chỉ xuất hóa đơn")
-
-        # Row 4: VAT + PO Notes
-        h7, h8 = st.columns(2)
-        _auto_vat = enrichment.get('dominant_vat')
-        _vat_help = "Cùng VAT tất cả items" if enrichment.get('all_vats_same') else "VAT khác nhau giữa items — nhập VAT chung cho PO header"
-        vat_pct = h7.number_input("VAT % (header)", value=float(_auto_vat or 0), min_value=0.0,
-                                  max_value=100.0, step=0.5, format="%.1f", key="po_vat",
-                                  help=_vat_help)
-
-        # Costbook important notes preview
-        _cb_notes = cb_defaults.get('important_notes_text', '')
-        if _cb_notes:
-            h8.caption(f"📋 Costbook notes: {_cb_notes[:100]}{'...' if len(_cb_notes) > 100 else ''}")
-
-        po_notes = st.text_area("PO Notes / Special Instructions (optional)",
-                                value=_cb_notes or '', height=70, key="po_notes",
-                                help="Ghi chú quan trọng cho PO — sẽ lưu vào bảng notes")
-
-    # ══════════════════════════════════════════════════════════════
-    # ⑤ Shipping & Delivery (ETD/ETA per item)
-    # ══════════════════════════════════════════════════════════════
-    st.divider()
-    st.markdown("##### ⑤ Shipping & Delivery")
-
-    # Global defaults
-    with st.container(border=True):
-        g1, g2 = st.columns(2)
-        default_etd = g1.date_input("Default ETD (tất cả items)", value=None, key="po_default_etd",
-                                    help="Ngày dự kiến xuất hàng — áp dụng cho items chưa set riêng")
-        # Stock owner default = PM
-        emp_options = ["(None)"] + [f"{e['full_name']} (ID:{e['id']})" for e in employees]
-        _pm_name = emp_map.get(emp_int_id, '')
-        _pm_option = next((o for o in emp_options if f"ID:{emp_int_id})" in o), emp_options[0])
-        _pm_idx = emp_options.index(_pm_option) if _pm_option in emp_options else 0
-        default_stock_owner = g2.selectbox("Stock Owner (default)", emp_options,
-                                           index=_pm_idx, key="po_stock_owner",
-                                           help="Người chịu trách nhiệm inventory — mặc định PM")
-
-    # Per-item details
-    items_df = get_pr_items_df(pr_id)
-    _item_etd_eta = {}  # Collect per-item settings
-
-    if enriched_items:
-        st.caption(f"📦 {len(enriched_items)} items — expand để set ETD/ETA riêng")
-        for idx, eit in enumerate(enriched_items):
-            item_id = eit.get('item_id')
-            desc = (eit.get('item_description', '') or '')[:50]
-            pt = eit.get('pt_code', '') or ''
-
-            # Lead time info from costbook
-            lt_num = eit.get('cb_lead_time_number', '')
-            lt_min = eit.get('cb_lead_time_min')
-            lt_max = eit.get('cb_lead_time_max')
-            lt_uom = eit.get('cb_lead_time_uom', '')
-            shipping_mode = eit.get('cb_shipping_mode_name', '') or eit.get('cb_shipping_mode_code', '')
-            pkg = eit.get('cb_package_size') or eit.get('product_package_size', '')
-            hs = eit.get('cb_hs_code') or eit.get('product_hs_code', '')
-            price_type = eit.get('cb_price_type', '')
-
-            # Build info badges
-            info_parts = []
-            if lt_min and lt_max:
-                info_parts.append(f"⏱ {lt_min}-{lt_max} {lt_uom}")
-            elif lt_num:
-                info_parts.append(f"⏱ {lt_num} {lt_uom}")
-            if shipping_mode:
-                info_parts.append(f"🚢 {shipping_mode}")
-            if pkg:
-                info_parts.append(f"📦 {pkg}")
-            if price_type:
-                info_parts.append(f"💰 {price_type}")
-            info_str = ' &nbsp;|&nbsp; '.join(info_parts)
-
-            with st.expander(f"**{pt}** — {desc}" + (f" &nbsp; {info_str}" if info_parts else ""),
-                             expanded=False):
-                ic1, ic2 = st.columns(2)
-                _etd = ic1.date_input("ETD", value=default_etd, key=f"po_etd_{item_id}",
-                                      help=f"Lead time: {lt_num or lt_min or '—'} {lt_uom}")
-
-                # Auto-calc ETA from ETD + lead time
-                _eta_default = None
-                if _etd:
-                    from datetime import timedelta
-                    _lt_days = 0
-                    try:
-                        _lt_val = int(lt_max or lt_num or lt_min or 0)
-                        _lt_u = (lt_uom or '').lower()
-                        if 'week' in _lt_u:
-                            _lt_days = _lt_val * 7
-                        elif 'month' in _lt_u:
-                            _lt_days = _lt_val * 30
-                        else:
-                            _lt_days = _lt_val
-                    except (ValueError, TypeError):
-                        _lt_days = 14  # fallback 2 weeks
-                    if _lt_days > 0:
-                        _eta_default = _etd + timedelta(days=_lt_days)
-
-                _eta = ic2.date_input("ETA", value=_eta_default, key=f"po_eta_{item_id}",
-                                      help="Ngày dự kiến nhận hàng — auto từ ETD + lead time")
-
-                # Display read-only info
-                if info_parts:
-                    st.caption(info_str)
-                if hs:
-                    st.caption(f"🏷️ HS Code: {hs}")
-
-                _item_etd_eta[str(item_id)] = {
-                    'etd': datetime.combine(_etd, datetime.min.time()) if _etd else None,
-                    'eta': datetime.combine(_eta, datetime.min.time()) if _eta else None,
-                }
-
-    # ══════════════════════════════════════════════════════════════
-    # ⑥ PO Preview + Create
+    # PO Preview (read-only — outside form)
     # ══════════════════════════════════════════════════════════════
     st.divider()
-    st.success("✅ **Sẵn sàng tạo PO** — tất cả items đã link product, vendor đã chọn.")
+    st.success("✅ **Ready to create PO** — all items linked to products, vendor selected.")
 
-    # Preview items table
     if not items_df.empty:
         preview = items_df[['cogs_category', 'item_description', 'vendor_name',
                             'quantity', 'unit_cost']].copy()
@@ -2509,17 +2385,106 @@ def _dialog_confirm_po(pr_id: int):
                          'amount': st.column_config.TextColumn('Amount'),
                      })
 
-    st.markdown(f"**PO sẽ tạo cho:** Vendor **{pr.get('vendor_name', '—')}** | "
+    st.markdown(f"**PO will be created for:** Vendor **{pr.get('vendor_name', '—')}** | "
                 f"Currency **{pr.get('currency_code', 'VND')}** | "
                 f"Total **{fmt_vnd(pr.get('total_amount_vnd'))}**")
 
-    # ── Action buttons ─────────────────────────────────────────────
-    st.divider()
-    _po_cc = _cc_email_selector("po_create", label="📧 CC thêm (e.g. finance, optional)")
+    # ══════════════════════════════════════════════════════════════
+    # ④ + ⑤ + ⑥  ALL IN ONE FORM — zero reruns while filling
+    # ══════════════════════════════════════════════════════════════
+    with st.form("po_create_form"):
 
-    c1, c2 = st.columns(2)
-    if c1.button("🛒 Create PO", type="primary", use_container_width=True):
-        # ── Collect all settings from UI ──────────────────────
+        # ── ④ PO Header Settings ──────────────────────────────────
+        st.markdown("##### ④ PO Header Settings")
+
+        h1, h2 = st.columns(2)
+        sel_pt = h1.selectbox("Payment Term", pt_names, index=_pt_idx, key="po_f_pt",
+                              help=f"Costbook default: {_pt_default_name or '—'}")
+        sel_tt = h2.selectbox("Trade Term (Incoterm)", tt_names, index=_tt_idx, key="po_f_tt",
+                              help=f"Costbook default: {_tt_default_name or '—'}")
+
+        h3, h4 = st.columns(2)
+        sel_ship_contact = h3.selectbox("Ship-to Contact", bc_options, key="po_f_ship_c",
+                                        help="Receiving contact at buyer company")
+        sel_bill_contact = h4.selectbox("Bill-to Contact", bc_options, key="po_f_bill_c",
+                                        help="Billing/payment contact")
+
+        h5, h6 = st.columns(2)
+        ship_to_addr = h5.text_input("Ship-to Address", value=_auto_addr, key="po_f_ship_a",
+                                     help="Shipping address (auto-filled from company)")
+        bill_to_addr = h6.text_input("Bill-to Address", value=_auto_addr, key="po_f_bill_a",
+                                     help="Invoice/billing address")
+
+        po_notes = st.text_area("PO Notes / Special Instructions",
+                                value=_cb_notes or '', height=70, key="po_f_notes",
+                                help="Important notes for PO — saved to notes table")
+
+        # ── ⑤ Shipping & Delivery ─────────────────────────────────
+        st.divider()
+        st.markdown("##### ⑤ Shipping & Delivery")
+
+        g1, g2 = st.columns(2)
+        default_etd = g1.date_input("Default ETD (all items)",
+                                    value=_default_etd_val, key="po_f_etd",
+                                    help="Default: PR required date, or today + 7 days")
+        default_stock_owner = g2.selectbox("Stock Owner (default)", emp_options,
+                                           index=_pm_idx, key="po_f_owner",
+                                           help="Inventory owner — defaults to PM")
+
+        # Per-item ETD / ETA (in expanders)
+        _form_item_keys = []  # track keys for value collection on submit
+        if enriched_items:
+            st.caption(f"📦 {len(enriched_items)} items — expand to set ETD/ETA per item")
+            for idx, eit in enumerate(enriched_items):
+                item_id = eit.get('item_id')
+                desc = (eit.get('item_description', '') or '')[:50]
+                pt = eit.get('pt_code', '') or ''
+                lt_num = eit.get('cb_lead_time_number', '')
+                lt_min = eit.get('cb_lead_time_min')
+                lt_uom = eit.get('cb_lead_time_uom', '')
+                shipping_mode = eit.get('cb_shipping_mode_name', '') or eit.get('cb_shipping_mode_code', '')
+                pkg = eit.get('cb_package_size') or eit.get('product_package_size', '')
+
+                # Build compact label
+                info_parts = []
+                if lt_num or lt_min:
+                    info_parts.append(f"⏱ {lt_num or lt_min} {lt_uom}")
+                if shipping_mode:
+                    info_parts.append(f"🚢 {shipping_mode}")
+                if pkg:
+                    info_parts.append(f"📦 {pkg}")
+                info_str = ' | '.join(info_parts)
+                label = f"**{pt}** — {desc}" + (f"  ({info_str})" if info_parts else "")
+
+                with st.expander(label, expanded=False):
+                    ic1, ic2 = st.columns(2)
+                    _etd_key = f"po_f_etd_{item_id}"
+                    _eta_key = f"po_f_eta_{item_id}"
+                    ic1.date_input("ETD", value=_default_etd_val, key=_etd_key,
+                                   help=f"Lead time: {lt_num or lt_min or '—'} {lt_uom}")
+                    _eta_def = _item_eta_defaults.get(item_id, _default_etd_val + timedelta(days=14))
+                    ic2.date_input("ETA", value=_eta_def, key=_eta_key,
+                                   help="Auto-calculated from ETD + lead time (override if needed)")
+                    _form_item_keys.append((item_id, _etd_key, _eta_key))
+
+        # ── ⑥ CC + Submit ─────────────────────────────────────────
+        st.divider()
+        _po_cc_sel = st.multiselect("📧 CC (e.g. finance, optional)", cc_options,
+                                    key="po_f_cc", help="Select employees to CC on email notification")
+
+        fc1, fc2 = st.columns(2)
+        submitted = fc1.form_submit_button("🛒 Create PO", type="primary", use_container_width=True)
+        cancelled = fc2.form_submit_button("✖ Cancel", use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════
+    # HANDLE FORM SUBMISSION
+    # ══════════════════════════════════════════════════════════════
+    if cancelled:
+        _cleanup_po_dialog(pr_id)
+        st.rerun()
+
+    if submitted:
+        # ── Collect all values from form ──────────────────────
         # Payment term
         _sel_pt_id = None
         if sel_pt != "(Auto from costbook)":
@@ -2533,7 +2498,7 @@ def _dialog_confirm_po(pr_id: int):
         # Contacts
         _ship_contact_id = None
         if sel_ship_contact != "(None)" and buyer_contacts:
-            _sc_idx = bc_options.index(sel_ship_contact) - 1  # offset for (None)
+            _sc_idx = bc_options.index(sel_ship_contact) - 1
             if 0 <= _sc_idx < len(buyer_contacts):
                 _ship_contact_id = buyer_contacts[_sc_idx]['id']
 
@@ -2549,11 +2514,32 @@ def _dialog_confirm_po(pr_id: int):
             try:
                 _stock_owner_id = int(default_stock_owner.split("ID:")[1].rstrip(")"))
             except (ValueError, IndexError):
-                _stock_owner_id = emp_int_id  # fallback to PM
+                _stock_owner_id = emp_int_id
 
-        # Inject stock_owner into all item_settings
-        for k in _item_etd_eta:
-            _item_etd_eta[k]['stock_owner_id'] = _stock_owner_id
+        # Per-item ETD/ETA from form keys
+        _item_etd_eta = {}
+        for item_id, etd_key, eta_key in _form_item_keys:
+            _etd_val = st.session_state.get(etd_key)
+            _eta_val = st.session_state.get(eta_key)
+            _item_etd_eta[str(item_id)] = {
+                'etd': datetime.combine(_etd_val, datetime.min.time()) if _etd_val else None,
+                'eta': datetime.combine(_eta_val, datetime.min.time()) if _eta_val else None,
+                'stock_owner_id': _stock_owner_id,
+            }
+
+        # Items without custom ETD → use default_etd
+        if enriched_items and not _form_item_keys:
+            for eit in enriched_items:
+                _iid = str(eit.get('item_id'))
+                _eta_def = _item_eta_defaults.get(eit.get('item_id'))
+                _item_etd_eta[_iid] = {
+                    'etd': datetime.combine(default_etd, datetime.min.time()) if default_etd else None,
+                    'eta': datetime.combine(_eta_def, datetime.min.time()) if _eta_def else None,
+                    'stock_owner_id': _stock_owner_id,
+                }
+
+        # CC emails
+        _po_cc = [cc_email_map[s] for s in _po_cc_sel if s in cc_email_map]
 
         po_settings = {
             'payment_term_id': _sel_pt_id,
@@ -2562,7 +2548,6 @@ def _dialog_confirm_po(pr_id: int):
             'bill_to_contact_id': _bill_contact_id,
             'ship_to': ship_to_addr if ship_to_addr != '—' else None,
             'bill_to': bill_to_addr if bill_to_addr != '—' else None,
-            'vat_gst': vat_pct if vat_pct > 0 else None,
             'po_notes': po_notes if po_notes.strip() else '',
             'item_settings': _item_etd_eta,
         }
@@ -2582,13 +2567,70 @@ def _dialog_confirm_po(pr_id: int):
                 cc_emails=_po_cc,
                 app_url=_pr_link(pr_id, 'view'),
             )
+            _cleanup_po_dialog(pr_id)
             st.cache_data.clear()
             st.rerun()
         else:
             st.error(f"❌ {result['message']}")
 
-    if c2.button("✖ Cancel", use_container_width=True):
-        st.rerun()
+
+# ── Product linking fragment (self-contained rerun) ───────────────
+
+@st.fragment
+def _frag_product_linking(pr_id: int, missing_items: list):
+    """Fragment for product search + link. Reruns only this section."""
+    st.divider()
+    st.error(f"❌ **{len(missing_items)} item(s) not linked to Product** — "
+             f"Legacy ERP requires product_id for every PO line item.")
+    st.caption("Link a product for each item below, or go back to Edit PR to update.")
+
+    for i, mi in enumerate(missing_items):
+        item_id = mi['item_id']
+        desc = mi.get('description', '(no description)')
+
+        with st.container(border=True):
+            st.markdown(f"**#{i+1}** — {desc}")
+            keyword = st.text_input(
+                f"🔍 Search product", key=f"prod_search_{item_id}",
+                placeholder="Enter name, PT code, or description...",
+            )
+            if keyword and len(keyword) >= 2:
+                results = search_products_for_linking(keyword)
+                if results:
+                    options = {
+                        f"{r['pt_code'] or '—'} | {r['name']} ({r.get('brand_name', '')})"
+                        .strip(' ()'): r['id']
+                        for r in results
+                    }
+                    sel = st.selectbox("Select product",
+                                       ["(Select...)"] + list(options.keys()),
+                                       key=f"prod_sel_{item_id}")
+                    if sel != "(Select...)":
+                        if st.button(f"🔗 Link", key=f"prod_link_{item_id}", type="primary"):
+                            ok = link_product_to_pr_item(item_id, options[sel])
+                            if ok:
+                                st.success(f"✅ Linked!")
+                                # Clear cached resolve + data so parent re-validates
+                                st.session_state.pop(f'_po_resolved_{pr_id}', None)
+                                st.session_state.pop(f'_po_data_{pr_id}', None)
+                                st.rerun(scope="app")
+                            else:
+                                st.error("Link failed.")
+                else:
+                    st.caption("No matching product found.")
+            elif keyword:
+                st.caption("Enter at least 2 characters to search.")
+
+
+def _cleanup_po_dialog(pr_id: int):
+    """Remove all PO dialog cached state."""
+    for k in list(st.session_state):
+        if k.startswith(f'_po_') and str(pr_id) in k:
+            del st.session_state[k]
+    # Also clean form keys
+    for k in list(st.session_state):
+        if k.startswith('po_f_'):
+            del st.session_state[k]
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -1401,7 +1401,6 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 'bill_to_contact_id': int|None,
                 'ship_to': str|None,          # shipping address text
                 'bill_to': str|None,           # billing address text
-                'vat_gst': float|None,         # header-level VAT %
                 'po_notes': str|None,          # → notes table
                 'purchase_order_type': str|None, # REGULAR_ORDER|SAMPLE_ORDER|MIXED_ORDER
                 # Per-item overrides: {item_id: {etd, eta, stock_owner_id}}
@@ -1546,13 +1545,52 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
             # Build params — merging costbook defaults with UI overrides
             _item_settings = po_settings.get('item_settings', {})
 
+            # ── Calculate usd_exchange_rate ─────────────────────────
+            # PO view: total_amount_usd = cost * qty / usd_exchange_rate
+            # So usd_exchange_rate = "1 USD = X [PO currency]"
+            #
+            # PR exchange_rate = "1 [PR currency] = X VND" (DIFFERENT semantic!)
+            #
+            # Formula: usd_exchange_rate = get_rate('USD', po_currency).rate
+            #   USD PO → 1.0,  VND PO → 25,300,  SGD PO → 1.35
+            po_ccy_code = pr.ccy_code or 'VND'
+            _usd_rate = 1.0
+            if po_ccy_code == 'USD':
+                _usd_rate = 1.0
+            else:
+                try:
+                    from .currency import get_rate
+                    _rate_result = get_rate('USD', po_ccy_code)
+                    if _rate_result.rate > 0:
+                        _usd_rate = _rate_result.rate
+                    else:
+                        # Fallback: if PR currency is VND, use PR's rate as-is
+                        # because PR rate for VND is already "1 VND = 1 VND" → useless
+                        # Use hardcoded USD→VND fallback
+                        _usd_rate = 25_300.0 if po_ccy_code == 'VND' else 1.0
+                    logger.info(f"PO usd_exchange_rate: 1 USD = {_usd_rate} {po_ccy_code} "
+                                f"(source: {_rate_result.source})")
+                except Exception as e:
+                    logger.warning(f"Could not fetch USD rate for {po_ccy_code}: {e}")
+                    # Fallback: derive from PR's VND rate
+                    # PR rate = 1 [currency] = X VND, USD rate ≈ 25,300 VND
+                    # So [currency]/USD = PR_rate / 25,300
+                    pr_rate = float(pr.exchange_rate or 1)
+                    if po_ccy_code == 'VND':
+                        _usd_rate = 25_300.0
+                    elif pr_rate > 1:
+                        # Cross-rate via VND: 1 USD = 25,300 VND / (pr_rate VND/currency)
+                        _usd_rate = round(25_300.0 / pr_rate, 4) if pr_rate > 0 else 1.0
+                    else:
+                        _usd_rate = 1.0
+
             po_params = {
                 'po_num': '__TEMP__',
                 'po_order_type': _po_order_type,
                 'buyer': buyer_company_id,
                 'seller': seller_id,
                 'cur': pr.currency_id,
-                'rate': float(pr.exchange_rate or 1),
+                'rate': _usd_rate,
                 'note': po_settings.get('po_note_text')
                         or f'Auto-created from PR {pr.pr_number}',
                 'ext_ref': pr.pr_number,
@@ -1581,7 +1619,6 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 'trade_term': (po_settings.get('trade_term_id')
                                or (cb_header.trade_term_id if cb_header else None)),
                 # New fields
-                'vat_gst': po_settings.get('vat_gst'),
                 'notes_id': _notes_id,
                 'ship_to': po_settings.get('ship_to'),
                 'bill_to': po_settings.get('bill_to'),
@@ -1598,7 +1635,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     payment_term_id, trade_term_id,
                     from_country_id, to_country_id,
                     from_state_province_id, to_state_province_id,
-                    vat_gst, notes_id,
+                    notes_id,
                     ship_to, bill_to,
                     po_note, external_ref_number,
                     created_by, created_date,
@@ -1614,7 +1651,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     :payment_term, :trade_term,
                     :from_country, :to_country,
                     :from_state, :to_state,
-                    :vat_gst, :notes_id,
+                    :notes_id,
                     :ship_to, :bill_to,
                     :note, :ext_ref,
                     :by, NOW(),
@@ -1634,13 +1671,43 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
             for item in items:
                 buy_cost = float(item.unit_cost or 0)   # buying UOM cost (from PR)
                 buy_qty = float(item.quantity or 0)      # buying UOM qty (from PR)
-                rate = float(item.exchange_rate or 1)
+                # Item exchange_rate = same as PO header usd_exchange_rate
+                # (PO view uses po.usd_exchange_rate for all USD calcs, not item.exchange_rate)
+                item_rate = _usd_rate
                 cur_id = item.currency_id or pr.currency_id
 
                 pt_code = item.product_pt_code or item.pt_code or ''
                 std_uom = item.product_uom or item.uom or ''
                 buy_uom = item.cb_purchase_uom or std_uom
                 conversion = item.cb_conversion or None
+
+                # ── Conversion fallback ────────────────────────────
+                # If no costbook link on PR item, try to find conversion
+                # from the most recent active costbook for this product + vendor
+                if not conversion and item.product_id and pr.vendor_id:
+                    try:
+                        _cb_fallback = conn.execute(text("""
+                            SELECT cd.conversion, cd.purchase_uom, cd.product_uom
+                            FROM costbook_details cd
+                            JOIN costbooks cb ON cd.costbook_id = cb.id
+                            WHERE cd.product_id = :pid
+                              AND cb.vendor_id = :vid
+                              AND cd.delete_flag = 0
+                              AND cb.delete_flag = 0
+                              AND cd.is_active = 1
+                            ORDER BY cd.modified_date DESC
+                            LIMIT 1
+                        """), {'pid': item.product_id, 'vid': pr.vendor_id}).fetchone()
+                        if _cb_fallback:
+                            conversion = _cb_fallback.conversion or conversion
+                            if not buy_uom or buy_uom == std_uom:
+                                buy_uom = _cb_fallback.purchase_uom or buy_uom
+                            if not std_uom:
+                                std_uom = _cb_fallback.product_uom or std_uom
+                            logger.info(f"Conversion fallback for product {item.product_id}: "
+                                        f"conversion={conversion}, buy_uom={buy_uom}")
+                    except Exception as e:
+                        logger.debug(f"Conversion fallback lookup failed: {e}")
                 moq = float(item.cb_moq) if item.cb_moq else None
                 spq = float(item.cb_spq) if item.cb_spq else None
                 vat = float(item.cb_vat) if item.cb_vat else None
@@ -1680,7 +1747,9 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         purchaseuom, product_uom, conversion,
                         minimum_order_quantity, standard_pack_quantity,
                         vat_gst, customer_code,
-                        etd, eta, stock_owner_id,
+                        etd, adjust_etd, etd_update_count,
+                        eta, adjust_eta, eta_update_count,
+                        stock_owner_id,
                         purchase_order_price_type,
                         created_date, delete_flag, version
                     ) VALUES (
@@ -1692,7 +1761,9 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         :buy_uom, :std_uom, :conversion,
                         :moq, :spq,
                         :vat, :cust_code,
-                        :etd, :eta, :stock_owner,
+                        :etd, :etd, 0,
+                        :eta, :eta, 0,
+                        :stock_owner,
                         :price_type,
                         NOW(), b'0', 0
                     )
@@ -1704,7 +1775,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     'std_cost': std_cost,
                     'buy_qty': buy_qty,
                     'buy_cost': buy_cost,
-                    'rate': rate,
+                    'rate': item_rate,
                     'cur_id': cur_id,
                     'pn': pt_code,
                     'buy_uom': buy_uom,
