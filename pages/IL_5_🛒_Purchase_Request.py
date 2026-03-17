@@ -45,6 +45,12 @@ from utils.il_project.pr_queries import (
     validate_po_readiness,
     link_product_to_pr_item,
     search_products_for_linking,
+    # PO enrichment
+    get_payment_terms,
+    get_trade_terms,
+    get_contacts_for_company,
+    get_company_address,
+    get_po_enrichment_data,
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
@@ -2307,61 +2313,279 @@ def _dialog_confirm_po(pr_id: int):
     for b in other_blockers:
         st.error(f"❌ {b}")
 
-    # ── Step 5: PO Preview ─────────────────────────────────────────
-    if validation['ready']:
+    # ══════════════════════════════════════════════════════════════
+    # Only show header settings + item details when PO is ready
+    # ══════════════════════════════════════════════════════════════
+    if not validation['ready']:
         st.divider()
-        st.success("✅ **Sẵn sàng tạo PO** — tất cả items đã link product, vendor đã chọn.")
+        c1, c2 = st.columns(2)
+        c1.button("🛒 Create PO", disabled=True, use_container_width=True,
+                  help="Resolve tất cả blockers ở trên trước khi tạo PO")
+        if c2.button("✖ Cancel", use_container_width=True):
+            st.rerun()
+        return
 
-        # Preview items
-        items_df = get_pr_items_df(pr_id)
-        if not items_df.empty:
-            preview = items_df[['cogs_category', 'item_description', 'vendor_name',
-                                'quantity', 'unit_cost']].copy()
-            preview['amount'] = (items_df['quantity'] * items_df['unit_cost']).apply(
-                lambda v: f"{v:,.2f}")
-            st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(preview)+38, 200),
-                         column_config={
-                             'cogs_category': st.column_config.TextColumn('Cat', width=40),
-                             'item_description': st.column_config.TextColumn('Product'),
-                             'vendor_name': st.column_config.TextColumn('Vendor'),
-                             'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
-                             'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
-                             'amount': st.column_config.TextColumn('Amount'),
-                         })
+    # ── Load enrichment data from costbook ─────────────────────────
+    enrichment = get_po_enrichment_data(pr_id)
+    cb_defaults = enrichment.get('costbook_defaults', {})
+    enriched_items = enrichment.get('items', [])
 
-        st.markdown(f"**PO sẽ tạo cho:** Vendor **{pr.get('vendor_name', '—')}** | "
-                    f"Currency **{pr.get('currency_code', 'VND')}** | "
-                    f"Total **{fmt_vnd(pr.get('total_amount_vnd'))}**")
+    # ══════════════════════════════════════════════════════════════
+    # ④ PO Header Settings
+    # ══════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("##### ④ PO Header Settings")
 
-    # ── Step 6: Action buttons ─────────────────────────────────────
+    with st.container(border=True):
+        # Row 1: Payment Term + Trade Term
+        h1, h2 = st.columns(2)
+        payment_terms_list = get_payment_terms()
+        pt_names = ["(Auto from costbook)"] + [t['name'] for t in payment_terms_list]
+        _pt_default_name = cb_defaults.get('payment_term_name', '')
+        _pt_idx = pt_names.index(_pt_default_name) if _pt_default_name in pt_names else 0
+        sel_pt = h1.selectbox("Payment Term", pt_names, index=_pt_idx, key="po_payment_term",
+                              help=f"Costbook default: {_pt_default_name or '—'}")
+
+        trade_terms_list = get_trade_terms()
+        tt_names = ["(Auto from costbook)"] + [t['name'] for t in trade_terms_list]
+        _tt_default_name = cb_defaults.get('trade_term_name', '')
+        _tt_idx = tt_names.index(_tt_default_name) if _tt_default_name in tt_names else 0
+        sel_tt = h2.selectbox("Trade Term (Incoterm)", tt_names, index=_tt_idx, key="po_trade_term",
+                              help=f"Costbook default: {_tt_default_name or '—'}")
+
+        # Row 2: Contacts (buyer side — ship-to / bill-to)
+        _buyer_company_id = 1  # Prostech/Rozitek — same as create_po_from_pr default
+        buyer_contacts = get_contacts_for_company(_buyer_company_id)
+        bc_options = ["(None)"] + [
+            f"{c['full_name'].strip()} ({c.get('position', '') or c.get('email', '')})"
+            for c in buyer_contacts
+        ]
+        _bc_default_name = cb_defaults.get('buyer_contact_name', '').strip()
+
+        h3, h4 = st.columns(2)
+        sel_ship_contact = h3.selectbox("Ship-to Contact", bc_options, key="po_ship_contact",
+                                        help="Người nhận hàng tại công ty mua")
+        sel_bill_contact = h4.selectbox("Bill-to Contact", bc_options, key="po_bill_contact",
+                                        help="Người liên hệ thanh toán")
+
+        # Row 3: Addresses (auto-fill from company, editable)
+        _auto_addr = get_company_address(_buyer_company_id)
+        h5, h6 = st.columns(2)
+        ship_to_addr = h5.text_input("Ship-to Address", value=_auto_addr, key="po_ship_to",
+                                     help="Địa chỉ giao hàng (auto từ company)")
+        bill_to_addr = h6.text_input("Bill-to Address", value=_auto_addr, key="po_bill_to",
+                                     help="Địa chỉ xuất hóa đơn")
+
+        # Row 4: VAT + PO Notes
+        h7, h8 = st.columns(2)
+        _auto_vat = enrichment.get('dominant_vat')
+        _vat_help = "Cùng VAT tất cả items" if enrichment.get('all_vats_same') else "VAT khác nhau giữa items — nhập VAT chung cho PO header"
+        vat_pct = h7.number_input("VAT % (header)", value=float(_auto_vat or 0), min_value=0.0,
+                                  max_value=100.0, step=0.5, format="%.1f", key="po_vat",
+                                  help=_vat_help)
+
+        # Costbook important notes preview
+        _cb_notes = cb_defaults.get('important_notes_text', '')
+        if _cb_notes:
+            h8.caption(f"📋 Costbook notes: {_cb_notes[:100]}{'...' if len(_cb_notes) > 100 else ''}")
+
+        po_notes = st.text_area("PO Notes / Special Instructions (optional)",
+                                value=_cb_notes or '', height=70, key="po_notes",
+                                help="Ghi chú quan trọng cho PO — sẽ lưu vào bảng notes")
+
+    # ══════════════════════════════════════════════════════════════
+    # ⑤ Shipping & Delivery (ETD/ETA per item)
+    # ══════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("##### ⑤ Shipping & Delivery")
+
+    # Global defaults
+    with st.container(border=True):
+        g1, g2 = st.columns(2)
+        default_etd = g1.date_input("Default ETD (tất cả items)", value=None, key="po_default_etd",
+                                    help="Ngày dự kiến xuất hàng — áp dụng cho items chưa set riêng")
+        # Stock owner default = PM
+        emp_options = ["(None)"] + [f"{e['full_name']} (ID:{e['id']})" for e in employees]
+        _pm_name = emp_map.get(emp_int_id, '')
+        _pm_option = next((o for o in emp_options if f"ID:{emp_int_id})" in o), emp_options[0])
+        _pm_idx = emp_options.index(_pm_option) if _pm_option in emp_options else 0
+        default_stock_owner = g2.selectbox("Stock Owner (default)", emp_options,
+                                           index=_pm_idx, key="po_stock_owner",
+                                           help="Người chịu trách nhiệm inventory — mặc định PM")
+
+    # Per-item details
+    items_df = get_pr_items_df(pr_id)
+    _item_etd_eta = {}  # Collect per-item settings
+
+    if enriched_items:
+        st.caption(f"📦 {len(enriched_items)} items — expand để set ETD/ETA riêng")
+        for idx, eit in enumerate(enriched_items):
+            item_id = eit.get('item_id')
+            desc = (eit.get('item_description', '') or '')[:50]
+            pt = eit.get('pt_code', '') or ''
+
+            # Lead time info from costbook
+            lt_num = eit.get('cb_lead_time_number', '')
+            lt_min = eit.get('cb_lead_time_min')
+            lt_max = eit.get('cb_lead_time_max')
+            lt_uom = eit.get('cb_lead_time_uom', '')
+            shipping_mode = eit.get('cb_shipping_mode_name', '') or eit.get('cb_shipping_mode_code', '')
+            pkg = eit.get('cb_package_size') or eit.get('product_package_size', '')
+            hs = eit.get('cb_hs_code') or eit.get('product_hs_code', '')
+            price_type = eit.get('cb_price_type', '')
+
+            # Build info badges
+            info_parts = []
+            if lt_min and lt_max:
+                info_parts.append(f"⏱ {lt_min}-{lt_max} {lt_uom}")
+            elif lt_num:
+                info_parts.append(f"⏱ {lt_num} {lt_uom}")
+            if shipping_mode:
+                info_parts.append(f"🚢 {shipping_mode}")
+            if pkg:
+                info_parts.append(f"📦 {pkg}")
+            if price_type:
+                info_parts.append(f"💰 {price_type}")
+            info_str = ' &nbsp;|&nbsp; '.join(info_parts)
+
+            with st.expander(f"**{pt}** — {desc}" + (f" &nbsp; {info_str}" if info_parts else ""),
+                             expanded=False):
+                ic1, ic2 = st.columns(2)
+                _etd = ic1.date_input("ETD", value=default_etd, key=f"po_etd_{item_id}",
+                                      help=f"Lead time: {lt_num or lt_min or '—'} {lt_uom}")
+
+                # Auto-calc ETA from ETD + lead time
+                _eta_default = None
+                if _etd:
+                    from datetime import timedelta
+                    _lt_days = 0
+                    try:
+                        _lt_val = int(lt_max or lt_num or lt_min or 0)
+                        _lt_u = (lt_uom or '').lower()
+                        if 'week' in _lt_u:
+                            _lt_days = _lt_val * 7
+                        elif 'month' in _lt_u:
+                            _lt_days = _lt_val * 30
+                        else:
+                            _lt_days = _lt_val
+                    except (ValueError, TypeError):
+                        _lt_days = 14  # fallback 2 weeks
+                    if _lt_days > 0:
+                        _eta_default = _etd + timedelta(days=_lt_days)
+
+                _eta = ic2.date_input("ETA", value=_eta_default, key=f"po_eta_{item_id}",
+                                      help="Ngày dự kiến nhận hàng — auto từ ETD + lead time")
+
+                # Display read-only info
+                if info_parts:
+                    st.caption(info_str)
+                if hs:
+                    st.caption(f"🏷️ HS Code: {hs}")
+
+                _item_etd_eta[str(item_id)] = {
+                    'etd': datetime.combine(_etd, datetime.min.time()) if _etd else None,
+                    'eta': datetime.combine(_eta, datetime.min.time()) if _eta else None,
+                }
+
+    # ══════════════════════════════════════════════════════════════
+    # ⑥ PO Preview + Create
+    # ══════════════════════════════════════════════════════════════
+    st.divider()
+    st.success("✅ **Sẵn sàng tạo PO** — tất cả items đã link product, vendor đã chọn.")
+
+    # Preview items table
+    if not items_df.empty:
+        preview = items_df[['cogs_category', 'item_description', 'vendor_name',
+                            'quantity', 'unit_cost']].copy()
+        preview['amount'] = (items_df['quantity'] * items_df['unit_cost']).apply(
+            lambda v: f"{v:,.2f}")
+        st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(preview)+38, 200),
+                     column_config={
+                         'cogs_category': st.column_config.TextColumn('Cat', width=40),
+                         'item_description': st.column_config.TextColumn('Product'),
+                         'vendor_name': st.column_config.TextColumn('Vendor'),
+                         'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
+                         'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
+                         'amount': st.column_config.TextColumn('Amount'),
+                     })
+
+    st.markdown(f"**PO sẽ tạo cho:** Vendor **{pr.get('vendor_name', '—')}** | "
+                f"Currency **{pr.get('currency_code', 'VND')}** | "
+                f"Total **{fmt_vnd(pr.get('total_amount_vnd'))}**")
+
+    # ── Action buttons ─────────────────────────────────────────────
     st.divider()
     _po_cc = _cc_email_selector("po_create", label="📧 CC thêm (e.g. finance, optional)")
 
     c1, c2 = st.columns(2)
-    if validation['ready']:
-        if c1.button("🛒 Create PO", type="primary", use_container_width=True):
-            keycloak_id = st.session_state.get('user_keycloak_id', user_id)
-            result = create_po_from_pr(pr_id, 1, keycloak_id)
-            if result['success']:
-                st.success(f"✅ {result['message']}")
-                notify_po_created(
-                    pr_number=pr['pr_number'], po_number=result['po_number'],
-                    project_code=pr.get('project_code', ''),
-                    total_vnd=float(pr.get('total_amount_vnd') or 0),
-                    vendor_name=pr.get('vendor_name', ''),
-                    requester_email=pr.get('requester_email', ''),
-                    requester_name=pr.get('requester_name', ''),
-                    pm_email=get_project_pm_email(pr['project_id']),
-                    cc_emails=_po_cc,
-                    app_url=_pr_link(pr_id, 'view'),
-                )
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error(f"❌ {result['message']}")
-    else:
-        c1.button("🛒 Create PO", disabled=True, use_container_width=True,
-                  help="Resolve tất cả blockers ở trên trước khi tạo PO")
+    if c1.button("🛒 Create PO", type="primary", use_container_width=True):
+        # ── Collect all settings from UI ──────────────────────
+        # Payment term
+        _sel_pt_id = None
+        if sel_pt != "(Auto from costbook)":
+            _sel_pt_id = next((t['id'] for t in payment_terms_list if t['name'] == sel_pt), None)
+
+        # Trade term
+        _sel_tt_id = None
+        if sel_tt != "(Auto from costbook)":
+            _sel_tt_id = next((t['id'] for t in trade_terms_list if t['name'] == sel_tt), None)
+
+        # Contacts
+        _ship_contact_id = None
+        if sel_ship_contact != "(None)" and buyer_contacts:
+            _sc_idx = bc_options.index(sel_ship_contact) - 1  # offset for (None)
+            if 0 <= _sc_idx < len(buyer_contacts):
+                _ship_contact_id = buyer_contacts[_sc_idx]['id']
+
+        _bill_contact_id = None
+        if sel_bill_contact != "(None)" and buyer_contacts:
+            _bc_idx = bc_options.index(sel_bill_contact) - 1
+            if 0 <= _bc_idx < len(buyer_contacts):
+                _bill_contact_id = buyer_contacts[_bc_idx]['id']
+
+        # Stock owner
+        _stock_owner_id = None
+        if default_stock_owner != "(None)":
+            try:
+                _stock_owner_id = int(default_stock_owner.split("ID:")[1].rstrip(")"))
+            except (ValueError, IndexError):
+                _stock_owner_id = emp_int_id  # fallback to PM
+
+        # Inject stock_owner into all item_settings
+        for k in _item_etd_eta:
+            _item_etd_eta[k]['stock_owner_id'] = _stock_owner_id
+
+        po_settings = {
+            'payment_term_id': _sel_pt_id,
+            'trade_term_id': _sel_tt_id,
+            'ship_to_contact_id': _ship_contact_id,
+            'bill_to_contact_id': _bill_contact_id,
+            'ship_to': ship_to_addr if ship_to_addr != '—' else None,
+            'bill_to': bill_to_addr if bill_to_addr != '—' else None,
+            'vat_gst': vat_pct if vat_pct > 0 else None,
+            'po_notes': po_notes if po_notes.strip() else '',
+            'item_settings': _item_etd_eta,
+        }
+
+        keycloak_id = st.session_state.get('user_keycloak_id', user_id)
+        result = create_po_from_pr(pr_id, 1, keycloak_id, po_settings=po_settings)
+        if result['success']:
+            st.success(f"✅ {result['message']}")
+            notify_po_created(
+                pr_number=pr['pr_number'], po_number=result['po_number'],
+                project_code=pr.get('project_code', ''),
+                total_vnd=float(pr.get('total_amount_vnd') or 0),
+                vendor_name=pr.get('vendor_name', ''),
+                requester_email=pr.get('requester_email', ''),
+                requester_name=pr.get('requester_name', ''),
+                pm_email=get_project_pm_email(pr['project_id']),
+                cc_emails=_po_cc,
+                app_url=_pr_link(pr_id, 'view'),
+            )
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            st.error(f"❌ {result['message']}")
 
     if c2.button("✖ Cancel", use_container_width=True):
         st.rerun()

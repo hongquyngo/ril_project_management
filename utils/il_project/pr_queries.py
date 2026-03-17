@@ -1320,7 +1320,8 @@ def validate_po_readiness(pr_id: int) -> Dict:
 # CREATE PO FROM APPROVED PR
 # ══════════════════════════════════════════════════════════════════════
 
-def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: str) -> Dict:
+def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: str,
+                      po_settings: Optional[Dict] = None) -> Dict:
     """
     Create a PO in purchase_orders + product_purchase_orders from an approved PR.
 
@@ -1337,9 +1338,31 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
         pr_id: IL purchase request ID
         buyer_company_id: Prostech/Rozitek company ID
         created_by_keycloak: keycloak_id of the creator (must match employees.keycloak_id)
+        po_settings: Optional dict from Confirm PO dialog with overrides:
+            {
+                # PO header overrides
+                'payment_term_id': int|None,
+                'trade_term_id': int|None,
+                'ship_to_contact_id': int|None,
+                'bill_to_contact_id': int|None,
+                'ship_to': str|None,          # shipping address text
+                'bill_to': str|None,           # billing address text
+                'vat_gst': float|None,         # header-level VAT %
+                'po_notes': str|None,          # → notes table
+                'purchase_order_type': str|None, # REGULAR_ORDER|SAMPLE_ORDER|MIXED_ORDER
+                # Per-item overrides: {item_id: {etd, eta, stock_owner_id}}
+                'item_settings': {
+                    <item_id>: {
+                        'etd': datetime|None,
+                        'eta': datetime|None,
+                        'stock_owner_id': int|None,
+                    }, ...
+                },
+            }
 
     Returns: {success, po_id, po_number, message}
     """
+    po_settings = po_settings or {}
     try:
         with _get_transaction() as conn:
             # ── 1. Validate PR ─────────────────────────────────────
@@ -1364,6 +1387,8 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     cur.code AS item_ccy_code,
                     p.pt_code AS product_pt_code,
                     p.uom AS product_uom,
+                    p.package_size AS product_package_size,
+                    p.hs_code AS product_hs_code,
                     -- Costbook detail enrichment
                     cd.minimum_order_quantity AS cb_moq,
                     cd.standard_pack_quantity AS cb_spq,
@@ -1371,11 +1396,21 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     cd.product_uom AS cb_product_uom,
                     cd.conversion AS cb_conversion,
                     cd.vat AS cb_vat,
-                    cd.costbook_id AS cb_costbook_id
+                    cd.costbook_id AS cb_costbook_id,
+                    cd.package_size AS cb_package_size,
+                    cd.hs_code AS cb_hs_code,
+                    cd.lead_time_number AS cb_lead_time_number,
+                    cd.lead_time_min AS cb_lead_time_min,
+                    cd.lead_time_max AS cb_lead_time_max,
+                    cd.lead_time_uom AS cb_lead_time_uom,
+                    cd.price_type AS cb_price_type,
+                    cd.shipping_mode_id AS cb_shipping_mode_id,
+                    sm.code AS cb_shipping_mode_code
                 FROM il_purchase_request_items pri
                 LEFT JOIN currencies cur ON pri.currency_id = cur.id
                 LEFT JOIN products p ON pri.product_id = p.id
                 LEFT JOIN costbook_details cd ON pri.costbook_detail_id = cd.id
+                LEFT JOIN shipping_modes sm ON cd.shipping_mode_id = sm.id
                 WHERE pri.pr_id = :prid AND pri.delete_flag = 0
                 ORDER BY pri.view_order, pri.id
             """), {'prid': pr_id}).fetchall()
@@ -1406,7 +1441,8 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         cb.vendor_contact_id AS seller_contact_id,
                         cb.buyer_contact_id,
                         cb.from_country_id,
-                        cb.to_country_id
+                        cb.to_country_id,
+                        cb.important_notes_id
                     FROM costbooks cb
                     WHERE cb.id = :cbid AND cb.delete_flag = 0
                 """), {'cbid': dominant_cb_id}).fetchone()
@@ -1426,14 +1462,45 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
             today_str = datetime.now().strftime('%Y%m%d')
             seller_id = pr.vendor_id
 
-            # Build params — always present
+            # Determine purchase_order_type from costbook price_types
+            _po_order_type = po_settings.get('purchase_order_type')
+            if not _po_order_type:
+                price_types = set(
+                    it.cb_price_type for it in items
+                    if hasattr(it, 'cb_price_type') and it.cb_price_type
+                )
+                if len(price_types) == 0:
+                    _po_order_type = 'REGULAR_ORDER'
+                elif len(price_types) == 1:
+                    pt = price_types.pop()
+                    _po_order_type = 'SAMPLE_ORDER' if pt == 'SAMPLE' else 'REGULAR_ORDER'
+                else:
+                    _po_order_type = 'MIXED_ORDER'
+
+            # Create notes record if PO notes provided
+            _notes_id = None
+            _po_notes_text = po_settings.get('po_notes', '').strip()
+            if _po_notes_text:
+                _notes_result = conn.execute(text("""
+                    INSERT INTO notes (name, notes, creator, created_date, delete_flag, version)
+                    VALUES ('PO Note', :notes, :creator, NOW(), b'0', 0)
+                """), {'notes': _po_notes_text, 'creator': created_by_keycloak})
+                _notes_id = _notes_result.lastrowid
+            elif cb_header and getattr(cb_header, 'important_notes_id', None):
+                _notes_id = cb_header.important_notes_id
+
+            # Build params — merging costbook defaults with UI overrides
+            _item_settings = po_settings.get('item_settings', {})
+
             po_params = {
                 'po_num': '__TEMP__',
+                'po_order_type': _po_order_type,
                 'buyer': buyer_company_id,
                 'seller': seller_id,
                 'cur': pr.currency_id,
                 'rate': float(pr.exchange_rate or 1),
-                'note': f'Auto-created from PR {pr.pr_number}',
+                'note': po_settings.get('po_note_text')
+                        or f'Auto-created from PR {pr.pr_number}',
                 'ext_ref': pr.pr_number,
                 'by': created_by_keycloak,
                 # Ship-to & bill-to default to buyer company
@@ -1446,11 +1513,24 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                                else (buyer_info.country_id if buyer_info else None)),
                 'from_state': (vendor_info.state_province_id if vendor_info else None),
                 'to_state': (buyer_info.state_province_id if buyer_info else None),
-                # Contacts & terms from costbook
-                'seller_contact': (cb_header.seller_contact_id if cb_header else None),
-                'buyer_contact': (cb_header.buyer_contact_id if cb_header else None),
-                'payment_term': (cb_header.payment_term_id if cb_header else None),
-                'trade_term': (cb_header.trade_term_id if cb_header else None),
+                # Contacts — UI override > costbook default
+                'seller_contact': (po_settings.get('seller_contact_id')
+                                   or (cb_header.seller_contact_id if cb_header else None)),
+                'buyer_contact': (po_settings.get('buyer_contact_id')
+                                  or (cb_header.buyer_contact_id if cb_header else None)),
+                # Ship-to / bill-to contacts — from UI
+                'ship_to_contact': po_settings.get('ship_to_contact_id'),
+                'bill_to_contact': po_settings.get('bill_to_contact_id'),
+                # Terms — UI override > costbook default
+                'payment_term': (po_settings.get('payment_term_id')
+                                 or (cb_header.payment_term_id if cb_header else None)),
+                'trade_term': (po_settings.get('trade_term_id')
+                               or (cb_header.trade_term_id if cb_header else None)),
+                # New fields
+                'vat_gst': po_settings.get('vat_gst'),
+                'notes_id': _notes_id,
+                'ship_to': po_settings.get('ship_to'),
+                'bill_to': po_settings.get('bill_to'),
             }
 
             po_result = conn.execute(text("""
@@ -1459,22 +1539,28 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     buyer_company_id, seller_company_id,
                     buyer_contact_id, seller_contact_id,
                     ship_to_company_id, bill_to_company_id,
+                    ship_to_contact_id, bill_to_contact_id,
                     currency_id, usd_exchange_rate,
                     payment_term_id, trade_term_id,
                     from_country_id, to_country_id,
                     from_state_province_id, to_state_province_id,
+                    vat_gst, notes_id,
+                    ship_to, bill_to,
                     po_note, external_ref_number,
                     created_by, created_date,
                     delete_flag, version
                 ) VALUES (
-                    NOW(), :po_num, 'INTERNAL', 'REGULAR_ORDER',
+                    NOW(), :po_num, 'INTERNAL', :po_order_type,
                     :buyer, :seller,
                     :buyer_contact, :seller_contact,
                     :ship_to_company, :bill_to_company,
+                    :ship_to_contact, :bill_to_contact,
                     :cur, :rate,
                     :payment_term, :trade_term,
                     :from_country, :to_country,
                     :from_state, :to_state,
+                    :vat_gst, :notes_id,
+                    :ship_to, :bill_to,
                     :note, :ext_ref,
                     :by, NOW(),
                     b'0', 0
@@ -1504,6 +1590,17 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 vat = float(item.cb_vat) if item.cb_vat else None
                 customer_code = item.vendor_quote_ref or None
 
+                # Per-item settings from UI (ETD, ETA, stock_owner)
+                _isettings = _item_settings.get(str(item.id), _item_settings.get(item.id, {}))
+                _etd = _isettings.get('etd')
+                _eta = _isettings.get('eta')
+                _stock_owner = _isettings.get('stock_owner_id')
+
+                # Price type from costbook
+                _price_type = 'ALL'
+                if hasattr(item, 'cb_price_type') and item.cb_price_type:
+                    _price_type = item.cb_price_type  # STANDARD, SPECIAL, SAMPLE
+
                 conn.execute(text("""
                     INSERT INTO product_purchase_orders (
                         purchase_order_id, product_id, product_costbook_id,
@@ -1514,6 +1611,8 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         purchaseuom, product_uom, conversion,
                         minimum_order_quantity, standard_pack_quantity,
                         vat_gst, customer_code,
+                        etd, eta, stock_owner_id,
+                        purchase_order_price_type,
                         created_date, delete_flag, version
                     ) VALUES (
                         :po_id, :prod_id, :costbook_id,
@@ -1524,6 +1623,8 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                         :buy_uom, :std_uom, :conversion,
                         :moq, :spq,
                         :vat, :cust_code,
+                        :etd, :eta, :stock_owner,
+                        :price_type,
                         NOW(), b'0', 0
                     )
                 """), {
@@ -1542,6 +1643,10 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     'spq': spq,
                     'vat': vat,
                     'cust_code': customer_code,
+                    'etd': _etd,
+                    'eta': _eta,
+                    'stock_owner': _stock_owner,
+                    'price_type': _price_type,
                 })
 
             # ── 7. Update PR → link to PO ──────────────────────────
@@ -1584,6 +1689,201 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
     except Exception as e:
         logger.error(f"create_po_from_pr failed: {e}")
         return {'success': False, 'message': str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PO CREATION HELPERS — Lookups & Enrichment for Confirm PO dialog
+# ══════════════════════════════════════════════════════════════════════
+
+def get_payment_terms() -> List[Dict]:
+    """Payment terms for PO header selector."""
+    return _execute_query("""
+        SELECT id, name, description
+        FROM payment_terms
+        WHERE delete_flag = 0
+        ORDER BY name
+    """)
+
+
+def get_trade_terms() -> List[Dict]:
+    """Trade terms (Incoterms) for PO header selector."""
+    return _execute_query("""
+        SELECT id, name, description
+        FROM trade_terms
+        WHERE delete_flag = 0
+        ORDER BY name
+    """)
+
+
+def get_contacts_for_company(company_id: int) -> List[Dict]:
+    """Contacts belonging to a company — for ship-to/bill-to contact selectors."""
+    return _execute_query("""
+        SELECT
+            c.id,
+            CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,'')) AS full_name,
+            c.email,
+            c.phone,
+            p.name AS position
+        FROM contacts c
+        LEFT JOIN positions p ON c.position_id = p.id
+        WHERE c.company_id = :cid AND c.delete_flag = 0
+        ORDER BY c.first_name, c.last_name
+    """, {'cid': company_id})
+
+
+def get_company_address(company_id: int) -> str:
+    """Build address string from company record. Returns '—' if not found."""
+    try:
+        rows = _execute_query("""
+            SELECT
+                c.english_name,
+                c.street,
+                c.zip_code,
+                s.name AS state_name,
+                co.name AS country_name
+            FROM companies c
+            LEFT JOIN states s     ON c.state_province_id = s.id
+            LEFT JOIN countries co ON c.country_id = co.id
+            WHERE c.id = :cid
+            LIMIT 1
+        """, {'cid': company_id})
+        if not rows:
+            return '—'
+        r = rows[0]
+        parts = [p for p in [
+            r.get('street'),
+            r.get('state_name'),
+            r.get('zip_code'),
+            r.get('country_name'),
+        ] if p]
+        return ', '.join(parts) if parts else '—'
+    except Exception:
+        return '—'
+
+
+def create_po_note(note_text: str, creator: str) -> Optional[int]:
+    """Insert into notes table, return id. Used for PO important notes."""
+    if not note_text or not note_text.strip():
+        return None
+    try:
+        engine = _get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                INSERT INTO notes (name, notes, creator, created_date, delete_flag, version)
+                VALUES ('PO Note', :notes, :creator, NOW(), b'0', 0)
+            """), {'notes': note_text.strip(), 'creator': creator})
+            conn.commit()
+            return result.lastrowid
+    except Exception as e:
+        logger.error(f"create_po_note failed: {e}")
+        return None
+
+
+def get_po_enrichment_data(pr_id: int) -> Dict:
+    """
+    Fetch enrichment data for the PO creation dialog UI.
+    Returns costbook defaults + per-item lead time/shipping info.
+
+    Used by _dialog_confirm_po() to pre-fill PO Header Settings
+    and Shipping & Delivery sections.
+
+    Returns:
+        {
+            'costbook_defaults': {    # from dominant costbook header
+                'payment_term_id', 'payment_term_name',
+                'trade_term_id', 'trade_term_name',
+                'seller_contact_id', 'seller_contact_name',
+                'buyer_contact_id', 'buyer_contact_name',
+                'important_notes_id', 'important_notes_text',
+            },
+            'items': [                # per-item enrichment
+                {
+                    'item_id', 'item_description', 'pt_code',
+                    'cb_package_size', 'product_package_size',
+                    'cb_hs_code', 'product_hs_code',
+                    'cb_lead_time_number', 'cb_lead_time_min', 'cb_lead_time_max',
+                    'cb_lead_time_uom',
+                    'cb_shipping_mode_code', 'cb_shipping_mode_name',
+                    'cb_price_type', 'cb_vat',
+                },
+            ],
+            'dominant_vat': float|None,   # most common VAT across items
+            'all_vats_same': bool,
+        }
+    """
+    items = _execute_query("""
+        SELECT
+            pri.id AS item_id,
+            pri.item_description,
+            pri.pt_code,
+            pri.costbook_detail_id,
+            -- Costbook detail enrichment
+            cd.package_size AS cb_package_size,
+            cd.hs_code AS cb_hs_code,
+            cd.lead_time_number AS cb_lead_time_number,
+            cd.lead_time_min AS cb_lead_time_min,
+            cd.lead_time_max AS cb_lead_time_max,
+            cd.lead_time_uom AS cb_lead_time_uom,
+            cd.price_type AS cb_price_type,
+            cd.vat AS cb_vat,
+            cd.costbook_id AS cb_costbook_id,
+            cd.shipping_mode_id AS cb_shipping_mode_id,
+            sm.code AS cb_shipping_mode_code,
+            sm.name AS cb_shipping_mode_name,
+            -- Product enrichment
+            p.package_size AS product_package_size,
+            p.hs_code AS product_hs_code
+        FROM il_purchase_request_items pri
+        LEFT JOIN costbook_details cd ON pri.costbook_detail_id = cd.id
+        LEFT JOIN shipping_modes sm   ON cd.shipping_mode_id = sm.id
+        LEFT JOIN products p          ON pri.product_id = p.id
+        WHERE pri.pr_id = :prid AND pri.delete_flag = 0
+        ORDER BY pri.view_order, pri.id
+    """, {'prid': pr_id})
+
+    # Find dominant costbook for header defaults
+    cb_ids = [it.get('cb_costbook_id') for it in items if it.get('cb_costbook_id')]
+    costbook_defaults = {}
+    if cb_ids:
+        from collections import Counter
+        dominant_cb_id = Counter(cb_ids).most_common(1)[0][0]
+        cb_rows = _execute_query("""
+            SELECT
+                cb.payment_term_id,
+                pt.name AS payment_term_name,
+                cb.trade_term_id,
+                tt.name AS trade_term_name,
+                cb.vendor_contact_id AS seller_contact_id,
+                CONCAT(COALESCE(sc.first_name,''), ' ', COALESCE(sc.last_name,'')) AS seller_contact_name,
+                cb.buyer_contact_id,
+                CONCAT(COALESCE(bc.first_name,''), ' ', COALESCE(bc.last_name,'')) AS buyer_contact_name,
+                cb.important_notes_id,
+                n.notes AS important_notes_text
+            FROM costbooks cb
+            LEFT JOIN payment_terms pt ON cb.payment_term_id = pt.id
+            LEFT JOIN trade_terms tt   ON cb.trade_term_id = tt.id
+            LEFT JOIN contacts sc      ON cb.vendor_contact_id = sc.id
+            LEFT JOIN contacts bc      ON cb.buyer_contact_id = bc.id
+            LEFT JOIN notes n          ON cb.important_notes_id = n.id
+            WHERE cb.id = :cbid AND cb.delete_flag = 0
+        """, {'cbid': dominant_cb_id})
+        if cb_rows:
+            costbook_defaults = dict(cb_rows[0])
+
+    # Determine dominant VAT
+    vats = [float(it['cb_vat']) for it in items if it.get('cb_vat') is not None]
+    dominant_vat = None
+    all_vats_same = False
+    if vats:
+        dominant_vat = max(set(vats), key=vats.count)
+        all_vats_same = len(set(vats)) == 1
+
+    return {
+        'costbook_defaults': costbook_defaults,
+        'items': [dict(it) for it in items],
+        'dominant_vat': dominant_vat,
+        'all_vats_same': all_vats_same,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════
