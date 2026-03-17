@@ -49,6 +49,7 @@ from utils.il_project.email_notify import (
     notify_pr_revision_requested,
     notify_po_created,
     notify_pr_cancelled,
+    notify_pr_reminder,
 )
 
 logger = logging.getLogger(__name__)
@@ -1834,6 +1835,38 @@ def _dialog_pr_view(pr_id: int):
             st.session_state['confirm_create_po'] = pr_id
             st.rerun()
 
+    if pr['status'] == 'PENDING_APPROVAL' and (is_my_pr or is_pm_of_project or is_admin):
+        if ac2.button("📧 Remind Approver", use_container_width=True):
+            from utils.il_project.pr_queries import get_current_approver
+            cur_app = get_current_approver(pr_id)
+            if cur_app:
+                _days = 0
+                if pr.get('submitted_date'):
+                    try:
+                        _days = (pd.Timestamp.now() - pd.Timestamp(pr['submitted_date'])).days
+                    except Exception:
+                        pass
+                _budget = get_budget_vs_pr(pr['project_id'])
+                notify_pr_reminder(
+                    pr_number=pr['pr_number'],
+                    project_code=pr.get('project_code', ''),
+                    total_vnd=float(pr.get('total_amount_vnd') or 0),
+                    requester_name=pr.get('requester_name', ''),
+                    requester_email=pr.get('requester_email', ''),
+                    approver_name=cur_app['approver_name'],
+                    approver_email=cur_app['approver_email'],
+                    approval_level=int(pr.get('current_approval_level', 1)),
+                    max_level=int(pr.get('max_approval_level', 1)),
+                    days_pending=_days,
+                    priority=pr.get('priority', 'NORMAL'),
+                    justification=pr.get('justification', ''),
+                    budget_data=_budget,
+                    app_url=_pr_link(pr_id, 'approve'),
+                )
+                st.success(f"📧 Nhắc nhở đã gửi đến **{cur_app['approver_name']}** ({cur_app['approver_email']})")
+            else:
+                st.warning("Không tìm thấy approver hiện tại.")
+
     if pr.get('po_number'):
         ac3.success(f"PO: **{pr['po_number']}**")
 
@@ -2350,6 +2383,42 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
             if cols[col_idx].button("🛒 Create PO", use_container_width=True, key="my_po"):
                 st.session_state['confirm_create_po'] = int(row['pr_id'])
                 st.rerun(scope="app")
+            col_idx += 1
+
+        # PENDING_APPROVAL: Remind approver
+        elif row['status'] == 'PENDING_APPROVAL':
+            if cols[col_idx].button("📧 Remind", use_container_width=True, key="my_remind"):
+                from utils.il_project.pr_queries import get_current_approver
+                cur_app = get_current_approver(int(row['pr_id']))
+                if cur_app:
+                    pr_full = get_pr(int(row['pr_id']))
+                    _days = 0
+                    if row.get('submitted_date'):
+                        try:
+                            _days = (pd.Timestamp.now() - pd.Timestamp(row['submitted_date'])).days
+                        except Exception:
+                            pass
+                    _budget = get_budget_vs_pr(int(row.get('project_id', 0)))
+                    notify_pr_reminder(
+                        pr_number=row['pr_number'],
+                        project_code=row.get('project_code', ''),
+                        total_vnd=float(row.get('total_amount_vnd') or 0),
+                        requester_name=row.get('requester_name', ''),
+                        requester_email=pr_full.get('requester_email', '') if pr_full else '',
+                        approver_name=cur_app['approver_name'],
+                        approver_email=cur_app['approver_email'],
+                        approval_level=int(row.get('current_approval_level', 1)),
+                        max_level=int(row.get('max_approval_level', 1)),
+                        days_pending=_days,
+                        priority=row.get('priority', 'NORMAL'),
+                        justification=pr_full.get('justification', '') if pr_full else '',
+                        budget_data=_budget,
+                        app_url=_pr_link(int(row['pr_id']), 'approve'),
+                    )
+                    st.success(f"📧 Nhắc nhở đã gửi đến **{cur_app['approver_name']}**")
+                    st.rerun(scope="app")
+                else:
+                    st.warning("Không tìm thấy approver hiện tại.")
             col_idx += 1
 
         # Deselect (always last)

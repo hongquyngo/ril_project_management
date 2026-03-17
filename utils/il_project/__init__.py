@@ -104,6 +104,7 @@ from .email_notify import (
     notify_pr_revision_requested,
     notify_po_created,
     notify_pr_cancelled,
+    notify_pr_reminder,
     build_pr_deep_link,
 )
 
@@ -185,6 +186,7 @@ __all__ = [
     'notify_pr_submitted', 'notify_pr_approved', 'notify_pr_rejected',
     'notify_pr_revision_requested', 'notify_po_created',
     'notify_pr_cancelled',
+    'notify_pr_reminder',
     'build_pr_deep_link',
     # ── Purchase Request ──
     'generate_pr_number',

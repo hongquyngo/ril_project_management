@@ -692,3 +692,71 @@ def notify_pr_cancelled(
         html_body=_base_template("Purchase Request — Cancelled", body, app_url),
         cc_emails=_merge_cc(pm_email, pending_approver_email, cc_emails, exclude=[requester_email]),
     )
+
+
+def notify_pr_reminder(
+    pr_number: str,
+    project_code: str,
+    total_vnd: float,
+    requester_name: str,
+    requester_email: str,
+    approver_name: str,
+    approver_email: str,
+    approval_level: int,
+    max_level: int,
+    days_pending: int,
+    priority: str = 'NORMAL',
+    justification: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
+    budget_data: Optional[Dict] = None,
+    app_url: Optional[str] = None,
+) -> bool:
+    """
+    Send reminder to current approver for a pending PR.
+    Triggered manually by requester/PM — no status change.
+    CC requester automatically.
+    """
+    if not _is_configured():
+        return False
+
+    priority_badge = {
+        'URGENT': '🔴 URGENT', 'HIGH': '🔼 HIGH',
+        'NORMAL': '➖ Normal', 'LOW': '🔽 Low',
+    }.get(priority, priority)
+
+    urgency = ''
+    if days_pending > 7:
+        urgency = f'<div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;font-weight:600;">⚠️ PR này đã chờ phê duyệt <strong>{days_pending} ngày</strong>.</div>'
+    elif days_pending > 3:
+        urgency = f'<div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;margin:16px 0;font-size:13px;">⏰ PR này đã chờ phê duyệt <strong>{days_pending} ngày</strong>.</div>'
+
+    body = f'''
+    <p>Xin chào <strong>{approver_name}</strong>,</p>
+    <p>Đây là email nhắc nhở — Purchase Request sau đang chờ phê duyệt của bạn:</p>
+    
+    {urgency}
+    
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
+        {_info_row('Project', project_code)}
+        {_info_row('Requester', requester_name)}
+        {_info_row('Total Amount', f'<strong style="color:#1e3a5f;">{_fmt_vnd(total_vnd)}</strong>')}
+        {_info_row('Priority', priority_badge)}
+        {_info_row('Approval Level', f'{approval_level} / {max_level}')}
+        {_info_row('Pending since', f'{days_pending} ngày')}
+    </table>
+    
+    {f'<div style="background:#f0f9ff;border-left:3px solid #3b82f6;padding:12px;margin:16px 0;font-size:13px;"><strong>Justification:</strong> {justification}</div>' if justification else ''}
+    
+    {_budget_comparison_table(budget_data)}
+    
+    <p style="color:#6b7280;font-size:13px;">
+        Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
+    </p>'''
+
+    return _send_email(
+        to_emails=[approver_email],
+        subject=f"[PR Reminder] {pr_number} — {project_code} — {_fmt_vnd(total_vnd)} ({days_pending}d pending)",
+        html_body=_base_template("Purchase Request — Reminder", body, app_url),
+        cc_emails=_merge_cc(requester_email, cc_emails, exclude=[approver_email]),
+    )
