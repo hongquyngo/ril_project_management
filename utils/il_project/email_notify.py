@@ -399,8 +399,8 @@ def notify_pr_submitted(
     }.get(priority, priority)
 
     body = f'''
-    <p>Xin chào <strong>{approver_name}</strong>,</p>
-    <p>Một Purchase Request mới cần phê duyệt của bạn:</p>
+    <p>Hi <strong>{approver_name}</strong>,</p>
+    <p>A new Purchase Request requires your approval:</p>
     
     <table style="width:100%;margin:16px 0;">
         {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
@@ -419,7 +419,7 @@ def notify_pr_submitted(
     {_budget_comparison_table(budget_data)}
     
     <p style="color:#6b7280;font-size:13px;">
-        Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
+        Please log in to the ERP system to review and approve.
     </p>'''
 
     return _send_email(
@@ -459,14 +459,14 @@ def notify_pr_approved(
     # Notify requester
     if is_final:
         status_html = '<span style="color:#16a34a;font-weight:700;">✅ APPROVED (Final)</span>'
-        action_note = 'Bạn có thể tạo Purchase Order từ PR này.'
+        action_note = 'You can now create a Purchase Order from this PR.'
     else:
         status_html = f'<span style="color:#2563eb;font-weight:700;">✅ Approved at Level {approval_level}</span>'
-        action_note = f'PR đang chờ phê duyệt tiếp tại Level {approval_level + 1} ({next_approver_name or "—"}).'
+        action_note = f'PR is pending further approval at Level {approval_level + 1} ({next_approver_name or "—"}).'
 
     body_requester = f'''
-    <p>Xin chào <strong>{requester_name}</strong>,</p>
-    <p>PR của bạn đã được phê duyệt:</p>
+    <p>Hi <strong>{requester_name}</strong>,</p>
+    <p>Your Purchase Request has been approved:</p>
     
     <table style="width:100%;margin:16px 0;">
         {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
@@ -492,8 +492,8 @@ def notify_pr_approved(
     # Notify next approver (if multi-level)
     if not is_final and next_approver_email and next_approver_name:
         body_next = f'''
-        <p>Xin chào <strong>{next_approver_name}</strong>,</p>
-        <p>Một Purchase Request cần phê duyệt Level {approval_level + 1} của bạn:</p>
+        <p>Hi <strong>{next_approver_name}</strong>,</p>
+        <p>A Purchase Request requires your Level {approval_level + 1} approval:</p>
         
         <table style="width:100%;margin:16px 0;">
             {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
@@ -503,7 +503,7 @@ def notify_pr_approved(
         </table>
         
         <p style="color:#6b7280;font-size:13px;">
-            Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
+            Please log in to the ERP system to review and approve.
         </p>
         
         {_budget_comparison_table(budget_data)}'''
@@ -536,8 +536,8 @@ def notify_pr_rejected(
         return False
 
     body = f'''
-    <p>Xin chào <strong>{requester_name}</strong>,</p>
-    <p>PR của bạn đã bị từ chối:</p>
+    <p>Hi <strong>{requester_name}</strong>,</p>
+    <p>Your Purchase Request has been rejected:</p>
     
     <table style="width:100%;margin:16px 0;">
         {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
@@ -548,11 +548,11 @@ def notify_pr_rejected(
     </table>
     
     <div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;">
-        <strong>Lý do:</strong> {rejection_reason}
+        <strong>Reason:</strong> {rejection_reason}
     </div>
     
     <p style="color:#6b7280;font-size:13px;">
-        Bạn có thể tạo PR mới hoặc liên hệ {approver_name} để thảo luận thêm.
+        You may create a new PR or contact {approver_name} for further discussion.
     </p>'''
 
     return _send_email(
@@ -581,8 +581,8 @@ def notify_pr_revision_requested(
         return False
 
     body = f'''
-    <p>Xin chào <strong>{requester_name}</strong>,</p>
-    <p>PR của bạn cần được chỉnh sửa trước khi phê duyệt:</p>
+    <p>Hi <strong>{requester_name}</strong>,</p>
+    <p>Your Purchase Request requires revision before approval:</p>
     
     <table style="width:100%;margin:16px 0;">
         {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
@@ -593,16 +593,16 @@ def notify_pr_revision_requested(
     </table>
     
     <div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;margin:16px 0;">
-        <strong>Yêu cầu chỉnh sửa:</strong> {revision_notes}
+        <strong>Revision requested:</strong> {revision_notes}
     </div>
     
     <p style="color:#6b7280;font-size:13px;">
-        Vui lòng đăng nhập ERP, chỉnh sửa PR và submit lại.
+        Please log in to the ERP, revise the PR, and resubmit.
     </p>'''
 
     return _send_email(
         to_emails=[requester_email],
-        subject=f"[PR Revision] {pr_number} — Cần chỉnh sửa",
+        subject=f"[PR Revision] {pr_number} — Revision Requested",
         html_body=_base_template("Purchase Request — Revision Requested", body, app_url),
         cc_emails=_merge_cc(pm_email, cc_emails, exclude=[requester_email]),
     )
@@ -627,8 +627,8 @@ def notify_po_created(
         return False
 
     body = f'''
-    <p>Xin chào <strong>{requester_name}</strong>,</p>
-    <p>Purchase Order đã được tạo từ PR của bạn:</p>
+    <p>Hi <strong>{requester_name}</strong>,</p>
+    <p>A Purchase Order has been created from your PR:</p>
     
     <table style="width:100%;margin:16px 0;">
         {_info_row('PO Number', f'<strong style="color:#16a34a;">{po_number}</strong>')}
@@ -639,7 +639,7 @@ def notify_po_created(
     </table>
     
     <p style="color:#6b7280;font-size:13px;">
-        PO đã sẵn sàng trên hệ thống ERP. Bước tiếp theo: gửi PO cho vendor.
+        The PO is now available in the ERP system. Next step: send the PO to the vendor.
     </p>'''
 
     return _send_email(
@@ -671,8 +671,8 @@ def notify_pr_cancelled(
         return False
 
     body = f'''
-    <p>Xin chào <strong>{requester_name}</strong>,</p>
-    <p>Purchase Request đã bị hủy:</p>
+    <p>Hi <strong>{requester_name}</strong>,</p>
+    <p>A Purchase Request has been cancelled:</p>
     
     <table style="width:100%;margin:16px 0;">
         {_info_row('PR Number', f'<strong>{pr_number}</strong>')}
@@ -683,7 +683,7 @@ def notify_pr_cancelled(
     </table>
     
     <p style="color:#6b7280;font-size:13px;">
-        PR này đã bị hủy và không thể khôi phục. Bạn có thể tạo PR mới nếu cần.
+        This PR has been cancelled and cannot be restored. You may create a new PR if needed.
     </p>'''
 
     return _send_email(
@@ -726,13 +726,13 @@ def notify_pr_reminder(
 
     urgency = ''
     if days_pending > 7:
-        urgency = f'<div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;font-weight:600;">⚠️ PR này đã chờ phê duyệt <strong>{days_pending} ngày</strong>.</div>'
+        urgency = f'<div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;font-weight:600;">⚠️ This PR has been pending approval for <strong>{days_pending} days</strong>.</div>'
     elif days_pending > 3:
-        urgency = f'<div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;margin:16px 0;font-size:13px;">⏰ PR này đã chờ phê duyệt <strong>{days_pending} ngày</strong>.</div>'
+        urgency = f'<div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;margin:16px 0;font-size:13px;">⏰ This PR has been pending approval for <strong>{days_pending} days</strong>.</div>'
 
     body = f'''
-    <p>Xin chào <strong>{approver_name}</strong>,</p>
-    <p>Đây là email nhắc nhở — Purchase Request sau đang chờ phê duyệt của bạn:</p>
+    <p>Hi <strong>{approver_name}</strong>,</p>
+    <p>This is a reminder — the following Purchase Request is pending your approval:</p>
     
     {urgency}
     
@@ -743,7 +743,7 @@ def notify_pr_reminder(
         {_info_row('Total Amount', f'<strong style="color:#1e3a5f;">{_fmt_vnd(total_vnd)}</strong>')}
         {_info_row('Priority', priority_badge)}
         {_info_row('Approval Level', f'{approval_level} / {max_level}')}
-        {_info_row('Pending since', f'{days_pending} ngày')}
+        {_info_row('Pending since', f'{days_pending} days')}
     </table>
     
     {f'<div style="background:#f0f9ff;border-left:3px solid #3b82f6;padding:12px;margin:16px 0;font-size:13px;"><strong>Justification:</strong> {justification}</div>' if justification else ''}
@@ -751,7 +751,7 @@ def notify_pr_reminder(
     {_budget_comparison_table(budget_data)}
     
     <p style="color:#6b7280;font-size:13px;">
-        Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
+        Please log in to the ERP system to review and approve.
     </p>'''
 
     return _send_email(
