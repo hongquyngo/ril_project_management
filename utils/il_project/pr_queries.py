@@ -304,11 +304,12 @@ def recalc_pr_totals(pr_id: int) -> bool:
 
 
 def cancel_pr(pr_id: int, modified_by: str) -> bool:
+    """Cancel PR. Allowed from DRAFT, REVISION_REQUESTED, or PENDING_APPROVAL."""
     rows = _execute_update("""
         UPDATE il_purchase_requests
         SET status = 'CANCELLED', modified_by = :m, version = version + 1
         WHERE id = :id AND delete_flag = 0
-          AND status IN ('DRAFT', 'REVISION_REQUESTED')
+          AND status IN ('DRAFT', 'REVISION_REQUESTED', 'PENDING_APPROVAL')
     """, {'id': pr_id, 'm': modified_by})
     return rows > 0
 

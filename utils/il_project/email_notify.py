@@ -300,19 +300,26 @@ def _budget_comparison_table(budget_data: Optional[Dict] = None) -> str:
 def _get_finance_emails() -> List[str]:
     """
     Get finance team emails for PO notifications.
-    Reads from config key FINANCE_TEAM_EMAILS (comma-separated).
+    Reads from .env key FINANCE_TEAM_EMAILS (comma-separated).
+    Also checks Streamlit Cloud secrets under EMAIL.FINANCE_TEAM_EMAILS.
     Returns empty list if not configured (non-critical).
+
+    .env example:
+        FINANCE_TEAM_EMAILS=finance@company.com,accountant@company.com
     """
-    try:
-        from ..config import config
-        raw = ''
-        if hasattr(config, 'finance_team_emails'):
-            raw = config.finance_team_emails or ''
-        elif hasattr(config, 'get'):
-            raw = config.get('FINANCE_TEAM_EMAILS', '') or ''
-        return [e.strip() for e in raw.split(',') if e.strip() and '@' in e]
-    except Exception:
-        return []
+    import os
+    raw = os.getenv('FINANCE_TEAM_EMAILS', '')
+
+    # Also try Streamlit Cloud secrets
+    if not raw:
+        try:
+            import streamlit as st
+            email_secrets = st.secrets.get('EMAIL', {})
+            raw = email_secrets.get('FINANCE_TEAM_EMAILS', '') or ''
+        except Exception:
+            pass
+
+    return [e.strip() for e in raw.split(',') if e.strip() and '@' in e]
 
 
 # ══════════════════════════════════════════════════════════════════════

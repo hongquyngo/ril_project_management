@@ -1624,6 +1624,7 @@ def _dialog_pr_view(pr_id: int):
     is_my_pr = pr['requester_id'] == emp_int_id
     can_edit = (is_my_pr or is_admin) and pr['status'] in ('DRAFT', 'REVISION_REQUESTED')
     can_submit = (is_pm_of_project or is_admin) and pr['status'] in ('DRAFT', 'REVISION_REQUESTED')
+    can_cancel = (is_my_pr or is_pm_of_project or is_admin) and pr['status'] in ('DRAFT', 'REVISION_REQUESTED', 'PENDING_APPROVAL')
 
     # ── Header ──
     hc1, hc2 = st.columns([5, 1])
@@ -1738,7 +1739,7 @@ def _dialog_pr_view(pr_id: int):
     if pr.get('po_number'):
         ac3.success(f"PO: **{pr['po_number']}**")
 
-    if can_edit:
+    if can_cancel:
         if ac4.button("🗑 Cancel PR", use_container_width=True):
             st.session_state['confirm_cancel_pr'] = pr_id
             st.rerun()
@@ -1934,7 +1935,7 @@ def _dialog_confirm_cancel(pr_id: int):
             st.cache_data.clear()
             st.rerun()
         else:
-            st.error("Cancel failed — PR may not be in DRAFT status.")
+            st.error("Cancel failed — PR may already be approved or cancelled.")
     if c2.button("✖ No, Go Back", use_container_width=True):
         st.rerun()
 
