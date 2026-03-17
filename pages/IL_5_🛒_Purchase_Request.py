@@ -39,6 +39,11 @@ from utils.il_project.pr_queries import (
     is_project_pm, is_approver_for_pr,
     get_project_pm_email,
     get_budget_vs_pr,
+    # PO readiness (new)
+    resolve_product_ids,
+    validate_po_readiness,
+    link_product_to_pr_item,
+    search_products_for_linking,
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
@@ -2078,37 +2083,144 @@ def _dialog_confirm_cancel(pr_id: int):
         st.rerun()
 
 
-@st.dialog("⚠️ Confirm Create PO")
+@st.dialog("⚠️ Confirm Create PO", width="large")
 def _dialog_confirm_po(pr_id: int):
     pr = get_pr(pr_id)
     if not pr:
         st.error("PR not found."); return
-    st.info(f"Create Purchase Order from **{pr['pr_number']}**?")
-    st.caption(f"Vendor: {pr.get('vendor_name', '—')} | Total: {fmt_vnd(pr.get('total_amount_vnd'))}")
-    st.markdown("A PO will be created in the ERP system and linked to this PR.")
+
+    st.markdown(f"### 🛒 Create PO from {pr['pr_number']}")
+    st.caption(f"Vendor: {pr.get('vendor_name', '—')} | Total: {fmt_vnd(pr.get('total_amount_vnd'))} | "
+               f"Items: {pr.get('item_count', '—')}")
+
+    # ── Step 1: Auto-resolve product_id from linked sources ────────
+    resolve_result = resolve_product_ids(pr_id)
+    if resolve_result['resolved_count'] > 0:
+        st.success(f"✅ Auto-linked {resolve_result['resolved_count']} item(s) "
+                   f"to products (from costbook/estimate)")
+
+    # ── Step 2: Validate PO readiness ──────────────────────────────
+    validation = validate_po_readiness(pr_id)
+
+    # Show warnings (non-blocking)
+    for w in validation.get('warnings', []):
+        st.warning(f"⚠️ {w}")
+
+    # ── Step 3: Handle items without product_id ────────────────────
+    missing_items = validation.get('items_without_product', [])
+
+    if missing_items:
+        st.divider()
+        st.error(f"❌ **{len(missing_items)} item(s) chưa link Product** — "
+                 f"Legacy ERP cần product_id cho mỗi PO line item.")
+        st.caption("Link product cho từng item bên dưới, hoặc quay lại Edit PR để bổ sung.")
+
+        for i, mi in enumerate(missing_items):
+            item_id = mi['item_id']
+            desc = mi.get('description', '(no description)')
+
+            with st.container(border=True):
+                st.markdown(f"**#{i+1}** — {desc}")
+
+                # Search + link product
+                search_key = f"prod_search_{item_id}"
+                keyword = st.text_input(
+                    f"🔍 Tìm product", key=search_key,
+                    placeholder="Nhập tên, PT code, hoặc mô tả...",
+                    help="Search trong bảng products của ERP"
+                )
+
+                if keyword and len(keyword) >= 2:
+                    results = search_products_for_linking(keyword)
+                    if results:
+                        options = {
+                            f"{r['pt_code'] or '—'} | {r['name']} ({r.get('brand_name', '')})"
+                            .strip(' ()'): r['id']
+                            for r in results
+                        }
+                        sel = st.selectbox(
+                            "Chọn product",
+                            ["(Chọn...)"] + list(options.keys()),
+                            key=f"prod_sel_{item_id}",
+                        )
+                        if sel != "(Chọn...)":
+                            pid = options[sel]
+                            if st.button(f"🔗 Link", key=f"prod_link_{item_id}",
+                                         type="primary"):
+                                ok = link_product_to_pr_item(item_id, pid)
+                                if ok:
+                                    st.success(f"✅ Linked!")
+                                    st.rerun()
+                                else:
+                                    st.error("Link failed.")
+                    else:
+                        st.caption("Không tìm thấy product phù hợp.")
+                elif keyword:
+                    st.caption("Nhập ít nhất 2 ký tự để tìm kiếm.")
+
+    # ── Step 4: Show blockers (other than missing product) ─────────
+    other_blockers = [b for b in validation.get('blockers', [])
+                      if 'missing product' not in b.lower()]
+    for b in other_blockers:
+        st.error(f"❌ {b}")
+
+    # ── Step 5: PO Preview ─────────────────────────────────────────
+    if validation['ready']:
+        st.divider()
+        st.success("✅ **Sẵn sàng tạo PO** — tất cả items đã link product, vendor đã chọn.")
+
+        # Preview items
+        items_df = get_pr_items_df(pr_id)
+        if not items_df.empty:
+            preview = items_df[['cogs_category', 'item_description', 'vendor_name',
+                                'quantity', 'unit_cost']].copy()
+            preview['amount'] = (items_df['quantity'] * items_df['unit_cost']).apply(
+                lambda v: f"{v:,.2f}")
+            st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(preview)+38, 200),
+                         column_config={
+                             'cogs_category': st.column_config.TextColumn('Cat', width=40),
+                             'item_description': st.column_config.TextColumn('Product'),
+                             'vendor_name': st.column_config.TextColumn('Vendor'),
+                             'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
+                             'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
+                             'amount': st.column_config.TextColumn('Amount'),
+                         })
+
+        st.markdown(f"**PO sẽ tạo cho:** Vendor **{pr.get('vendor_name', '—')}** | "
+                    f"Currency **{pr.get('currency_code', 'VND')}** | "
+                    f"Total **{fmt_vnd(pr.get('total_amount_vnd'))}**")
+
+    # ── Step 6: Action buttons ─────────────────────────────────────
+    st.divider()
     _po_cc = _cc_email_selector("po_create", label="📧 CC thêm (e.g. finance, optional)")
+
     c1, c2 = st.columns(2)
-    if c1.button("🛒 Yes, Create PO", type="primary", use_container_width=True):
-        keycloak_id = st.session_state.get('user_keycloak_id', user_id)
-        result = create_po_from_pr(pr_id, 1, keycloak_id)
-        if result['success']:
-            st.success(f"✅ {result['message']}")
-            notify_po_created(
-                pr_number=pr['pr_number'], po_number=result['po_number'],
-                project_code=pr.get('project_code', ''),
-                total_vnd=float(pr.get('total_amount_vnd') or 0),
-                vendor_name=pr.get('vendor_name', ''),
-                requester_email=pr.get('requester_email', ''),
-                requester_name=pr.get('requester_name', ''),
-                pm_email=get_project_pm_email(pr['project_id']),
-                cc_emails=_po_cc,
-                app_url=_pr_link(pr_id, 'view'),
-            )
-            st.cache_data.clear()
-            st.rerun()
-        else:
-            st.error(result['message'])
-    if c2.button("✖ No, Go Back", use_container_width=True):
+    if validation['ready']:
+        if c1.button("🛒 Create PO", type="primary", use_container_width=True):
+            keycloak_id = st.session_state.get('user_keycloak_id', user_id)
+            result = create_po_from_pr(pr_id, 1, keycloak_id)
+            if result['success']:
+                st.success(f"✅ {result['message']}")
+                notify_po_created(
+                    pr_number=pr['pr_number'], po_number=result['po_number'],
+                    project_code=pr.get('project_code', ''),
+                    total_vnd=float(pr.get('total_amount_vnd') or 0),
+                    vendor_name=pr.get('vendor_name', ''),
+                    requester_email=pr.get('requester_email', ''),
+                    requester_name=pr.get('requester_name', ''),
+                    pm_email=get_project_pm_email(pr['project_id']),
+                    cc_emails=_po_cc,
+                    app_url=_pr_link(pr_id, 'view'),
+                )
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"❌ {result['message']}")
+    else:
+        c1.button("🛒 Create PO", disabled=True, use_container_width=True,
+                  help="Resolve tất cả blockers ở trên trước khi tạo PO")
+
+    if c2.button("✖ Cancel", use_container_width=True):
         st.rerun()
 
 

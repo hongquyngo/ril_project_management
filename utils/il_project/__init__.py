@@ -135,6 +135,11 @@ from .pr_queries import (
     get_importable_estimate_items,
     # PO Creation
     create_po_from_pr,
+    # PO Readiness (new)
+    resolve_product_ids,
+    validate_po_readiness,
+    link_product_to_pr_item,
+    search_products_for_linking,
     # Permission Checks
     is_project_pm,
     is_approver_for_pr,
@@ -196,6 +201,8 @@ __all__ = [
     'submit_pr', 'approve_pr', 'reject_pr', 'request_revision', 'get_pr_approval_history',
     'get_importable_estimate_items',
     'create_po_from_pr',
+    'resolve_product_ids', 'validate_po_readiness',
+    'link_product_to_pr_item', 'search_products_for_linking',
     'is_project_pm', 'is_approver_for_pr',
     'get_project_pm_email',
     'get_budget_vs_pr',

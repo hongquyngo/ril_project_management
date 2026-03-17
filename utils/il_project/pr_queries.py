@@ -945,24 +945,283 @@ def get_importable_estimate_items(estimate_id: int) -> List[Dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# PO READINESS — Resolve product_id + Pre-validate before PO creation
+# ══════════════════════════════════════════════════════════════════════
+
+def resolve_product_ids(pr_id: int) -> Dict:
+    """
+    Attempt to resolve NULL product_id on PR items from linked sources.
+
+    Resolution chain per item:
+      1. product_id already set                   → skip
+      2. costbook_detail_id → costbook_details.product_id
+      3. estimate_line_item_id → il_estimate_line_items.product_id
+
+    Returns:
+        {
+            'resolved_count': int,      # items that were NULL and got resolved
+            'still_missing': int,       # items still without product_id
+            'total_items': int,
+            'details': [                # per-item status
+                {'item_id': ..., 'description': ..., 'status': 'ok'|'resolved'|'missing',
+                 'resolved_from': 'costbook'|'estimate'|None},
+            ],
+        }
+    """
+    items = _execute_query("""
+        SELECT
+            pri.id, pri.item_description, pri.product_id,
+            pri.costbook_detail_id, pri.estimate_line_item_id
+        FROM il_purchase_request_items pri
+        WHERE pri.pr_id = :prid AND pri.delete_flag = 0
+        ORDER BY pri.view_order, pri.id
+    """, {'prid': pr_id})
+
+    resolved_count = 0
+    still_missing = 0
+    details = []
+
+    for item in items:
+        item_id = item['id']
+        desc = item.get('item_description', '')
+
+        # Already has product_id
+        if item.get('product_id'):
+            details.append({
+                'item_id': item_id, 'description': desc,
+                'status': 'ok', 'resolved_from': None,
+                'product_id': item['product_id'],
+            })
+            continue
+
+        resolved_pid = None
+        resolved_from = None
+
+        # Try costbook_detail_id → costbook_details.product_id
+        if not resolved_pid and item.get('costbook_detail_id'):
+            rows = _execute_query("""
+                SELECT product_id FROM costbook_details
+                WHERE id = :cid AND delete_flag = 0 AND product_id IS NOT NULL
+                LIMIT 1
+            """, {'cid': item['costbook_detail_id']})
+            if rows and rows[0].get('product_id'):
+                resolved_pid = rows[0]['product_id']
+                resolved_from = 'costbook'
+
+        # Try estimate_line_item_id → il_estimate_line_items.product_id
+        if not resolved_pid and item.get('estimate_line_item_id'):
+            rows = _execute_query("""
+                SELECT product_id FROM il_estimate_line_items
+                WHERE id = :eid AND delete_flag = 0 AND product_id IS NOT NULL
+                LIMIT 1
+            """, {'eid': item['estimate_line_item_id']})
+            if rows and rows[0].get('product_id'):
+                resolved_pid = rows[0]['product_id']
+                resolved_from = 'estimate'
+
+        if resolved_pid:
+            # Update the PR item with resolved product_id + pt_code
+            try:
+                _execute_update("""
+                    UPDATE il_purchase_request_items
+                    SET product_id = :pid,
+                        pt_code = (SELECT pt_code FROM products WHERE id = :pid)
+                    WHERE id = :item_id
+                """, {'pid': resolved_pid, 'item_id': item_id})
+                resolved_count += 1
+                details.append({
+                    'item_id': item_id, 'description': desc,
+                    'status': 'resolved', 'resolved_from': resolved_from,
+                    'product_id': resolved_pid,
+                })
+            except Exception as e:
+                logger.warning(f"resolve_product_ids: could not update item {item_id}: {e}")
+                still_missing += 1
+                details.append({
+                    'item_id': item_id, 'description': desc,
+                    'status': 'missing', 'resolved_from': None,
+                    'product_id': None,
+                })
+        else:
+            still_missing += 1
+            details.append({
+                'item_id': item_id, 'description': desc,
+                'status': 'missing', 'resolved_from': None,
+                'product_id': None,
+            })
+
+    return {
+        'resolved_count': resolved_count,
+        'still_missing': still_missing,
+        'total_items': len(items),
+        'details': details,
+    }
+
+
+def link_product_to_pr_item(item_id: int, product_id: int) -> bool:
+    """
+    Manually link a product to a PR item.
+    Called from UI when user selects a product for an unlinked item.
+    Also updates pt_code from the product.
+    """
+    try:
+        rows = _execute_update("""
+            UPDATE il_purchase_request_items
+            SET product_id = :pid,
+                pt_code = (SELECT pt_code FROM products WHERE id = :pid)
+            WHERE id = :item_id AND delete_flag = 0
+        """, {'pid': product_id, 'item_id': item_id})
+        return rows > 0
+    except Exception as e:
+        logger.error(f"link_product_to_pr_item failed: {e}")
+        return False
+
+
+def search_products_for_linking(keyword: str, limit: int = 20) -> list:
+    """
+    Search products table for linking to PR items.
+    Returns: [{id, pt_code, name, brand_name, uom}, ...]
+    """
+    return _execute_query("""
+        SELECT
+            p.id,
+            p.pt_code,
+            p.name,
+            COALESCE(b.name, '') AS brand_name,
+            p.uom
+        FROM products p
+        LEFT JOIN brands b ON p.brand_id = b.id
+        WHERE p.delete_flag = 0
+          AND (
+            p.name LIKE :kw
+            OR p.pt_code LIKE :kw
+            OR p.description LIKE :kw
+          )
+        ORDER BY p.name
+        LIMIT :lim
+    """, {'kw': f'%{keyword}%', 'lim': limit})
+
+
+def validate_po_readiness(pr_id: int) -> Dict:
+    """
+    Validate that a PR is ready for PO creation.
+    Checks all requirements that legacy ERP needs.
+
+    Returns:
+        {
+            'ready': bool,              # True if PO can be created
+            'blockers': [...],          # Critical issues — must fix
+            'warnings': [...],          # Non-critical — PO possible but incomplete
+            'items_without_product': [  # Items needing product link
+                {'item_id': ..., 'description': ..., 'costbook_detail_id': ...},
+            ],
+        }
+    """
+    pr = _execute_query("""
+        SELECT pr.*, cur.code AS ccy_code
+        FROM il_purchase_requests pr
+        LEFT JOIN currencies cur ON pr.currency_id = cur.id
+        WHERE pr.id = :id AND pr.delete_flag = 0
+    """, {'id': pr_id})
+    if not pr:
+        return {'ready': False, 'blockers': ['PR not found'], 'warnings': [], 'items_without_product': []}
+    pr = pr[0]
+
+    blockers = []
+    warnings = []
+
+    # Status check
+    if pr.get('status') != 'APPROVED':
+        blockers.append(f"PR status is {pr.get('status')} — must be APPROVED")
+
+    # Already has PO
+    if pr.get('po_id'):
+        blockers.append(f"PO already created (po_id={pr['po_id']})")
+
+    # Vendor check
+    if not pr.get('vendor_id'):
+        blockers.append("No vendor selected — legacy ERP requires seller_company_id")
+
+    # Currency check
+    if not pr.get('currency_id'):
+        blockers.append("No currency set on PR")
+
+    # Items check
+    items = _execute_query("""
+        SELECT
+            pri.id AS item_id,
+            pri.item_description,
+            pri.product_id,
+            pri.costbook_detail_id,
+            pri.estimate_line_item_id,
+            pri.quantity,
+            pri.unit_cost,
+            pri.currency_id AS item_currency_id
+        FROM il_purchase_request_items pri
+        WHERE pri.pr_id = :prid AND pri.delete_flag = 0
+        ORDER BY pri.view_order, pri.id
+    """, {'prid': pr_id})
+
+    if not items:
+        blockers.append("PR has no line items")
+
+    items_without_product = []
+    for it in items:
+        if not it.get('product_id'):
+            items_without_product.append({
+                'item_id': it['item_id'],
+                'description': it.get('item_description', ''),
+                'costbook_detail_id': it.get('costbook_detail_id'),
+                'estimate_line_item_id': it.get('estimate_line_item_id'),
+            })
+
+    if items_without_product:
+        blockers.append(
+            f"{len(items_without_product)} item(s) missing product_id — "
+            f"legacy ERP requires product link for every PO line item"
+        )
+
+    # Warnings (non-blocking but good to flag)
+    if not pr.get('exchange_rate') or float(pr.get('exchange_rate', 0)) <= 0:
+        warnings.append("Exchange rate is 0 or missing")
+
+    total_vnd = float(pr.get('total_amount_vnd', 0) or 0)
+    if total_vnd <= 0:
+        warnings.append("Total amount VND is 0")
+
+    return {
+        'ready': len(blockers) == 0,
+        'blockers': blockers,
+        'warnings': warnings,
+        'items_without_product': items_without_product,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # CREATE PO FROM APPROVED PR
 # ══════════════════════════════════════════════════════════════════════
 
 def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: str) -> Dict:
     """
     Create a PO in purchase_orders + product_purchase_orders from an approved PR.
-    Uses the same schema as ERP platform.
-    
+
+    Fixed to match legacy ERP (Java/Hibernate) schema requirements:
+      - PO header: all FK columns populated, correct delete_flag type
+      - PO line items: product_id (required!), product_costbook_id, UOM fields
+      - PO number: format PO{YYYYMMDD}-{po_id}-{seller_id} (dash-separated)
+
+    Pre-condition: call validate_po_readiness() first — all items must have product_id.
+
     Args:
         pr_id: IL purchase request ID
-        buyer_company_id: Prostech/Rozitek company ID (typically 1)
+        buyer_company_id: Prostech/Rozitek company ID
         created_by_keycloak: keycloak_id of the creator
-    
+
     Returns: {success, po_id, po_number, message}
     """
     try:
         with _get_transaction() as conn:
-            # Validate PR
+            # ── 1. Validate PR ─────────────────────────────────────
             pr = conn.execute(text("""
                 SELECT pr.*, cur.code AS ccy_code
                 FROM il_purchase_requests pr
@@ -974,79 +1233,114 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 return {'success': False, 'message': 'PR not found or not in APPROVED status'}
             if pr.po_id:
                 return {'success': False, 'message': f'PO already created: {pr.po_id}'}
+            if not pr.vendor_id:
+                return {'success': False, 'message': 'PR has no vendor — cannot create PO'}
 
-            # Generate PO number: PO{YYYYMMDD}-{id}{seller_id}
+            # ── 2. Get PR items + verify product_id ────────────────
+            items = conn.execute(text("""
+                SELECT
+                    pri.*,
+                    cur.code AS item_ccy_code,
+                    p.pt_code AS product_pt_code,
+                    p.uom AS product_uom
+                FROM il_purchase_request_items pri
+                LEFT JOIN currencies cur ON pri.currency_id = cur.id
+                LEFT JOIN products p ON pri.product_id = p.id
+                WHERE pri.pr_id = :prid AND pri.delete_flag = 0
+                ORDER BY pri.view_order, pri.id
+            """), {'prid': pr_id}).fetchall()
+
+            if not items:
+                return {'success': False, 'message': 'PR has no line items'}
+
+            missing_product = [it for it in items if not it.product_id]
+            if missing_product:
+                descs = ', '.join((it.item_description or '')[:30] for it in missing_product[:3])
+                return {
+                    'success': False,
+                    'message': f'{len(missing_product)} item(s) missing product link: {descs}...'
+                }
+
+            # ── 3. Insert PO header ────────────────────────────────
             today_str = datetime.now().strftime('%Y%m%d')
-            seller_id = pr.vendor_id or 0
+            seller_id = pr.vendor_id
 
-            # Insert PO header
             po_result = conn.execute(text("""
                 INSERT INTO purchase_orders (
-                    po_date, po_number, po_type,
+                    po_date, po_number, po_type, purchase_order_type,
                     buyer_company_id, seller_company_id,
                     currency_id, usd_exchange_rate,
-                    po_note, created_by, created_date,
+                    po_note, external_ref_number,
+                    created_by, created_date,
                     delete_flag, version
                 ) VALUES (
-                    NOW(), :po_num, 'INTERNAL',
+                    NOW(), :po_num, 'INTERNAL', 'REGULAR_ORDER',
                     :buyer, :seller,
                     :cur, :rate,
-                    :note, :by, NOW(),
-                    0, 0
+                    :note, :ext_ref,
+                    :by, NOW(),
+                    b'0', 0
                 )
             """), {
-                'po_num': f'__TEMP__',  # Will update with actual ID
+                'po_num': '__TEMP__',
                 'buyer': buyer_company_id,
-                'seller': pr.vendor_id,
+                'seller': seller_id,
                 'cur': pr.currency_id,
                 'rate': float(pr.exchange_rate or 1),
                 'note': f'Auto-created from PR {pr.pr_number}',
+                'ext_ref': pr.pr_number,
                 'by': created_by_keycloak,
             })
             po_id = po_result.lastrowid
 
-            # Update PO number with actual ID
-            po_number = f"PO{today_str}-{po_id}{seller_id}"
+            # Update PO number: PO{date}-{po_id}-{seller_id}
+            po_number = f"PO{today_str}-{po_id}-{seller_id}"
             conn.execute(text(
                 "UPDATE purchase_orders SET po_number = :num WHERE id = :id"
             ), {'num': po_number, 'id': po_id})
 
-            # Get PR items
-            items = conn.execute(text("""
-                SELECT * FROM il_purchase_request_items
-                WHERE pr_id = :prid AND delete_flag = 0
-                ORDER BY view_order, id
-            """), {'prid': pr_id}).fetchall()
-
-            # Insert PO line items
+            # ── 4. Insert PO line items ────────────────────────────
             for item in items:
+                unit_cost = float(item.unit_cost or 0)
+                qty = float(item.quantity or 0)
+                rate = float(item.exchange_rate or 1)
+                cur_id = item.currency_id or pr.currency_id
+                pt_code = item.product_pt_code or item.pt_code or ''
+                uom = item.uom or ''
+                p_uom = item.product_uom or uom
+
                 conn.execute(text("""
                     INSERT INTO product_purchase_orders (
-                        purchase_order_id, product_id,
+                        purchase_order_id, product_id, product_costbook_id,
                         quantity, unit_cost, original_unit_cost,
                         exchange_rate, distributor_buy_price,
                         product_currency_id, product_pn,
                         purchase_quantity, purchase_unit_cost, original_purchase_unit_cost,
+                        purchaseuom, product_uom,
                         created_date, delete_flag, version
                     ) VALUES (
-                        :po_id, :prod_id,
+                        :po_id, :prod_id, :costbook_id,
                         :qty, :cost, :cost,
                         :rate, :cost,
                         :cur_id, :pn,
                         :qty, :cost, :cost,
-                        NOW(), 0, 0
+                        :p_uom, :uom,
+                        NOW(), b'0', 0
                     )
                 """), {
                     'po_id': po_id,
                     'prod_id': item.product_id,
-                    'qty': float(item.quantity),
-                    'cost': float(item.unit_cost),
-                    'rate': float(item.exchange_rate),
-                    'cur_id': item.currency_id,
-                    'pn': item.pt_code or '',
+                    'costbook_id': item.costbook_detail_id,
+                    'qty': qty,
+                    'cost': unit_cost,
+                    'rate': rate,
+                    'cur_id': cur_id,
+                    'pn': pt_code,
+                    'p_uom': p_uom,
+                    'uom': uom,
                 })
 
-            # Update PR → link to PO
+            # ── 5. Update PR → link to PO ──────────────────────────
             conn.execute(text("""
                 UPDATE il_purchase_requests SET
                     status = 'PO_CREATED',
@@ -1056,7 +1350,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 WHERE id = :id
             """), {'id': pr_id, 'po_id': po_id, 'm': created_by_keycloak})
 
-            # Link PO to il_project_documents
+            # ── 6. Link PO to il_project_documents ─────────────────
             conn.execute(text("""
                 INSERT INTO il_project_documents (
                     project_id, document_type, document_id, document_number,
@@ -1076,6 +1370,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 'by': created_by_keycloak,
             })
 
+        logger.info(f"PO created: {po_number} (id={po_id}) from PR {pr.pr_number}")
         return {
             'success': True,
             'po_id': po_id,
