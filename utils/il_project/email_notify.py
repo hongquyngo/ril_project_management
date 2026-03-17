@@ -294,32 +294,34 @@ def _budget_comparison_table(budget_data: Optional[Dict] = None) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# FINANCE TEAM EMAILS — for PO notifications
+# CC MERGE HELPER
 # ══════════════════════════════════════════════════════════════════════
 
-def _get_finance_emails() -> List[str]:
+def _merge_cc(*sources, exclude: Optional[List[str]] = None) -> Optional[List[str]]:
     """
-    Get finance team emails for PO notifications.
-    Reads from .env key FINANCE_TEAM_EMAILS (comma-separated).
-    Also checks Streamlit Cloud secrets under EMAIL.FINANCE_TEAM_EMAILS.
-    Returns empty list if not configured (non-critical).
+    Merge multiple CC sources into a deduplicated list.
+    Filters out empty/None values, TO recipients (via exclude), and duplicates.
+    Returns None if empty (so _send_email skips CC header).
 
-    .env example:
-        FINANCE_TEAM_EMAILS=finance@company.com,accountant@company.com
+    Args:
+        *sources: mix of str (single email) and list[str] (multiple)
+        exclude: list of TO emails to exclude from CC (avoid duplicate)
     """
-    import os
-    raw = os.getenv('FINANCE_TEAM_EMAILS', '')
-
-    # Also try Streamlit Cloud secrets
-    if not raw:
-        try:
-            import streamlit as st
-            email_secrets = st.secrets.get('EMAIL', {})
-            raw = email_secrets.get('FINANCE_TEAM_EMAILS', '') or ''
-        except Exception:
-            pass
-
-    return [e.strip() for e in raw.split(',') if e.strip() and '@' in e]
+    exclude_set = {e.lower().strip() for e in (exclude or []) if e}
+    seen = set()
+    result = []
+    for src in sources:
+        if src is None:
+            continue
+        emails = [src] if isinstance(src, str) else list(src)
+        for e in emails:
+            if not e or '@' not in str(e):
+                continue
+            key = e.lower().strip()
+            if key not in seen and key not in exclude_set:
+                seen.add(key)
+                result.append(e.strip())
+    return result or None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -340,11 +342,14 @@ def notify_pr_submitted(
     approval_level: int,
     max_level: int,
     requester_email: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
     items: Optional[list] = None,
     budget_data: Optional[Dict] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification to approver when PR is submitted. Includes budget comparison."""
+    """Send notification to approver when PR is submitted.
+    Auto-CC: requester. User CC: from cc_emails param.
+    """
     if not _is_configured():
         return False
 
@@ -377,12 +382,11 @@ def notify_pr_submitted(
         Vui lòng đăng nhập ERP để xem chi tiết và phê duyệt.
     </p>'''
 
-    _cc = [requester_email] if requester_email else None
     return _send_email(
         to_emails=[approver_email],
         subject=f"[PR Approval] {pr_number} — {project_code} — {_fmt_vnd(total_vnd)}",
         html_body=_base_template("Purchase Request — Pending Approval", body, app_url),
-        cc_emails=_cc,
+        cc_emails=_merge_cc(requester_email, cc_emails, exclude=[approver_email]),
     )
 
 
@@ -398,14 +402,14 @@ def notify_pr_approved(
     next_approver_name: Optional[str] = None,
     next_approver_email: Optional[str] = None,
     pm_email: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
     budget_data: Optional[Dict] = None,
     app_url: Optional[str] = None,
 ) -> bool:
     """
     Send notification when PR is approved.
-    - To requester: always (with budget comparison)
-    - CC PM: when final approval (so PM knows PO can be created)
-    - To next approver: if not final (multi-level, with budget comparison)
+    - To requester: always. Auto-CC PM on final. User CC from cc_emails.
+    - To next approver: if not final (multi-level).
     """
     if not _is_configured():
         return False
@@ -436,12 +440,12 @@ def notify_pr_approved(
     
     {_budget_comparison_table(budget_data)}'''
 
-    _cc_pm = [pm_email] if is_final and pm_email and pm_email != requester_email else None
+    _auto_cc = [pm_email] if is_final and pm_email else []
     ok1 = _send_email(
         to_emails=[requester_email],
         subject=f"[PR {'Approved' if is_final else 'Approved L' + str(approval_level)}] {pr_number} — {_fmt_vnd(total_vnd)}",
         html_body=_base_template("Purchase Request — Approved", body_requester, app_url),
-        cc_emails=_cc_pm,
+        cc_emails=_merge_cc(_auto_cc, cc_emails, exclude=[requester_email]),
     )
     success = success and ok1
 
@@ -483,9 +487,11 @@ def notify_pr_rejected(
     approver_name: str,
     rejection_reason: str,
     pm_email: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification to requester when PR is rejected. CC PM if different."""
+    """Send notification to requester when PR is rejected.
+    Auto-CC PM if different. User CC from cc_emails."""
     if not _is_configured():
         return False
 
@@ -509,12 +515,11 @@ def notify_pr_rejected(
         Bạn có thể tạo PR mới hoặc liên hệ {approver_name} để thảo luận thêm.
     </p>'''
 
-    _cc_pm = [pm_email] if pm_email and pm_email != requester_email else None
     return _send_email(
         to_emails=[requester_email],
         subject=f"[PR Rejected] {pr_number} — {project_code}",
         html_body=_base_template("Purchase Request — Rejected", body, app_url),
-        cc_emails=_cc_pm,
+        cc_emails=_merge_cc(pm_email, cc_emails, exclude=[requester_email]),
     )
 
 
@@ -527,9 +532,11 @@ def notify_pr_revision_requested(
     approver_name: str,
     revision_notes: str,
     pm_email: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
     app_url: Optional[str] = None,
 ) -> bool:
-    """Send notification to requester when revision is requested. CC PM if different."""
+    """Send notification to requester when revision is requested.
+    Auto-CC PM if different. User CC from cc_emails."""
     if not _is_configured():
         return False
 
@@ -553,12 +560,11 @@ def notify_pr_revision_requested(
         Vui lòng đăng nhập ERP, chỉnh sửa PR và submit lại.
     </p>'''
 
-    _cc_pm = [pm_email] if pm_email and pm_email != requester_email else None
     return _send_email(
         to_emails=[requester_email],
         subject=f"[PR Revision] {pr_number} — Cần chỉnh sửa",
         html_body=_base_template("Purchase Request — Revision Requested", body, app_url),
-        cc_emails=_cc_pm,
+        cc_emails=_merge_cc(pm_email, cc_emails, exclude=[requester_email]),
     )
 
 
@@ -570,23 +576,15 @@ def notify_po_created(
     vendor_name: str,
     requester_email: str,
     requester_name: str,
-    finance_emails: Optional[List[str]] = None,
     pm_email: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
     app_url: Optional[str] = None,
 ) -> bool:
     """Send notification when PO is created from approved PR.
-    CC finance team (auto from config) + PM (if not requester).
+    Auto-CC PM. User CC from cc_emails (e.g. finance team).
     """
     if not _is_configured():
         return False
-
-    # Auto-populate finance emails if not provided
-    if not finance_emails:
-        finance_emails = _get_finance_emails()
-    # Add PM to CC if not the requester
-    cc_list = list(finance_emails or [])
-    if pm_email and pm_email != requester_email and pm_email not in cc_list:
-        cc_list.append(pm_email)
 
     body = f'''
     <p>Xin chào <strong>{requester_name}</strong>,</p>
@@ -606,7 +604,7 @@ def notify_po_created(
 
     return _send_email(
         to_emails=[requester_email],
-        cc_emails=cc_list or None,
+        cc_emails=_merge_cc(pm_email, cc_emails, exclude=[requester_email]),
         subject=f"[PO Created] {po_number} from {pr_number} — {vendor_name or project_code}",
         html_body=_base_template("Purchase Order Created", body, app_url),
     )
@@ -622,13 +620,12 @@ def notify_pr_cancelled(
     pm_email: Optional[str] = None,
     pending_approver_email: Optional[str] = None,
     pending_approver_name: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
     app_url: Optional[str] = None,
 ) -> bool:
     """
     Send notification when PR is cancelled.
-    - To requester: always (confirmation)
-    - CC PM: if PM ≠ requester
-    - CC pending approver: if PR was PENDING_APPROVAL (so they know it's withdrawn)
+    Auto-CC: PM + pending approver. User CC from cc_emails.
     """
     if not _is_configured():
         return False
@@ -649,16 +646,9 @@ def notify_pr_cancelled(
         PR này đã bị hủy và không thể khôi phục. Bạn có thể tạo PR mới nếu cần.
     </p>'''
 
-    # Build CC list
-    cc = []
-    if pm_email and pm_email != requester_email:
-        cc.append(pm_email)
-    if pending_approver_email and pending_approver_email not in cc and pending_approver_email != requester_email:
-        cc.append(pending_approver_email)
-
     return _send_email(
         to_emails=[requester_email],
         subject=f"[PR Cancelled] {pr_number} — {project_code}",
         html_body=_base_template("Purchase Request — Cancelled", body, app_url),
-        cc_emails=cc or None,
+        cc_emails=_merge_cc(pm_email, pending_approver_email, cc_emails, exclude=[requester_email]),
     )

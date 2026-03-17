@@ -93,7 +93,38 @@ def _get_employee_email(employee_id: int) -> str:
         return email
     except Exception:
         return ''
+
+
 cur_map  = {c['id']: c['code'] for c in currencies}
+
+
+# ── CC employee selector (reusable) ──────────────────────────────
+
+@st.cache_data(ttl=300)
+def _get_employees_with_email():
+    """Get employees with email for CC selector. Cached."""
+    from utils.db import execute_query as _eq
+    rows = _eq("""
+        SELECT id, CONCAT(first_name, ' ', last_name) AS name, email
+        FROM employees
+        WHERE delete_flag = 0 AND email IS NOT NULL AND email != ''
+        ORDER BY first_name, last_name
+    """)
+    return rows
+
+
+def _cc_email_selector(key_suffix: str, label: str = "CC (optional)") -> list:
+    """
+    Multiselect widget to pick CC recipients from employee list.
+    Returns list of email strings.
+    """
+    emp_list = _get_employees_with_email()
+    options = [f"{e['name']} ({e['email']})" for e in emp_list]
+    selected = st.multiselect(label, options, key=f"cc_sel_{key_suffix}",
+                              help="Chọn nhân viên để CC email thông báo")
+    # Extract emails from selected labels
+    email_map = {f"{e['name']} ({e['email']})": e['email'] for e in emp_list}
+    return [email_map[s] for s in selected if s in email_map]
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1122,6 +1153,9 @@ def _wiz_step3_review(project_id, project, est):
         st.warning("⚠️ Chưa cấu hình approval chain cho IL_PURCHASE_REQUEST. "
                    "PR sẽ lưu Draft — không thể submit.")
 
+    # ── CC Recipients (optional) ─────────────────────────────
+    _wiz_cc = _cc_email_selector("wiz_step3", label="📧 CC thêm (optional)")
+
     # ── Navigation ───────────────────────────────────────────
     st.divider()
     n1, n2, n3 = st.columns([1, 1, 1.5])
@@ -1133,7 +1167,7 @@ def _wiz_step3_review(project_id, project, est):
     if has_chain:
         if n3.button("✅ Create & Submit for Approval", type="primary",
                      use_container_width=True, key="wiz_confirm_submit"):
-            _wiz_do_create(project_id, project, est, submit_now=True)
+            _wiz_do_create(project_id, project, est, submit_now=True, cc_emails=_wiz_cc)
     else:
         n3.button("✅ Create & Submit", disabled=True,
                   use_container_width=True, key="wiz_confirm_submit_dis",
@@ -1144,7 +1178,7 @@ def _wiz_step3_review(project_id, project, est):
 # WIZARD — Create PR in DB + optional submit
 # ──────────────────────────────────────────────────────────────────
 
-def _wiz_do_create(project_id, project, est, submit_now: bool = False):
+def _wiz_do_create(project_id, project, est, submit_now: bool = False, cc_emails: list = None):
     """Insert PR header + all items into DB.  Optionally submit for approval."""
     header = st.session_state['pr_wiz_header']
     items  = st.session_state['pr_wiz_items']
@@ -1257,6 +1291,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False):
                         approval_level=1,
                         max_level=result.get('max_level', 1),
                         requester_email=_get_employee_email(emp_int_id),
+                        cc_emails=cc_emails,
                         budget_data=_budget,
                     )
             else:
@@ -1541,6 +1576,7 @@ def _dialog_approval_action(pr_id: int):
 
     # Action buttons
     comments = st.text_area("Comments", height=60, key="approval_comments")
+    _approval_cc = _cc_email_selector("approval", label="📧 CC thêm (optional)")
 
     c1, c2, c3 = st.columns(3)
     if c1.button("✅ Approve", type="primary", use_container_width=True, key="btn_approve"):
@@ -1560,6 +1596,7 @@ def _dialog_approval_action(pr_id: int):
                 next_approver_name=result.get('next_approver_name'),
                 next_approver_email=result.get('next_approver_email'),
                 pm_email=get_project_pm_email(pr['project_id']),
+                cc_emails=_approval_cc,
                 budget_data=_budget,
             )
             if not result.get('final') and result.get('next_approver_name'):
@@ -1582,6 +1619,7 @@ def _dialog_approval_action(pr_id: int):
                     approver_name=st.session_state.get('user_fullname', ''),
                     rejection_reason=comments,
                     pm_email=get_project_pm_email(pr['project_id']),
+                    cc_emails=_approval_cc,
                 )
                 st.success("PR rejected.")
                 st.cache_data.clear()
@@ -1602,6 +1640,7 @@ def _dialog_approval_action(pr_id: int):
                     approver_name=st.session_state.get('user_fullname', ''),
                     revision_notes=comments,
                     pm_email=get_project_pm_email(pr['project_id']),
+                    cc_emails=_approval_cc,
                 )
                 st.success("Revision requested — PR sent back to PM.")
                 st.cache_data.clear()
@@ -1705,6 +1744,9 @@ def _dialog_pr_view(pr_id: int):
 
     # ── Action Buttons (context-sensitive) ──
     st.divider()
+    if can_submit and not items_df.empty:
+        _view_cc = _cc_email_selector("view_submit", label="📧 CC thêm khi submit (optional)")
+
     ac1, ac2, ac3, ac4 = st.columns(4)
 
     if can_submit and not items_df.empty:
@@ -1724,6 +1766,7 @@ def _dialog_pr_view(pr_id: int):
                         approver_name=result['approver_name'], approver_email=result['approver_email'],
                         approval_level=1, max_level=result.get('max_level', 1),
                         requester_email=pr.get('requester_email', ''),
+                        cc_emails=_view_cc,
                         budget_data=_budget,
                     )
                 st.cache_data.clear()
@@ -1862,6 +1905,8 @@ def _dialog_pr_edit(pr_id: int):
 
     # ── Bottom actions ──
     st.divider()
+    if not items_df.empty:
+        _edit_cc = _cc_email_selector("edit_submit", label="📧 CC thêm khi submit (optional)")
     ba1, ba2, ba3 = st.columns([2, 1, 1])
     if not items_df.empty:
         if ba1.button("📤 Submit for Approval", type="primary", use_container_width=True):
@@ -1879,6 +1924,7 @@ def _dialog_pr_edit(pr_id: int):
                         approver_name=result['approver_name'], approver_email=result['approver_email'],
                         approval_level=1, max_level=result.get('max_level', 1),
                         requester_email=pr.get('requester_email', ''),
+                        cc_emails=_edit_cc,
                         budget_data=_budget,
                     )
                 st.cache_data.clear()
@@ -1907,6 +1953,7 @@ def _dialog_confirm_cancel(pr_id: int):
     st.warning(f"Are you sure you want to cancel **{pr['pr_number']}**?")
     st.caption(f"Total: {fmt_vnd(pr.get('total_amount_vnd'))} | Items: {pr.get('item_count', '—')}")
     st.markdown("This action **cannot be undone**.")
+    _cancel_cc = _cc_email_selector("cancel_pr", label="📧 CC thêm (optional)")
     c1, c2 = st.columns(2)
     if c1.button("🗑 Yes, Cancel PR", type="primary", use_container_width=True):
         # Capture pending approver BEFORE cancel (status changes after)
@@ -1931,6 +1978,7 @@ def _dialog_confirm_cancel(pr_id: int):
                 pm_email=get_project_pm_email(pr['project_id']),
                 pending_approver_email=_pending_approver_email,
                 pending_approver_name=_pending_approver_name,
+                cc_emails=_cancel_cc,
             )
             st.cache_data.clear()
             st.rerun()
@@ -1948,6 +1996,7 @@ def _dialog_confirm_po(pr_id: int):
     st.info(f"Create Purchase Order from **{pr['pr_number']}**?")
     st.caption(f"Vendor: {pr.get('vendor_name', '—')} | Total: {fmt_vnd(pr.get('total_amount_vnd'))}")
     st.markdown("A PO will be created in the ERP system and linked to this PR.")
+    _po_cc = _cc_email_selector("po_create", label="📧 CC thêm (e.g. finance, optional)")
     c1, c2 = st.columns(2)
     if c1.button("🛒 Yes, Create PO", type="primary", use_container_width=True):
         keycloak_id = st.session_state.get('user_keycloak_id', user_id)
@@ -1962,6 +2011,7 @@ def _dialog_confirm_po(pr_id: int):
                 requester_email=pr.get('requester_email', ''),
                 requester_name=pr.get('requester_name', ''),
                 pm_email=get_project_pm_email(pr['project_id']),
+                cc_emails=_po_cc,
             )
             st.cache_data.clear()
             st.rerun()
