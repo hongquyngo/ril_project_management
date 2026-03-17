@@ -260,7 +260,7 @@ def _render_budget_comparison(project_id: int, mode: str = 'full', current_pr_id
         'PR Committed': f"{t['total_committed']:,.0f}",
         'Remaining': f"{t['total_remaining']:,.0f}" if t['total_remaining'] >= 0 else f"({abs(t['total_remaining']):,.0f})",
         'Used %': f"{t['total_pct_used']:.0f}%",
-        'PRs': '',
+        'PRs': None,
     })
 
     st.dataframe(
@@ -2014,6 +2014,63 @@ def _render_overview(f_status_filter, f_priority_filter):
                              use_container_width=False):
                     st.session_state['open_pr_approve'] = int(row['pr_id'])
                     st.rerun(scope="app")
+
+    # ── All PRs — selectable list ────────────────────────────────
+    st.divider()
+    st.subheader(f"📋 All PRs ({len(all_df)})")
+
+    display = all_df.copy()
+    display.insert(0, '●', display['status'].map(PR_STATUS_ICONS))
+    display['pri'] = display['priority'].map(PRIORITY_ICONS)
+    display['total_fmt'] = display['total_amount_vnd'].apply(
+        lambda v: f"{v:,.0f}" if v and str(v) not in ('', 'nan', 'None', '0') else '—')
+    if 'submitted_date' in display.columns:
+        display['⏰'] = display['submitted_date'].apply(_age_icon)
+    else:
+        display['⏰'] = ''
+
+    tbl_key = f"ov_all_pr_{st.session_state.get('_ov_all_pr_key', 0)}"
+    event = st.dataframe(
+        display, key=tbl_key, width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        column_config={
+            '●': st.column_config.TextColumn('', width=30),
+            '⏰': st.column_config.TextColumn('', width=30),
+            'pri': st.column_config.TextColumn('Pri', width=35),
+            'pr_number': st.column_config.TextColumn('PR#'),
+            'project_code': st.column_config.TextColumn('Project', width=140),
+            'requester_name': st.column_config.TextColumn('Requester'),
+            'status': st.column_config.TextColumn('Status'),
+            'vendor_name': st.column_config.TextColumn('Vendor'),
+            'total_fmt': st.column_config.TextColumn('Total VND'),
+            'po_number': st.column_config.TextColumn('PO#'),
+            'created_date': st.column_config.DatetimeColumn('Created'),
+            'pr_id': None, 'project_id': None, 'requester_id': None,
+            'requester_email': None, 'vendor_id': None,
+            'total_amount': None, 'total_amount_vnd': None, 'currency_code': None,
+            'exchange_rate': None, 'current_approval_level': None,
+            'max_approval_level': None, 'submitted_date': None,
+            'approved_date': None, 'required_date': None,
+            'po_id': None, 'justification': None, 'rejection_reason': None,
+            'project_name': None, 'item_count': None,
+            'pr_type': None, 'cogs_category': None, 'priority': None,
+        },
+    )
+
+    sel = event.selection.rows
+    if sel:
+        row = all_df.iloc[sel[0]]
+        st.markdown(f"**Selected:** {row['pr_number']} — "
+                    f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']} | "
+                    f"Project: {row.get('project_code', '—')} | "
+                    f"By: {row.get('requester_name', '—')}")
+        ab1, ab2, ab3 = st.columns([1, 1, 2])
+        if ab1.button("👁️ View", type="primary", use_container_width=True, key="ov_view"):
+            st.session_state['open_pr_view'] = int(row['pr_id'])
+            st.rerun(scope="app")
+        if ab2.button("✖ Deselect", use_container_width=True, key="ov_desel"):
+            st.session_state['_ov_all_pr_key'] = st.session_state.get('_ov_all_pr_key', 0) + 1
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════
