@@ -609,15 +609,46 @@ def approve_pr(pr_id: int, approver_employee_id: int, comments: str = '') -> Dic
         return {'success': False, 'message': str(e)}
 
 
-def reject_pr(pr_id: int, approver_employee_id: int, reason: str) -> bool:
-    """Reject PR. Sets REJECTED status."""
+def reject_pr(pr_id: int, approver_employee_id: int, reason: str) -> Dict:
+    """
+    Reject PR. Only the authorized approver at current level can reject.
+    Returns: {success, message}
+    """
     try:
         with _get_transaction() as conn:
-            pr = conn.execute(text(
-                "SELECT pr_number, current_approval_level FROM il_purchase_requests WHERE id=:id AND delete_flag=0"
-            ), {'id': pr_id}).fetchone()
+            pr = conn.execute(text("""
+                SELECT pr_number, current_approval_level, status
+                FROM il_purchase_requests WHERE id=:id AND delete_flag=0
+            """), {'id': pr_id}).fetchone()
             if not pr:
-                return False
+                return {'success': False, 'message': 'PR not found'}
+            if pr.status != 'PENDING_APPROVAL':
+                return {'success': False, 'message': f'Cannot reject PR in status {pr.status}'}
+
+            # Verify approver is authorized for current level
+            at_id = conn.execute(text(
+                "SELECT id FROM approval_types WHERE code='IL_PURCHASE_REQUEST' LIMIT 1"
+            )).fetchone()
+            if not at_id:
+                return {'success': False, 'message': 'Approval type not configured'}
+
+            auth = conn.execute(text("""
+                SELECT aa.id FROM approval_authorities aa
+                WHERE aa.approval_type_id = :atid
+                  AND aa.employee_id = :emp
+                  AND aa.approval_level = :lvl
+                  AND aa.is_active = 1 AND aa.delete_flag = 0
+                  AND aa.valid_from <= NOW()
+                  AND (aa.valid_to IS NULL OR aa.valid_to >= NOW())
+                LIMIT 1
+            """), {
+                'atid': at_id.id, 'emp': approver_employee_id,
+                'lvl': pr.current_approval_level,
+            }).fetchone()
+
+            if not auth:
+                return {'success': False,
+                        'message': f'Not authorized to reject at level {pr.current_approval_level}'}
 
             conn.execute(text("""
                 UPDATE il_purchase_requests SET
@@ -627,9 +658,6 @@ def reject_pr(pr_id: int, approver_employee_id: int, reason: str) -> bool:
                 WHERE id = :id AND status = 'PENDING_APPROVAL'
             """), {'id': pr_id, 'reason': reason, 'm': str(approver_employee_id)})
 
-            at_id = conn.execute(text(
-                "SELECT id FROM approval_types WHERE code='IL_PURCHASE_REQUEST' LIMIT 1"
-            )).fetchone()
             conn.execute(text("""
                 INSERT INTO approval_history
                     (approval_type_id, entity_id, entity_reference, approver_id,
@@ -640,21 +668,52 @@ def reject_pr(pr_id: int, approver_employee_id: int, reason: str) -> bool:
                 'approver': approver_employee_id, 'lvl': pr.current_approval_level,
                 'reason': reason, 'by': str(approver_employee_id),
             })
-        return True
+        return {'success': True, 'message': 'PR rejected.'}
     except Exception as e:
         logger.error(f"reject_pr failed: {e}")
-        return False
+        return {'success': False, 'message': str(e)}
 
 
-def request_revision(pr_id: int, approver_employee_id: int, notes: str) -> bool:
-    """Request revision — sends back to PM for editing."""
+def request_revision(pr_id: int, approver_employee_id: int, notes: str) -> Dict:
+    """
+    Request revision — only authorized approver can send back to PM.
+    Returns: {success, message}
+    """
     try:
         with _get_transaction() as conn:
-            pr = conn.execute(text(
-                "SELECT pr_number, current_approval_level FROM il_purchase_requests WHERE id=:id AND delete_flag=0"
-            ), {'id': pr_id}).fetchone()
+            pr = conn.execute(text("""
+                SELECT pr_number, current_approval_level, status
+                FROM il_purchase_requests WHERE id=:id AND delete_flag=0
+            """), {'id': pr_id}).fetchone()
             if not pr:
-                return False
+                return {'success': False, 'message': 'PR not found'}
+            if pr.status != 'PENDING_APPROVAL':
+                return {'success': False, 'message': f'Cannot request revision for PR in status {pr.status}'}
+
+            # Verify approver is authorized for current level
+            at_id = conn.execute(text(
+                "SELECT id FROM approval_types WHERE code='IL_PURCHASE_REQUEST' LIMIT 1"
+            )).fetchone()
+            if not at_id:
+                return {'success': False, 'message': 'Approval type not configured'}
+
+            auth = conn.execute(text("""
+                SELECT aa.id FROM approval_authorities aa
+                WHERE aa.approval_type_id = :atid
+                  AND aa.employee_id = :emp
+                  AND aa.approval_level = :lvl
+                  AND aa.is_active = 1 AND aa.delete_flag = 0
+                  AND aa.valid_from <= NOW()
+                  AND (aa.valid_to IS NULL OR aa.valid_to >= NOW())
+                LIMIT 1
+            """), {
+                'atid': at_id.id, 'emp': approver_employee_id,
+                'lvl': pr.current_approval_level,
+            }).fetchone()
+
+            if not auth:
+                return {'success': False,
+                        'message': f'Not authorized to request revision at level {pr.current_approval_level}'}
 
             conn.execute(text("""
                 UPDATE il_purchase_requests SET
@@ -665,9 +724,6 @@ def request_revision(pr_id: int, approver_employee_id: int, notes: str) -> bool:
                 WHERE id = :id AND status = 'PENDING_APPROVAL'
             """), {'id': pr_id, 'notes': notes, 'm': str(approver_employee_id)})
 
-            at_id = conn.execute(text(
-                "SELECT id FROM approval_types WHERE code='IL_PURCHASE_REQUEST' LIMIT 1"
-            )).fetchone()
             conn.execute(text("""
                 INSERT INTO approval_history
                     (approval_type_id, entity_id, entity_reference, approver_id,
@@ -678,10 +734,10 @@ def request_revision(pr_id: int, approver_employee_id: int, notes: str) -> bool:
                 'approver': approver_employee_id, 'lvl': pr.current_approval_level,
                 'notes': notes, 'by': str(approver_employee_id),
             })
-        return True
+        return {'success': True, 'message': 'Revision requested — PR sent back to PM.'}
     except Exception as e:
         logger.error(f"request_revision failed: {e}")
-        return False
+        return {'success': False, 'message': str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -1593,6 +1593,19 @@ def _dialog_approval_action(pr_id: int):
     if not pr:
         st.error("PR not found."); return
 
+    # ── Permission gate: only authorized approver or admin ──────
+    is_current_approver = is_approver_for_pr(pr_id, emp_int_id)
+    if not is_current_approver and not is_admin:
+        st.error("⛔ Bạn không có quyền phê duyệt PR này.")
+        st.caption(f"PR **{pr['pr_number']}** đang pending approval level "
+                   f"**{pr.get('current_approval_level', '?')}**. "
+                   f"Chỉ approver được chỉ định trong approval chain mới có quyền.")
+        from utils.il_project.pr_queries import get_current_approver
+        cur_app = get_current_approver(pr_id)
+        if cur_app:
+            st.info(f"📧 Approver hiện tại: **{cur_app['approver_name']}** ({cur_app['approver_email']})")
+        return
+
     st.markdown(f"### {pr['pr_number']} — {pr.get('vendor_name', 'No vendor')}")
     st.caption(f"Project: {pr['project_code']} | Amount: {fmt_vnd(pr.get('total_amount_vnd'))} | "
                f"Priority: {PRIORITY_ICONS.get(pr.get('priority', 'NORMAL'), '')} {pr.get('priority', 'NORMAL')}")
@@ -1668,7 +1681,8 @@ def _dialog_approval_action(pr_id: int):
         if not comments:
             st.warning("Please provide a reason for rejection.")
         else:
-            if reject_pr(pr_id, emp_int_id, comments):
+            result = reject_pr(pr_id, emp_int_id, comments)
+            if result['success']:
                 notify_pr_rejected(
                     pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
                     total_vnd=float(pr.get('total_amount_vnd') or 0),
@@ -1680,17 +1694,18 @@ def _dialog_approval_action(pr_id: int):
                     cc_emails=_approval_cc,
                     app_url=_pr_link(pr_id, 'edit'),
                 )
-                st.success("PR rejected.")
+                st.success(result['message'])
                 st.cache_data.clear()
                 st.rerun()
             else:
-                st.error("Reject failed.")
+                st.error(result['message'])
 
     if c3.button("🔄 Request Revision", use_container_width=True, key="btn_revision"):
         if not comments:
             st.warning("Please provide revision notes.")
         else:
-            if request_revision(pr_id, emp_int_id, comments):
+            result = request_revision(pr_id, emp_int_id, comments)
+            if result['success']:
                 notify_pr_revision_requested(
                     pr_number=pr['pr_number'], project_code=pr.get('project_code', ''),
                     total_vnd=float(pr.get('total_amount_vnd') or 0),
@@ -1702,11 +1717,11 @@ def _dialog_approval_action(pr_id: int):
                     cc_emails=_approval_cc,
                     app_url=_pr_link(pr_id, 'edit'),
                 )
-                st.success("Revision requested — PR sent back to PM.")
+                st.success(result['message'])
                 st.cache_data.clear()
                 st.rerun()
             else:
-                st.error("Revision request failed.")
+                st.error(result['message'])
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1836,9 +1851,14 @@ def _dialog_pr_view(pr_id: int):
                 st.error(result['message'])
 
     if pr['status'] == 'APPROVED' and not pr.get('po_id'):
-        if ac2.button("🛒 Create PO", type="primary", use_container_width=True):
-            st.session_state['confirm_create_po'] = pr_id
-            st.rerun()
+        can_create_po = is_pm_of_project or is_admin
+        if can_create_po:
+            if ac2.button("🛒 Create PO", type="primary", use_container_width=True):
+                st.session_state['confirm_create_po'] = pr_id
+                st.rerun()
+        else:
+            ac2.button("🛒 Create PO", disabled=True, use_container_width=True,
+                       help="Chỉ PM của project hoặc Admin mới có thể tạo PO")
 
     if pr['status'] == 'PENDING_APPROVAL' and (is_my_pr or is_pm_of_project or is_admin):
         if ac2.button("📧 Remind Approver", use_container_width=True):
@@ -2092,6 +2112,12 @@ def _dialog_confirm_po(pr_id: int):
     st.markdown(f"### 🛒 Create PO from {pr['pr_number']}")
     st.caption(f"Vendor: {pr.get('vendor_name', '—')} | Total: {fmt_vnd(pr.get('total_amount_vnd'))} | "
                f"Items: {pr.get('item_count', '—')}")
+
+    # ── Permission gate: PM or Admin only ──────────────────────────
+    _is_pm = is_project_pm(pr['project_id'], emp_int_id)
+    if not _is_pm and not is_admin:
+        st.error("⛔ Chỉ PM của project hoặc Admin mới có thể tạo PO.")
+        return
 
     # ── Step 1: Auto-resolve product_id from linked sources ────────
     resolve_result = resolve_product_ids(pr_id)
