@@ -48,6 +48,24 @@ QUICK_REF = {
         ("E", "Travel & Site OH",  "E = D × β",                  "Tự động: Expenses APPROVED (phase ≠ PRE_SALES và ≠ WARRANTY) + Pre-sales costs SPECIAL/COGS (category hợp lệ)", "Đi lại, chi phí hiện trường"),
         ("F", "Warranty Reserve",  "F = (A + C) × γ",            "Nhập thủ công: provision / actual_used / released. F_net = provision − released", "Dự phòng bảo hành"),
     ],
+    "🛒 Vòng đời Purchase Request": [
+        ("DRAFT",              "⚪", "PR mới tạo, đang soạn items",           "Thêm items → Submit for Approval"),
+        ("PENDING_APPROVAL",   "🔵", "Đang chờ approver phê duyệt",          "Approver: Approve / Reject / Revision. Creator: Remind / Cancel"),
+        ("APPROVED",           "✅", "Đã phê duyệt (final level)",            "Tạo Purchase Order (PO)"),
+        ("REJECTED",           "🔴", "Bị từ chối",                            "Tạo PR mới hoặc liên hệ approver"),
+        ("REVISION_REQUESTED", "🟡", "Approver yêu cầu chỉnh sửa",          "Edit PR → Submit lại"),
+        ("PO_CREATED",         "🟢", "PO đã được tạo từ PR",                 "Gửi PO cho vendor"),
+        ("CANCELLED",          "⬛", "Đã hủy (bởi creator/PM)",              "Tạo PR mới nếu cần"),
+    ],
+    "📧 Email Notification — PR Workflow": [
+        ("PR Submitted",          "📤", "Gửi đến approver (Level 1)",         "Auto-CC: requester. User có thể thêm CC từ employee list"),
+        ("PR Approved",           "✅", "Gửi đến requester",                  "Auto-CC PM (khi final). Nếu multi-level: email tiếp đến next approver"),
+        ("PR Rejected",           "🔴", "Gửi đến requester",                  "Auto-CC PM nếu PM ≠ requester"),
+        ("Revision Requested",    "🟡", "Gửi đến requester",                  "Auto-CC PM nếu PM ≠ requester"),
+        ("PO Created",            "🟢", "Gửi đến requester",                  "Auto-CC PM. User có thể CC finance team"),
+        ("PR Cancelled",          "⬛", "Gửi đến requester",                  "Auto-CC PM + pending approver (nếu đang PENDING)"),
+        ("Reminder",              "📧", "Gửi đến approver hiện tại",          "Auto-CC requester. Nhấn 📧 Remind trong My PRs hoặc View dialog"),
+    ],
 }
 
 SOP_STEPS = {
@@ -117,6 +135,29 @@ SOP_STEPS = {
         ("6", "Finalize COGS Actual", "Không thể hoàn tác sau bước này"),
         ("7", "Chuyển Status dự án → CLOSED", ""),
         ("8", "Tab Benchmarks: nhấn ➕ Add → hệ thống auto-fill α/β/γ + man-days + GP%", "Chỉ cần nhập Lessons Learned, Key Risks, Recommendations"),
+    ],
+    "🛒 Tạo & Submit Purchase Request": [
+        ("1", "Sidebar: chọn Project → nhấn ➕ New PR", "Chỉ PM hoặc Admin mới thấy nút New PR"),
+        ("2", "Step ① Setup: chọn Type (EQUIPMENT/FABRICATION/SERVICE/MIXED)", "COGS Category tự set theo type. Currency + tỷ giá auto-fetch"),
+        ("3", "Chọn Vendor, Priority, Required Date, Justification", "Vendor chọn từ danh sách hoặc '(Select later)'"),
+        ("4", "Step ② Items: nhấn 📋 Import from Estimate hoặc ➕ Add Manual Item", "Import chỉ hiện items chưa có trong PR khác. Manual item: nhập description, qty, cost"),
+        ("5", "Chọn item trong bảng → ✏️ Edit hoặc 🗑 Remove", "Có thể mix import + manual items"),
+        ("6", "Step ③ Review: kiểm tra Summary, Budget Impact, Approval Chain", "Budget comparison hiện: Estimated vs Previous PRs vs This PR → warnings nếu over budget"),
+        ("7", "📧 CC thêm (optional): chọn nhân viên để CC email", "Multiselect từ employee list"),
+        ("8", "Nhấn ✅ Create & Submit for Approval", "Hoặc 💾 Save as Draft để submit sau"),
+    ],
+    "✅ Phê duyệt PR (Approver)": [
+        ("1", "Nhận email thông báo → click Open in ERP", "Link direct đến PR trên hệ thống. Hoặc vào IL5 → tab Pending Approval"),
+        ("2", "Xem chi tiết: items, budget comparison, justification", "Budget table hiện Estimated vs PR Committed by COGS A–F"),
+        ("3", "Chọn action: ✅ Approve / ❌ Reject / 🔄 Request Revision", "Reject và Revision bắt buộc nhập comments"),
+        ("4", "📧 CC thêm (optional): chọn nhân viên để CC email", ""),
+        ("5", "Multi-level: sau Level 1 approve → auto email đến Level 2", "Số levels phụ thuộc vào tổng tiền (cấu hình trong Approval Config)"),
+    ],
+    "🛒 Tạo PO từ PR đã Approved": [
+        ("1", "Vào View PR → nhấn 🛒 Create PO", "Hoặc từ My PRs tab: chọn PR APPROVED → 🛒 Create PO"),
+        ("2", "Dialog confirm: kiểm tra vendor, total amount", "📧 CC thêm: chọn finance team hoặc người liên quan"),
+        ("3", "Nhấn 🛒 Yes, Create PO", "PO tự sinh: PO{YYYYMMDD}-{id}{vendor_id}"),
+        ("4", "PO link ngược vào PR → status chuyển PO_CREATED", "Email thông báo gửi requester + CC PM + CC thêm"),
     ],
 }
 
@@ -487,6 +528,124 @@ QA_DATA = [
         "note": "Import không trùng lặp — mỗi lần import thêm mới. Nhấn 🗑 Clear trước nếu muốn thay thế hoàn toàn. Sau import, vẫn có thể thêm items từ costbook/catalog khác.",
         "warning": "",
     },
+    # ── Purchase Request Q&A ──────────────────────────────────────
+    {
+        "id": "Q26",
+        "tags": ["PR", "purchase request", "tạo", "submit"],
+        "question": "Tạo Purchase Request (PR) mua thiết bị từ Estimate, quy trình thế nào?",
+        "situation": "Dự án IN_PROGRESS, Estimate đã active có 10 items thiết bị. PM muốn tạo PR để mua hàng.",
+        "sop": [
+            "**Sidebar**: chọn Project → nhấn ➕ **New PR**.",
+            "**Step ① Setup**: chọn Type = EQUIPMENT → COGS auto = A. Chọn Currency, Vendor, Priority, Required Date.",
+            "Tỷ giá auto-fetch (✅ Live / ⚠️ Fallback) — kiểm tra trước khi Next.",
+            "**Step ② Items**: nhấn 📋 **Import from Estimate** → hệ thống hiện items category A chưa có trong PR khác → chọn Import.",
+            "Có thể thêm ➕ **Add Manual Item** cho hạng mục ngoài Estimate.",
+            "**Step ③ Review**: kiểm tra Budget Impact (Estimated vs Previous PRs vs This PR). Approval Chain preview.",
+            "Nhấn ✅ **Create & Submit for Approval** → email tự gửi đến approver Level 1.",
+        ],
+        "note": "Type → COGS mapping: EQUIPMENT = A, FABRICATION = C, SERVICE = D, MIXED = multiple. Import chỉ hiện items phù hợp với COGS category đã chọn.",
+        "warning": "",
+    },
+    {
+        "id": "Q27",
+        "tags": ["PR", "approval", "multi-level", "phê duyệt"],
+        "question": "PR cần bao nhiêu cấp phê duyệt? Approver nhận thông báo thế nào?",
+        "situation": "PR tổng giá trị 500 triệu VND, approval chain có 3 levels.",
+        "sop": [
+            "**Số levels tự động xác định** từ tổng tiền VND + cấu hình trong Approval Config (IL_PURCHASE_REQUEST).",
+            "**Level thấp nhất có max_amount ≥ tổng VND** = số levels cần. VD: L1 max 200M, L2 max 500M → PR 500M cần **2 levels**.",
+            "**Submit** → email đến **L1 approver** (CC requester).",
+            "L1 approve → email đến **requester** (thông báo) + email đến **L2 approver** (yêu cầu approve).",
+            "L2 approve (final) → email đến **requester** + **CC PM** (để PM biết có thể tạo PO).",
+            "**Approver click 'Open in ERP'** trong email → direct đến PR dialog (login nếu chưa login).",
+        ],
+        "note": "Approval chain cấu hình ở trang IL 98 — Approval Config. Mỗi level gắn với 1 employee + max_amount + valid period.",
+        "warning": "",
+    },
+    {
+        "id": "Q28",
+        "tags": ["PR", "reminder", "nhắc nhở", "pending"],
+        "question": "PR đang chờ duyệt lâu quá, làm sao nhắc approver?",
+        "situation": "PR đã submit 5 ngày, approver chưa phản hồi. PM muốn nhắc.",
+        "sop": [
+            "**Cách 1 — My PRs tab**: chọn PR đang PENDING_APPROVAL → nhấn 📧 **Remind** ở action bar.",
+            "**Cách 2 — View dialog**: mở View PR → nhấn 📧 **Remind Approver**.",
+            "Hệ thống gửi email đến approver hiện tại với subject **[PR Reminder]** + số ngày pending.",
+            "Email kèm: urgency banner (🔴 >7 ngày, 🟡 >3 ngày), budget comparison, deep link.",
+        ],
+        "note": "Không có rate-limit — PM tự quyết khi nào nhắc. Tránh spam. Age indicator trên bảng: 🟡 >3d, 🔴 >7d.",
+        "warning": "",
+    },
+    {
+        "id": "Q29",
+        "tags": ["PR", "revision", "chỉnh sửa", "reject"],
+        "question": "Approver yêu cầu chỉnh sửa PR, requester xử lý thế nào?",
+        "situation": "Approver request revision: 'Thiếu quotation cho item rack, bổ sung vendor quote ref.'",
+        "sop": [
+            "Requester nhận email **[PR Revision]** → click Open in ERP → mở Edit dialog.",
+            "**Revision feedback** hiện banner vàng ở đầu dialog.",
+            "**Edit**: sửa items, thêm vendor_quote_ref, đổi vendor, thêm/xóa items.",
+            "**Header**: có thể đổi Priority, COGS Category, Required Date, Justification.",
+            "Nhấn **📤 Submit for Approval** → PR resubmit, approval level reset về 1.",
+        ],
+        "note": "PR bị Reject không thể edit — cần tạo PR mới. Revision Requested có thể edit và resubmit.",
+        "warning": "",
+    },
+    {
+        "id": "Q30",
+        "tags": ["PR", "cancel", "hủy", "pending"],
+        "question": "Muốn hủy PR đang PENDING_APPROVAL (chưa cần mua nữa), có được không?",
+        "situation": "Scope thay đổi, không cần mua thiết bị đã tạo PR. PR đang chờ Level 1 approve.",
+        "sop": [
+            "**Có thể hủy** — PR status DRAFT, REVISION_REQUESTED, hoặc PENDING_APPROVAL đều cancel được.",
+            "**Vào View PR** → nhấn **🗑 Cancel PR** → confirm dialog.",
+            "Hệ thống gửi email đến requester + CC PM + **CC pending approver** (để approver biết PR đã rút).",
+        ],
+        "note": "Cancel là vĩnh viễn, không thể hoàn tác. Tạo PR mới nếu cần mua lại.",
+        "warning": "PR đã APPROVED hoặc PO_CREATED không thể cancel.",
+    },
+    {
+        "id": "Q31",
+        "tags": ["PR", "CC", "email", "thêm người"],
+        "question": "Muốn CC thêm người (finance, director) vào email thông báo PR, làm thế nào?",
+        "situation": "Submit PR mua thiết bị lớn, muốn CC director và kế toán trưởng.",
+        "sop": [
+            "Tại mỗi action point (Submit, Approve, Reject, Revision, Create PO, Cancel) có widget **📧 CC thêm**.",
+            "Nhấn vào multiselect → chọn nhân viên từ danh sách (query từ employees table, chỉ hiện người có email).",
+            "Email tự động gửi TO đến người chính + CC danh sách đã chọn.",
+            "**Auto-CC** (không cần chọn): requester luôn CC khi submit, PM luôn CC khi approved/rejected/revision.",
+        ],
+        "note": "CC chỉ áp dụng cho lần gửi đó — không lưu cho lần sau. Chọn lại mỗi lần nếu cần.",
+        "warning": "",
+    },
+    {
+        "id": "Q32",
+        "tags": ["PR", "budget", "over budget", "estimate"],
+        "question": "PR vượt budget Estimate, hệ thống có cảnh báo không?",
+        "situation": "Estimate category A = 1.5 tỷ. Đã có PR trước 800 triệu. PR mới thêm 900 triệu → tổng 1.7 tỷ > budget.",
+        "sop": [
+            "**Có cảnh báo** — Step ③ Review trong wizard hiện bảng Budget Impact:",
+            "Bảng so sánh: Estimated | Previous PRs | ⭐ This PR | New Total | Remaining | Used %.",
+            "**🔴 Over budget**: banner đỏ + thông báo số tiền vượt.",
+            "**🟡 >85%**: banner vàng cảnh báo gần giới hạn.",
+            "**Vẫn cho submit** — cảnh báo nhưng không block. Approver sẽ thấy budget context khi approve.",
+        ],
+        "note": "Budget comparison cũng hiện trong View dialog và Approval dialog — approver thấy đầy đủ context để quyết định.",
+        "warning": "",
+    },
+    {
+        "id": "Q33",
+        "tags": ["PR", "deep link", "email", "login"],
+        "question": "Click link trong email nhưng chưa login, có bị mất link không?",
+        "situation": "Approver nhận email PR, click 'Open in ERP', session đã hết hạn.",
+        "sop": [
+            "**Không mất** — hệ thống lưu deep link trước khi kiểm tra login.",
+            "Trang login inline hiện ngay (không redirect về trang chủ).",
+            "Sau khi login → tự động mở đúng dialog (View / Approve / Edit tùy action trong link).",
+        ],
+        "note": "Deep link format: ...?pr_id=123&action=approve. Actions: view, approve, edit.",
+        "warning": "",
+    },
 ]
 
 # Tags list for filter
@@ -575,6 +734,32 @@ with tab_quickref:
     g1.success("✅ **GO**\n\nGP% ≥ ngưỡng GO\n*(mặc định ≥ 25%)*")
     g2.warning("⚠️ **CONDITIONAL**\n\nGP% giữa 2 ngưỡng\n*(mặc định 18–25%)*")
     g3.error("❌ **NO-GO**\n\nGP% < ngưỡng CONDITIONAL\n*(mặc định < 18%)*")
+
+    st.divider()
+    st.subheader("🛒 Vòng đời Purchase Request")
+    st.caption("PR workflow: DRAFT → PENDING_APPROVAL → APPROVED → PO_CREATED. Có thể Cancel từ DRAFT/REVISION/PENDING.")
+    pr_rows = QUICK_REF["🛒 Vòng đời Purchase Request"]
+    df_pr = pd.DataFrame(pr_rows, columns=["Trạng thái", "Icon", "Ý nghĩa", "Hành động tiếp theo"])
+    st.dataframe(df_pr, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Trạng thái": st.column_config.TextColumn(width=180),
+                     "Icon": st.column_config.TextColumn(width=50),
+                     "Ý nghĩa": st.column_config.TextColumn(width=280),
+                     "Hành động tiếp theo": st.column_config.TextColumn(width=320),
+                 })
+
+    st.divider()
+    st.subheader("📧 Email Notification — PR Workflow")
+    st.caption("Tất cả email có nút 'Open in ERP' → deep link trực tiếp đến PR. User có thể CC thêm người từ employee list.")
+    email_rows = QUICK_REF["📧 Email Notification — PR Workflow"]
+    df_email = pd.DataFrame(email_rows, columns=["Trigger", "Icon", "Gửi đến", "CC tự động / Ghi chú"])
+    st.dataframe(df_email, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Trigger": st.column_config.TextColumn(width=180),
+                     "Icon": st.column_config.TextColumn(width=50),
+                     "Gửi đến": st.column_config.TextColumn(width=220),
+                     "CC tự động / Ghi chú": st.column_config.TextColumn(width=400),
+                 })
 
     st.divider()
     st.subheader("Biểu tượng tỷ giá")
@@ -668,6 +853,30 @@ with tab_sop:
         col_a, col_b = st.columns(2)
         col_a.info("**⚡ Generate All Variance**\n\n1 click tạo 7 rows (A–F + TOTAL).\nAuto-fill Estimated & Actual từ data.\nChỉ cần bổ sung Root Cause cho khoản lệch >5%.")
         col_b.info("**📚 Auto-fill Benchmark**\n\nNhấn ➕ Add → hệ thống tự điền:\n- α/β/γ Used (từ Estimate)\n- α/β/γ Actual (tính từ COGS Actual)\n- Man-days Est/Act, GP% Est/Act\n\nChỉ cần nhập Lessons Learned.")
+
+    elif sop_choice == "🛒 Tạo & Submit Purchase Request":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**Wizard 3 bước:**\n- ① **Setup**: Type, Currency, Vendor, Priority\n- ② **Items**: Import Estimate / Add Manual\n- ③ **Review**: Budget Impact + Approval Chain\n\n📧 CC thêm người trước khi Submit.")
+        col_b.success("**Budget Impact (Step ③):**\n- So sánh Estimated vs Previous PRs vs This PR\n- 🟢 < 85% | 🟡 85–100% | 🔴 Over budget\n- Cảnh báo nhưng **không block** submit\n- Approver cũng thấy budget khi approve")
+        st.divider()
+        tp1, tp2, tp3, tp4 = st.columns(4)
+        tp1.info("**EQUIPMENT** → A")
+        tp2.info("**FABRICATION** → C")
+        tp3.info("**SERVICE** → D")
+        tp4.info("**MIXED** → Multiple")
+
+    elif sop_choice == "✅ Phê duyệt PR (Approver)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**3 actions:**\n- ✅ **Approve**: chuyển level tiếp hoặc final\n- ❌ **Reject**: requester tạo PR mới\n- 🔄 **Revision**: requester edit + resubmit")
+        col_b.success("**Email deep link:**\n- Click 'Open in ERP' → direct đến Approval dialog\n- Nếu chưa login → inline login → auto mở dialog\n- Multi-level: email tự gửi next approver")
+        st.warning("**Reject vs Revision:** Reject = đóng vĩnh viễn, cần tạo PR mới. Revision = gửi lại cho requester sửa + submit lại.")
+
+    elif sop_choice == "🛒 Tạo PO từ PR đã Approved":
+        st.divider()
+        st.info("**PO tự động tạo** trong bảng purchase_orders + product_purchase_orders. PO number format: PO{YYYYMMDD}-{id}{vendor_id}. Link ngược vào il_project_documents.")
+        st.success("**Sau khi tạo PO**: PR status → PO_CREATED. Email gửi requester + CC PM. Tiếp theo: gửi PO cho vendor qua kênh bên ngoài (email/portal).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
