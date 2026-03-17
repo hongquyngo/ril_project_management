@@ -1138,7 +1138,8 @@ def search_products_for_linking(keyword: str, limit: int = 20) -> list:
     Search products table for linking to PR items.
     Returns: [{id, pt_code, name, brand_name, uom}, ...]
     """
-    return _execute_query("""
+    safe_limit = int(limit)
+    return _execute_query(f"""
         SELECT
             p.id,
             p.pt_code,
@@ -1154,8 +1155,8 @@ def search_products_for_linking(keyword: str, limit: int = 20) -> list:
             OR p.description LIKE :kw
           )
         ORDER BY p.name
-        LIMIT :lim
-    """, {'kw': f'%{keyword}%', 'lim': limit})
+        LIMIT {safe_limit}
+    """, {'kw': f'%{keyword}%'})
 
 
 def validate_po_readiness(pr_id: int) -> Dict:
