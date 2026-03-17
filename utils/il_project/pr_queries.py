@@ -1138,25 +1138,30 @@ def search_products_for_linking(keyword: str, limit: int = 20) -> list:
     Search products table for linking to PR items.
     Returns: [{id, pt_code, name, brand_name, uom}, ...]
     """
-    safe_limit = int(limit)
-    return _execute_query(f"""
-        SELECT
-            p.id,
-            p.pt_code,
-            p.name,
-            COALESCE(b.name, '') AS brand_name,
-            p.uom
-        FROM products p
-        LEFT JOIN brands b ON p.brand_id = b.id
-        WHERE p.delete_flag = 0
-          AND (
-            p.name LIKE :kw
-            OR p.pt_code LIKE :kw
-            OR p.description LIKE :kw
-          )
-        ORDER BY p.name
-        LIMIT {safe_limit}
-    """, {'kw': f'%{keyword}%'})
+    try:
+        from ..db import get_db_engine
+        engine = get_db_engine()
+        safe_limit = int(limit)
+        kw = f'%{keyword}%'
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT
+                    p.id,
+                    p.pt_code,
+                    p.name,
+                    COALESCE(b.brand_name, '') AS brand_name,
+                    p.uom
+                FROM products p
+                LEFT JOIN brands b ON p.brand_id = b.id
+                WHERE p.delete_flag = 0
+                  AND (p.name LIKE :kw OR p.pt_code LIKE :kw)
+                ORDER BY p.name
+                LIMIT {safe_limit}
+            """), {'kw': kw}).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as e:
+        logger.error(f"search_products_for_linking failed: {e}")
+        return []
 
 
 def validate_po_readiness(pr_id: int) -> Dict:
