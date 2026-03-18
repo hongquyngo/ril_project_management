@@ -21,6 +21,12 @@ from utils.auth import AuthManager
 from utils.db import execute_query, execute_update, get_transaction
 from sqlalchemy import text
 
+try:
+    from utils.il_project.approval_guide import render_approval_guide
+    _has_guide = True
+except ImportError:
+    _has_guide = False
+
 logger = logging.getLogger(__name__)
 auth = AuthManager()
 
@@ -815,6 +821,10 @@ def _dialog_edit_preset(preset: dict):
 
 st.title("🔐 Approval Configuration")
 st.caption("Manage approval types, authorities, notifications, and view history. Admin only.")
+
+# Floating user guide popover
+if _has_guide:
+    render_approval_guide()
 
 tab_authorities, tab_types, tab_notifications, tab_history = st.tabs([
     "👥 Approval Authorities",
