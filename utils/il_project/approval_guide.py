@@ -96,14 +96,14 @@ def _section_overview():
     st.markdown("""
 ### 🏠 Tổng quan
 
-Trang **Approval Configuration** quản lý toàn bộ hệ thống phê duyệt trong ERP,
+Trang **Approval Configuration** quản lý toàn bộ hệ thống phê duyệt,
 bao gồm:
 
 | Tab | Chức năng |
 |-----|-----------|
 | **👥 Authorities** | Ai được phê duyệt gì, level nào, giới hạn bao nhiêu |
-| **📋 Types** | Các loại phê duyệt (PR, PO, v.v.) |
-| **📧 Notifications** | Gửi email thông báo config cho Finance/Approver |
+| **📋 Types** | Các loại phê duyệt (Purchase Request, v.v.) |
+| **📧 Notifications** | Gửi email thông báo tổng hợp cho Finance/Approver |
 | **📜 History** | Lịch sử phê duyệt (read-only) |
 
 ---
@@ -111,13 +111,25 @@ bao gồm:
 #### 🔗 Luồng phê duyệt Purchase Request (ví dụ)
 
 ```
-PM tạo PR → Submit → L1 Approver (≤500M) → L2 Approver (unlimited) → Approved → Tạo PO
+PM tạo PR → Submit → L1 Approver (≤500M) → L2 Approver (No limit) → Approved → Tạo PO
 ```
 
 - **Level 1**: GM phê duyệt PR ≤ 500M ₫
 - **Level 2**: CEO phê duyệt mọi giá trị (unlimited)
 - Nếu PR = 300M ₫ → chỉ cần L1
 - Nếu PR = 800M ₫ → cần cả L1 và L2
+
+---
+
+#### 📧 Thông báo tự động
+
+Mỗi khi thêm/sửa/xóa authority, hệ thống **tự động gửi email** cho:
+- Approver bị ảnh hưởng (TO)
+- Admin đang thao tác + tất cả approver cùng type (CC)
+- Finance team nếu type liên quan payment (CC)
+
+Khi gửi Summary thủ công, sender + tất cả approver trong scope được
+**bắt buộc CC** — không thể bỏ.
 
 ---
 
@@ -141,13 +153,14 @@ với **giới hạn bao nhiêu**.
 2. Chọn **Approval Type** (ví dụ: IL_PURCHASE_REQUEST)
 3. Chọn **Approver** (từ danh sách employee)
 4. Đặt **Level** (1 = approve trước, 2 = approve sau)
-5. Đặt **Max Amount** (giới hạn VND) hoặc bỏ tick = unlimited
+5. Đặt **Approval Limit** (giới hạn VND) hoặc bỏ tick = unlimited
 6. Chọn **Company Scope** (thường để "All companies")
-7. Đặt **Valid From / To** (thời hạn hiệu lực)
+7. Đặt **Effective From / To** (thời hạn hiệu lực)
 8. Click **💾 Create**
 
-> **⚡ Auto-notify**: Sau khi tạo, hệ thống sẽ hỏi bạn có muốn gửi email
-> thông báo cho người liên quan (approver, finance team) không.
+> **📧 Tự động thông báo**: Sau khi tạo thành công, hệ thống **tự động gửi email**
+> cho approver mới, tất cả approver cùng type, admin (sender), và Finance team
+> (nếu liên quan). Không cần thao tác thêm.
 
 ---
 
@@ -157,14 +170,16 @@ với **giới hạn bao nhiêu**.
 2. Click **✏️ Edit**
 3. Sửa thông tin → **💾 Save**
 
-> **Quan trọng**: Khi thay đổi Max Amount hoặc Level, nên gửi thông báo
-> cho Finance team để cập nhật checklist thanh toán.
+> **📧 Tự động thông báo**: Email sẽ tự gửi cho người bị thay đổi
+> và tất cả approver liên quan. Email bao gồm bảng so sánh
+> trước/sau (What Changed).
 
 ---
 
 #### 🗑 Xóa Authority
 
 Trong dialog Edit → click **🗑 Delete** → authority sẽ bị soft-delete.
+Email thông báo xóa cũng được gửi tự động.
 
 ---
 
@@ -177,14 +192,27 @@ Trong dialog Edit → click **🗑 Delete** → authority sẽ bị soft-delete.
 
 ---
 
-#### 🔢 Level & Max Amount — Cách hoạt động
+#### 🔢 Level & Approval Limit — Cách hoạt động
 
 | Trường hợp | Level cần | Giải thích |
 |-------------|-----------|------------|
-| PR = 200M, L1 max = 500M | L1 only | 200M < 500M → L1 đủ |
-| PR = 700M, L1 max = 500M, L2 = unlimited | L1 + L2 | 700M > 500M → cần L2 |
-| PR = 50M, L1 max = 500M | L1 only | Nhỏ hơn ngưỡng |
+| PR = 200M, L1 limit = 500M | L1 only | 200M < 500M → L1 đủ |
+| PR = 700M, L1 limit = 500M, L2 = unlimited | L1 + L2 | 700M > 500M → cần L2 |
+| PR = 50M, L1 limit = 500M | L1 only | Nhỏ hơn ngưỡng |
 
+---
+
+#### 📧 Ai nhận email khi CRUD?
+
+| Người nhận | Vai trò | Slot |
+|------------|---------|------|
+| Approver bị ảnh hưởng | Người trực tiếp liên quan | **TO** |
+| Admin đang thao tác | Lưu bản ghi (audit trail) | CC |
+| Tất cả approver cùng type | Cập nhật workflow chung | CC |
+| Finance preset | Nếu type liên quan payment | CC |
+
+> Email gửi **không chặn** thao tác: nếu gửi email thất bại,
+> CRUD vẫn thành công. Banner thông báo kết quả sẽ hiện ở đầu tab.
 """)
 
 
@@ -201,7 +229,7 @@ Quản lý các **loại phê duyệt** trong hệ thống.
 | Code | Mô tả |
 |------|-------|
 | `IL_PURCHASE_REQUEST` | Phê duyệt Purchase Request từ IL Project |
-| `APPROVAL_CONFIG_NOTIFY` | Log gửi email thông báo config (tự động) |
+| `APPROVAL_CONFIG_NOTIFY` | Log gửi email thông báo (tự động tạo) |
 
 ---
 
@@ -209,7 +237,7 @@ Quản lý các **loại phê duyệt** trong hệ thống.
 
 1. Click **➕ New Type**
 2. Nhập **Code** (UPPER_SNAKE_CASE, ví dụ: `VENDOR_APPROVAL`)
-3. Nhập **Name** (tên hiển thị)
+3. Nhập **Name** (tên hiển thị, ví dụ: "Vendor Approval")
 4. Nhập **Description** (mô tả)
 5. Tick **Active**
 6. Click **💾 Create**
@@ -229,21 +257,35 @@ def _section_notifications():
     st.markdown("""
 ### 📧 Notifications
 
-Gửi email thông báo approval config cho các bên liên quan,
+Gửi email thông báo approval authority cho các bên liên quan,
 **đặc biệt Finance team** cần biết ai có quyền approve để verify thanh toán.
 
 ---
 
-#### 📊 Send Mode
+#### Hai loại thông báo
 
-| Mode | Khi nào dùng |
-|------|-------------|
-| **Current Config Summary** | Gửi bảng tổng hợp tất cả authorities hiện tại |
-| **Config Change Alert** | Thông báo một thay đổi cụ thể (tự trigger sau Create/Edit/Delete) |
+| Loại | Khi nào | Cách gửi |
+|------|---------|----------|
+| **Summary** | Admin muốn gửi bảng tổng hợp toàn bộ authorities | Thủ công — tab Notifications |
+| **Change Alert** | Sau mỗi Create/Edit/Delete authority | **Tự động** — không cần thao tác |
 
 ---
 
-#### 📬 Chọn người nhận
+#### 🔒 Required CC — Người nhận bắt buộc
+
+Khi gửi Summary email, hệ thống **tự động thêm CC bắt buộc**:
+
+| Người | Lý do |
+|-------|-------|
+| **Admin đang gửi** | Audit trail — lưu bản ghi đã gửi |
+| **Tất cả Active Approvers** trong scope | Là người liên quan trực tiếp |
+
+Required CC **không thể xóa** — hiển thị trong ô "🔒 Required CC" (khóa).
+Bạn chỉ có thể **thêm** người nhận, không bỏ được người bắt buộc.
+
+---
+
+#### 📬 Chọn thêm người nhận
 
 **Cách 1 — Quick Presets** (nhanh nhất):
 - Click nút preset sẵn: **📊 Finance Team**, **👥 All Approvers**, **📋 PMs**
@@ -251,7 +293,7 @@ Gửi email thông báo approval config cho các bên liên quan,
 
 **Cách 2 — Chọn từ employee list**:
 - **TO**: Multiselect chọn nhân viên nhận chính
-- **CC**: Multiselect chọn nhân viên CC
+- **Additional CC**: Thêm CC ngoài danh sách bắt buộc
 
 **Cách 3 — Nhập email thủ công**:
 - Dùng cho group email: `finance-group@prostech.vn`
@@ -266,19 +308,27 @@ Gửi email thông báo approval config cho các bên liên quan,
 
 | Option | Mô tả |
 |--------|-------|
-| **Include valid period** | Hiển thị cột valid_from / valid_to |
+| **Include effective period** | Hiển thị cột Effective From / To |
 | **Include recent changes** | Kèm bảng thay đổi 30 ngày gần nhất |
-| **Note to recipients** | Ghi chú từ admin (hiển thị trong email) |
+| **Note to recipients** | Ghi chú từ admin — hiển thị dưới dạng "Remarks" |
 
 ---
 
 #### 👁 Preview trước khi gửi
 
-Click **👁 Preview Email** để xem nội dung email trước khi gửi.
+Click **👁 Preview Email** để xem nội dung chính xác mà người nhận sẽ thấy.
+
 Email bao gồm:
-- Bảng authority theo từng type (level, approver, max amount)
-- Approval flow summary (L1 → L2 → L3)
-- Finance team callout (nhắc cập nhật checklist)
+- Lời chào trang trọng: *"To whom it may concern..."*
+- Bảng authority theo từng type (Level, Approver, Position, Approval Limit)
+- Approval Workflow summary (L1 → L2 → L3)
+- Finance Department notice (nếu type liên quan payment)
+- Closing: *"Should you have any questions..."*
+
+Preview hiện đúng recipient bar:
+- **TO** (xanh) — người nhận chính
+- **CC** (xanh đậm + label "required") — CC bắt buộc
+- **CC** (xám) — CC thêm
 
 ---
 
@@ -356,14 +406,22 @@ def _section_faq():
 
 Vào tab **📧 Notifications** → chọn preset **Finance Team** (hoặc nhập email)
 → click **📧 Send Notification**. Email sẽ chứa bảng tổng hợp tất cả
-authorities hiện tại kèm flow diagram.
+authorities hiện tại kèm Approval Workflow.
+
+> Hệ thống sẽ **tự thêm CC** cho tất cả approver và admin (sender).
+> Bạn không cần thêm họ thủ công.
 
 ---
 
-**Q: Tôi vừa thay đổi max amount của approver, cần làm gì?**
+**Q: Tôi vừa thay đổi approval limit của approver, cần làm gì?**
 
-Sau khi Save, hệ thống sẽ hiện prompt hỏi gửi notification.
-Tick ☑ **Finance team** và ☑ **Affected approver** → click **📧 Send Now**.
+Không cần làm gì thêm. Sau khi Save, hệ thống **tự động gửi email**
+cho approver bị thay đổi, tất cả approver cùng type, admin (bạn),
+và Finance team (nếu type liên quan payment).
+
+Banner kết quả sẽ hiện ở đầu tab Authorities:
+- ✅ Xanh = gửi thành công, kèm danh sách TO/CC
+- ⚠️ Vàng = gửi thất bại, nhưng thay đổi vẫn được lưu
 
 ---
 
@@ -373,18 +431,19 @@ Tick ☑ **Finance team** và ☑ **Affected approver** → click **📧 Send No
 2. Type: `IL_PURCHASE_REQUEST`
 3. Approver: chọn Board member
 4. Level: **3**
-5. Max Amount: bỏ tick (unlimited) hoặc set giá trị cụ thể
-6. **💾 Create** → Gửi notification cho Finance
+5. Approval Limit: bỏ tick (unlimited) hoặc set giá trị cụ thể
+6. **💾 Create** → Email tự gửi cho tất cả approver + Finance
 
 ---
 
 **Q: Approver đi nghỉ phép, muốn tạm dừng?**
 
 Cách 1: **Edit** authority → bỏ tick **Active** → Save
-Cách 2: **Edit** authority → set **Valid To** = ngày hết phép
+Cách 2: **Edit** authority → set **Effective To** = ngày hết phép
 
 > **Lưu ý**: Nếu deactivate approver duy nhất ở 1 level,
 > PR sẽ không thể submit (hệ thống báo "No approval authorities configured").
+> Email thông báo sẽ tự gửi cho các bên liên quan.
 
 ---
 
@@ -393,6 +452,14 @@ Cách 2: **Edit** authority → set **Valid To** = ngày hết phép
 Không — mỗi employee chỉ có 1 authority per type + level.
 Nếu cần 2 người có thể approve ở cùng level, tạo 2 authority records
 với 2 employee khác nhau ở cùng level.
+
+---
+
+**Q: Tôi có thể bỏ người nào đó khỏi CC khi gửi Summary không?**
+
+Không bỏ được **Required CC** (sender + all active approvers).
+Bạn chỉ có thể **thêm** người nhận TO/CC bổ sung.
+Điều này đảm bảo tất cả người liên quan luôn nhận được thông báo.
 
 ---
 
@@ -406,19 +473,33 @@ người đó mà không cần edit preset.
 
 **Q: Email gửi đi hiển thị gì?**
 
-- Bảng authority theo type (Level, Approver, Position, Max Amount)
-- Approval flow: `L1: Nguyen A (≤500M) → L2: Tran B (∞ Unlimited)`
-- Finance callout: nhắc update checklist thanh toán
-- Admin note (nếu có)
-- Nút "Open in ERP" (nếu APP_BASE_URL được config)
+- Lời chào: *"To whom it may concern..."*
+- Bảng authority theo type (Level, Approver, Position, Approval Limit, Status)
+- Approval Workflow: `L1: Tin (≤500M ₫) → L2: Quy (No limit)`
+- Finance Department notice (chỉ hiện nếu type liên quan purchase/payment)
+- Admin remarks (nếu có)
+- Closing: *"Should you have any questions..."*
+- Footer: *Rozitek Intralogistic Solution*
 
 ---
 
-#### ⌨️ Keyboard Shortcuts
+**Q: Email thông báo thay đổi (Change Alert) khác gì Summary?**
+
+| | Summary | Change Alert |
+|-|---------|-------------|
+| **Khi nào** | Admin gửi thủ công | Tự động sau CRUD |
+| **Nội dung** | Toàn bộ authorities hiện tại | Chi tiết 1 thay đổi cụ thể |
+| **Bảng so sánh** | Không | Có (Before → After) |
+| **Subject** | `[Notice] Approval Authority — ...` | `[Notice] Approval Authority Updated — ...` |
+
+---
+
+#### ⌨️ Thao tác nhanh
 
 | Action | Cách nhanh |
 |--------|-----------|
 | Tìm authority | Dùng **Filter by Type** + **Status** |
 | Edit nhanh | Click dòng → **✏️ Edit** |
 | Gửi summary | Tab Notifications → Preset → **📧 Send** |
+| Xem ai nhận email | Kiểm tra banner sau CRUD hoặc Preview trước khi Send |
 """)
