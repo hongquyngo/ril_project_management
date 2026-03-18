@@ -643,6 +643,18 @@ def _build_styles(font: str, font_bold: str) -> Dict[str, ParagraphStyle]:
             'CellCenter', fontName=font, fontSize=7.5,
             textColor=_COLOR_TEXT, alignment=TA_CENTER, leading=10,
         ),
+        'hdr_cell': ParagraphStyle(
+            'HdrCell', fontName=font_bold, fontSize=7.5,
+            textColor=colors.white, leading=10,
+        ),
+        'hdr_cell_right': ParagraphStyle(
+            'HdrCellRight', fontName=font_bold, fontSize=7.5,
+            textColor=colors.white, alignment=TA_RIGHT, leading=10,
+        ),
+        'hdr_cell_center': ParagraphStyle(
+            'HdrCellCenter', fontName=font_bold, fontSize=7.5,
+            textColor=colors.white, alignment=TA_CENTER, leading=10,
+        ),
         'total_label': ParagraphStyle(
             'TotalLabel', fontName=font_bold, fontSize=8.5,
             textColor=_COLOR_PRIMARY, alignment=TA_RIGHT,
@@ -888,15 +900,15 @@ def _build_po_pdf(data: Dict, language: str = 'en', orientation: str = 'portrait
 
     # Table header row
     col_headers = [
-        Paragraph(f"<b>{labels['col_no']}</b>", styles['cell_center']),
-        Paragraph(f"<b>{labels['col_pt_code']}</b>", styles['cell_bold']),
-        Paragraph(f"<b>{labels['col_description']}</b>", styles['cell_bold']),
-        Paragraph(f"<b>{labels['col_brand']}</b>", styles['cell_bold']),
-        Paragraph(f"<b>{labels['col_qty']}</b>", styles['cell_center']),
-        Paragraph(f"<b>{labels['col_uom']}</b>", styles['cell_center']),
-        Paragraph(f"<b>{labels['col_unit_cost']}</b>", styles['cell_right']),
-        Paragraph(f"<b>{labels['col_amount']}</b>", styles['cell_right']),
-        Paragraph(f"<b>{labels['col_vat']}</b>", styles['cell_center']),
+        Paragraph(f"<b>{labels['col_no']}</b>", styles['hdr_cell_center']),
+        Paragraph(f"<b>{labels['col_pt_code']}</b>", styles['hdr_cell']),
+        Paragraph(f"<b>{labels['col_description']}</b>", styles['hdr_cell']),
+        Paragraph(f"<b>{labels['col_brand']}</b>", styles['hdr_cell']),
+        Paragraph(f"<b>{labels['col_qty']}</b>", styles['hdr_cell_center']),
+        Paragraph(f"<b>{labels['col_uom']}</b>", styles['hdr_cell_center']),
+        Paragraph(f"<b>{labels['col_unit_cost']}</b>", styles['hdr_cell_right']),
+        Paragraph(f"<b>{labels['col_amount']}</b>", styles['hdr_cell_right']),
+        Paragraph(f"<b>{labels['col_vat']}</b>", styles['hdr_cell_center']),
     ]
 
     # Column widths (total ≈ page_width)
