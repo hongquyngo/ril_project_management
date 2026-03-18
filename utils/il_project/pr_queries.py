@@ -2161,6 +2161,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
 
         logger.info(f"PO created: {po_number} (id={po_id}) from PR {pr.pr_number} — "
                     f"{len(items)} items included, {excluded_count} excluded (no costbook)")
+
         return {
             'success': True,
             'po_id': po_id,

@@ -108,6 +108,10 @@ from .email_notify import (
     build_pr_deep_link,
 )
 
+from .po_pdf import (
+    generate_po_pdf,
+)
+
 from .pr_queries import (
     # PR Number
     generate_pr_number,
@@ -202,6 +206,8 @@ __all__ = [
     'notify_pr_cancelled',
     'notify_pr_reminder',
     'build_pr_deep_link',
+    # ── PO PDF ──
+    'generate_po_pdf',
     # ── Purchase Request ──
     'generate_pr_number',
     'get_pr_list_df', 'get_pending_for_approver', 'get_pr', 'get_pr_items_df',
