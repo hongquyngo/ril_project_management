@@ -41,6 +41,7 @@ from utils.il_project.pr_queries import (
     get_project_pm_email,
     get_budget_vs_pr,
     get_pr_costbook_status,
+    get_costbook_warnings_batch,
     # PO readiness (new)
     resolve_product_ids,
     validate_po_readiness,
@@ -469,6 +470,182 @@ def _age_icon(submitted_date) -> str:
     except Exception:
         pass
     return ''
+
+
+# ══════════════════════════════════════════════════════════════════
+# HELPER — Reusable PR Action Bar (consistent across all views)
+# ══════════════════════════════════════════════════════════════════
+
+def _render_pr_action_bar(row, key_prefix: str, show_approve: bool = False):
+    """
+    Render context-sensitive action buttons for a selected PR row.
+    Used by: My PRs, All PRs, Overview, Pending tabs — all views.
+
+    Args:
+        row: DataFrame row with pr_id, status, requester_id, project_id, etc.
+        key_prefix: unique prefix to avoid widget key conflicts
+        show_approve: True for Pending tab — show Review & Act button
+    """
+    pr_id = int(row['pr_id'])
+    status = row['status']
+    is_my_pr = (row.get('requester_id') == emp_int_id)
+    is_pm = is_project_pm(int(row.get('project_id', 0)), emp_int_id) if row.get('project_id') else False
+    has_items = int(row.get('item_count', 0) or 0) > 0
+    can_act = is_my_pr or is_pm or is_admin
+
+    # Determine which buttons to show
+    buttons = ['view']  # always
+
+    if status in ('DRAFT', 'REVISION_REQUESTED') and can_act:
+        buttons.append('edit')
+        if has_items:
+            buttons.append('submit')
+    elif status == 'APPROVED':
+        buttons.append('create_po')
+    elif status == 'PENDING_APPROVAL':
+        if show_approve:
+            buttons.append('approve')
+        if can_act:
+            buttons.append('remind')
+
+    buttons.append('deselect')
+
+    # Render
+    cols = st.columns(len(buttons))
+    for i, btn in enumerate(buttons):
+        if btn == 'view':
+            if cols[i].button("👁️ View", type="primary", use_container_width=True,
+                              key=f"{key_prefix}_view"):
+                st.session_state['open_pr_view'] = pr_id
+                st.rerun(scope="app")
+
+        elif btn == 'edit':
+            if cols[i].button("✏️ Edit", use_container_width=True,
+                              key=f"{key_prefix}_edit"):
+                st.session_state['open_pr_edit'] = pr_id
+                st.rerun(scope="app")
+
+        elif btn == 'submit':
+            if cols[i].button("📤 Submit", use_container_width=True,
+                              key=f"{key_prefix}_submit"):
+                resolve_product_ids(pr_id)
+                result = submit_pr(pr_id, user_id)
+                if result['success']:
+                    st.success(result['message'])
+                    if result.get('approver_name'):
+                        pr_full = get_pr(pr_id)
+                        if pr_full:
+                            _budget = get_budget_vs_pr(int(row.get('project_id', 0)))
+                            notify_pr_submitted(
+                                pr_number=row['pr_number'],
+                                project_code=row.get('project_code', ''),
+                                project_name=row.get('project_name', ''),
+                                requester_name=row.get('requester_name', ''),
+                                total_vnd=float(row.get('total_amount_vnd') or 0),
+                                item_count=int(row.get('item_count', 0) or 0),
+                                priority=row.get('priority', 'NORMAL'),
+                                justification=pr_full.get('justification', ''),
+                                approver_name=result['approver_name'],
+                                approver_email=result['approver_email'],
+                                approval_level=1,
+                                max_level=result.get('max_level', 1),
+                                requester_email=pr_full.get('requester_email', ''),
+                                budget_data=_budget,
+                                app_url=_pr_link(pr_id, 'approve'),
+                            )
+                    st.cache_data.clear()
+                    st.rerun(scope="app")
+                else:
+                    st.error(result['message'])
+
+        elif btn == 'create_po':
+            if cols[i].button("🛒 Create PO", use_container_width=True,
+                              key=f"{key_prefix}_po"):
+                st.session_state['confirm_create_po'] = pr_id
+                st.rerun(scope="app")
+
+        elif btn == 'approve':
+            if cols[i].button("✅ Review & Act", type="primary", use_container_width=True,
+                              key=f"{key_prefix}_approve"):
+                st.session_state['open_pr_approve'] = pr_id
+                st.rerun(scope="app")
+
+        elif btn == 'remind':
+            if cols[i].button("📧 Remind", use_container_width=True,
+                              key=f"{key_prefix}_remind"):
+                from utils.il_project.pr_queries import get_current_approver
+                cur_app = get_current_approver(pr_id)
+                if cur_app:
+                    pr_full = get_pr(pr_id)
+                    _days = 0
+                    if row.get('submitted_date'):
+                        try:
+                            _days = (pd.Timestamp.now() - pd.Timestamp(row['submitted_date'])).days
+                        except Exception:
+                            pass
+                    _budget = get_budget_vs_pr(int(row.get('project_id', 0)))
+                    notify_pr_reminder(
+                        pr_number=row['pr_number'],
+                        project_code=row.get('project_code', ''),
+                        total_vnd=float(row.get('total_amount_vnd') or 0),
+                        requester_name=row.get('requester_name', ''),
+                        requester_email=pr_full.get('requester_email', '') if pr_full else '',
+                        approver_name=cur_app['approver_name'],
+                        approver_email=cur_app['approver_email'],
+                        approval_level=int(row.get('current_approval_level', 1)),
+                        max_level=int(row.get('max_approval_level', 1)),
+                        days_pending=_days,
+                        priority=row.get('priority', 'NORMAL'),
+                        justification=pr_full.get('justification', '') if pr_full else '',
+                        budget_data=_budget,
+                        app_url=_pr_link(pr_id, 'approve'),
+                    )
+                    st.success(f"📧 Nhắc nhở đã gửi đến **{cur_app['approver_name']}**")
+                    st.rerun(scope="app")
+                else:
+                    st.warning("Không tìm thấy approver hiện tại.")
+
+        elif btn == 'deselect':
+            if cols[i].button("✖ Deselect", use_container_width=True,
+                              key=f"{key_prefix}_desel"):
+                # Bump table version to clear selection
+                _ver_key = f'_{key_prefix}_tbl_key'
+                st.session_state[_ver_key] = st.session_state.get(_ver_key, 0) + 1
+                st.rerun()
+
+
+def _add_cb_warning_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add 'CB' column to a PR list dataframe showing costbook warning
+    for APPROVED PRs that have items missing costbook.
+    Batch query — no N+1.
+    """
+    if df.empty or 'pr_id' not in df.columns:
+        return df
+
+    # Only query for APPROVED PRs (the ones that need PO)
+    approved_ids = df.loc[df['status'] == 'APPROVED', 'pr_id'].tolist()
+    cb_map = {}
+    if approved_ids:
+        cb_map = get_costbook_warnings_batch([int(x) for x in approved_ids])
+
+    def _cb_icon(row):
+        if row['status'] != 'APPROVED':
+            return ''
+        info = cb_map.get(int(row['pr_id']), {})
+        if not info:
+            return ''
+        no_cb = info.get('without_cb', 0)
+        total = info.get('total', 0)
+        if no_cb == 0:
+            return '✅'
+        if no_cb == total:
+            return '🔴'   # all items missing costbook
+        return '⚠️'       # partial
+
+    result = df.copy()
+    result['CB'] = result.apply(_cb_icon, axis=1)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2782,7 +2959,7 @@ def _render_overview(f_status_filter, f_priority_filter):
         all_df = all_df[all_df['priority'] == f_priority_filter]
 
     # ── KPIs ─────────────────────────────────────────────────────
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Total PRs", len(all_df))
     approved_mask = all_df['status'].isin(['APPROVED', 'PO_CREATED'])
     k2.metric("Approved Value", fmt_vnd(all_df.loc[approved_mask, 'total_amount_vnd'].sum())
@@ -2790,6 +2967,17 @@ def _render_overview(f_status_filter, f_priority_filter):
     pending_count = len(all_df[all_df['status'] == 'PENDING_APPROVAL'])
     k3.metric("Pending Approval", pending_count)
     k4.metric("With PO", len(all_df[all_df['status'] == 'PO_CREATED']))
+
+    # Costbook warning KPI — APPROVED PRs with items missing costbook
+    _approved_ids = all_df.loc[all_df['status'] == 'APPROVED', 'pr_id'].tolist()
+    _need_cb_count = 0
+    if _approved_ids:
+        _cb_batch = get_costbook_warnings_batch([int(x) for x in _approved_ids])
+        _need_cb_count = sum(1 for info in _cb_batch.values() if info.get('without_cb', 0) > 0)
+    if _need_cb_count > 0:
+        k5.metric("⚠️ Need Costbook", _need_cb_count)
+    else:
+        k5.metric("⚠️ Need Costbook", 0)
 
     st.divider()
 
@@ -2868,6 +3056,7 @@ def _render_overview(f_status_filter, f_priority_filter):
         display['⏰'] = display['submitted_date'].apply(_age_icon)
     else:
         display['⏰'] = ''
+    display = _add_cb_warning_column(display)
 
     tbl_key = f"ov_all_pr_{st.session_state.get('_ov_all_pr_key', 0)}"
     event = st.dataframe(
@@ -2883,6 +3072,8 @@ def _render_overview(f_status_filter, f_priority_filter):
             'status': st.column_config.TextColumn('Status'),
             'vendor_name': st.column_config.TextColumn('Vendor'),
             'total_fmt': st.column_config.TextColumn('Total VND'),
+            'CB': st.column_config.TextColumn('CB', width=30,
+                  help='Costbook: ✅ ready | ⚠️ partial | 🔴 none'),
             'po_number': st.column_config.TextColumn('PO#'),
             'created_date': st.column_config.DatetimeColumn('Created'),
             'pr_id': None, 'project_id': None, 'requester_id': None,
@@ -2904,13 +3095,7 @@ def _render_overview(f_status_filter, f_priority_filter):
                     f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']} | "
                     f"Project: {row.get('project_code', '—')} | "
                     f"By: {row.get('requester_name', '—')}")
-        ab1, ab2, ab3 = st.columns([1, 1, 2])
-        if ab1.button("👁️ View", type="primary", use_container_width=True, key="ov_view"):
-            st.session_state['open_pr_view'] = int(row['pr_id'])
-            st.rerun(scope="app")
-        if ab2.button("✖ Deselect", use_container_width=True, key="ov_desel"):
-            st.session_state['_ov_all_pr_key'] = st.session_state.get('_ov_all_pr_key', 0) + 1
-            st.rerun()
+        _render_pr_action_bar(row, "ov")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2947,6 +3132,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
         lambda v: f"{v:,.0f}" if v and str(v) not in ('', 'nan', 'None', '0') else '—')
     # Age indicator (P3.4)
     display['⏰'] = display['submitted_date'].apply(_age_icon)
+    display = _add_cb_warning_column(display)
 
     tbl_key = f"my_pr_{st.session_state.get('_my_pr_key', 0)}"
     event = st.dataframe(
@@ -2961,6 +3147,8 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
             'status': st.column_config.TextColumn('Status'),
             'vendor_name': st.column_config.TextColumn('Vendor'),
             'total_fmt': st.column_config.TextColumn('Total VND'),
+            'CB': st.column_config.TextColumn('CB', width=30,
+                  help='Costbook: ✅ ready | ⚠️ partial | 🔴 none'),
             'item_count': st.column_config.NumberColumn('Items', width=55),
             'created_date': st.column_config.DatetimeColumn('Created'),
             'pr_id': None, 'project_id': None, 'requester_id': None,
@@ -2975,110 +3163,13 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
         },
     )
 
-    # ── Action bar (P3.2 — context-sensitive quick actions) ──
+    # ── Action bar (context-sensitive — reusable) ──
     sel = event.selection.rows
     if sel:
         row = my_df.iloc[sel[0]]
         st.markdown(f"**Selected:** {row['pr_number']} — "
                     f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']}")
-
-        # Build action columns based on status
-        cols = st.columns([1, 1, 1, 1, 2])
-        col_idx = 0
-
-        # Always: View
-        if cols[col_idx].button("👁️ View", type="primary", use_container_width=True, key="my_view"):
-            st.session_state['open_pr_view'] = int(row['pr_id'])
-            st.rerun(scope="app")
-        col_idx += 1
-
-        # DRAFT / REVISION_REQUESTED: Edit, Submit
-        if row['status'] in ('DRAFT', 'REVISION_REQUESTED'):
-            if cols[col_idx].button("✏️ Edit", use_container_width=True, key="my_edit"):
-                st.session_state['open_pr_edit'] = int(row['pr_id'])
-                st.rerun(scope="app")
-            col_idx += 1
-
-            item_count = int(row.get('item_count', 0) or 0)
-            if item_count > 0:
-                if cols[col_idx].button("📤 Submit", use_container_width=True, key="my_submit"):
-                    resolve_product_ids(int(row['pr_id']))  # auto-link costbook
-                    result = submit_pr(int(row['pr_id']), user_id)
-                    if result['success']:
-                        st.success(result['message'])
-                        if result.get('approver_name'):
-                            pr_full = get_pr(int(row['pr_id']))
-                            if pr_full:
-                                _budget = get_budget_vs_pr(int(row.get('project_id') or pr_full['project_id']))
-                                notify_pr_submitted(
-                                    pr_number=row['pr_number'],
-                                    project_code=row.get('project_code', ''),
-                                    project_name=row.get('project_name', ''),
-                                    requester_name=row.get('requester_name', ''),
-                                    total_vnd=float(row.get('total_amount_vnd') or 0),
-                                    item_count=item_count,
-                                    priority=row.get('priority', 'NORMAL'),
-                                    justification=pr_full.get('justification', ''),
-                                    approver_name=result['approver_name'],
-                                    approver_email=result['approver_email'],
-                                    approval_level=1, max_level=result.get('max_level', 1),
-                                    requester_email=pr_full.get('requester_email', ''),
-                                    budget_data=_budget,
-                                    app_url=_pr_link(int(row['pr_id']), 'approve'),
-                                )
-                        st.cache_data.clear()
-                        st.rerun(scope="app")
-                    else:
-                        st.error(result['message'])
-                col_idx += 1
-
-        # APPROVED: Create PO (may be partial — PO dialog handles eligibility)
-        elif row['status'] == 'APPROVED':
-            if cols[col_idx].button("🛒 Create PO", use_container_width=True, key="my_po"):
-                st.session_state['confirm_create_po'] = int(row['pr_id'])
-                st.rerun(scope="app")
-            col_idx += 1
-
-        # PENDING_APPROVAL: Remind approver
-        elif row['status'] == 'PENDING_APPROVAL':
-            if cols[col_idx].button("📧 Remind", use_container_width=True, key="my_remind"):
-                from utils.il_project.pr_queries import get_current_approver
-                cur_app = get_current_approver(int(row['pr_id']))
-                if cur_app:
-                    pr_full = get_pr(int(row['pr_id']))
-                    _days = 0
-                    if row.get('submitted_date'):
-                        try:
-                            _days = (pd.Timestamp.now() - pd.Timestamp(row['submitted_date'])).days
-                        except Exception:
-                            pass
-                    _budget = get_budget_vs_pr(int(row.get('project_id', 0)))
-                    notify_pr_reminder(
-                        pr_number=row['pr_number'],
-                        project_code=row.get('project_code', ''),
-                        total_vnd=float(row.get('total_amount_vnd') or 0),
-                        requester_name=row.get('requester_name', ''),
-                        requester_email=pr_full.get('requester_email', '') if pr_full else '',
-                        approver_name=cur_app['approver_name'],
-                        approver_email=cur_app['approver_email'],
-                        approval_level=int(row.get('current_approval_level', 1)),
-                        max_level=int(row.get('max_approval_level', 1)),
-                        days_pending=_days,
-                        priority=row.get('priority', 'NORMAL'),
-                        justification=pr_full.get('justification', '') if pr_full else '',
-                        budget_data=_budget,
-                        app_url=_pr_link(int(row['pr_id']), 'approve'),
-                    )
-                    st.success(f"📧 Nhắc nhở đã gửi đến **{cur_app['approver_name']}**")
-                    st.rerun(scope="app")
-                else:
-                    st.warning("Không tìm thấy approver hiện tại.")
-            col_idx += 1
-
-        # Deselect (always last)
-        if cols[min(col_idx, 4)].button("✖ Deselect", use_container_width=True, key="my_desel"):
-            st.session_state['_my_pr_key'] = st.session_state.get('_my_pr_key', 0) + 1
-            st.rerun()
+        _render_pr_action_bar(row, "my")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -3117,7 +3208,7 @@ def _render_pending_tab():
     else:
         display['⏰'] = ''
 
-    tbl_key = f"pending_tbl_{st.session_state.get('_pending_key', 0)}"
+    tbl_key = f"pending_tbl_{st.session_state.get('_pend_tbl_key', 0)}"
     event = st.dataframe(
         display, key=tbl_key, width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row",
@@ -3154,19 +3245,11 @@ def _render_pending_tab():
         )
         if row.get('justification'):
             st.caption(f"📝 {str(row['justification'])[:200]}")
-
-        ab1, ab2, ab3 = st.columns([1, 1, 2])
-        if ab1.button("✅ Review & Act", type="primary", use_container_width=True, key="pend_review"):
-            st.session_state['open_pr_approve'] = int(row['pr_id'])
-            st.rerun(scope="app")
-        if ab2.button("✖ Deselect", use_container_width=True, key="pend_desel"):
-            st.session_state['_pending_key'] = st.session_state.get('_pending_key', 0) + 1
-            st.rerun()
+        _render_pr_action_bar(row, "pend", show_approve=True)
     else:
-        # Bulk approve (P3.2 — consistent with IL_3)
         if len(pending_df) > 1:
             st.divider()
-            st.caption("💡 Select a row to review individually, or use bulk approve below.")
+            st.caption("💡 Select a row to review individually.")
 
     # Legend
     st.caption("🔴 >7 days &nbsp;|&nbsp; 🟡 >3 days &nbsp;|&nbsp; Priority: 🔴 Urgent 🔼 High ➖ Normal 🔽 Low")
@@ -3208,8 +3291,9 @@ def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
         display['⏰'] = display['submitted_date'].apply(_age_icon)
     else:
         display['⏰'] = ''
+    display = _add_cb_warning_column(display)
 
-    tbl_key = f"all_pr_{st.session_state.get('_all_pr_key', 0)}"
+    tbl_key = f"all_pr_{st.session_state.get('_all_tbl_key', 0)}"
     event = st.dataframe(
         display, key=tbl_key, width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row",
@@ -3223,6 +3307,8 @@ def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
             'status': st.column_config.TextColumn('Status'),
             'vendor_name': st.column_config.TextColumn('Vendor'),
             'total_fmt': st.column_config.TextColumn('Total VND'),
+            'CB': st.column_config.TextColumn('CB', width=30,
+                  help='Costbook: ✅ ready | ⚠️ partial | 🔴 none'),
             'po_number': st.column_config.TextColumn('PO#'),
             'created_date': st.column_config.DatetimeColumn('Created'),
             'pr_id': None, 'project_id': None, 'requester_id': None,
@@ -3243,13 +3329,7 @@ def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
         st.markdown(f"**Selected:** {row['pr_number']} — "
                     f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']} | "
                     f"By: {row.get('requester_name', '—')}")
-        ab1, ab2, ab3 = st.columns([1, 1, 2])
-        if ab1.button("👁️ View", type="primary", use_container_width=True, key="all_view"):
-            st.session_state['open_pr_view'] = int(row['pr_id'])
-            st.rerun(scope="app")
-        if ab2.button("✖ Deselect", use_container_width=True, key="all_desel"):
-            st.session_state['_all_pr_key'] = st.session_state.get('_all_pr_key', 0) + 1
-            st.rerun()
+        _render_pr_action_bar(row, "all")
 
 
 # ══════════════════════════════════════════════════════════════════

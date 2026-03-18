@@ -260,6 +260,46 @@ def get_pr_costbook_status(pr_id: int) -> Dict:
     }
 
 
+def get_costbook_warnings_batch(pr_ids: List[int]) -> Dict[int, Dict]:
+    """
+    Batch query: costbook status for multiple PRs at once.
+    Used by list views to show CB warning column without N+1 queries.
+
+    Returns:
+        {pr_id: {'total': int, 'with_cb': int, 'without_cb': int,
+                 'in_po': int, 'eligible': int}, ...}
+    """
+    if not pr_ids:
+        return {}
+    # Build IN clause safely
+    placeholders = ', '.join(f':id{i}' for i in range(len(pr_ids)))
+    params = {f'id{i}': pid for i, pid in enumerate(pr_ids)}
+
+    rows = _execute_query(f"""
+        SELECT
+            pri.pr_id,
+            COUNT(*) AS total,
+            SUM(CASE WHEN pri.costbook_detail_id IS NOT NULL THEN 1 ELSE 0 END) AS with_cb,
+            SUM(CASE WHEN pri.costbook_detail_id IS NULL THEN 1 ELSE 0 END) AS without_cb,
+            SUM(CASE WHEN pri.po_id IS NOT NULL THEN 1 ELSE 0 END) AS in_po,
+            SUM(CASE WHEN pri.costbook_detail_id IS NOT NULL AND pri.po_id IS NULL THEN 1 ELSE 0 END) AS eligible
+        FROM il_purchase_request_items pri
+        WHERE pri.pr_id IN ({placeholders}) AND pri.delete_flag = 0
+        GROUP BY pri.pr_id
+    """, params)
+
+    result = {}
+    for r in rows:
+        result[r['pr_id']] = {
+            'total': int(r.get('total', 0)),
+            'with_cb': int(r.get('with_cb', 0)),
+            'without_cb': int(r.get('without_cb', 0)),
+            'in_po': int(r.get('in_po', 0)),
+            'eligible': int(r.get('eligible', 0)),
+        }
+    return result
+
+
 def create_pr(data: Dict, created_by: str) -> int:
     """
     Create PR header. Returns new PR id.

@@ -142,6 +142,7 @@ from .pr_queries import (
     link_product_to_pr_item,
     search_products_for_linking,
     get_pr_costbook_status,
+    get_costbook_warnings_batch,
     # PO Enrichment (new)
     get_payment_terms,
     get_trade_terms,
@@ -213,6 +214,7 @@ __all__ = [
     'resolve_product_ids', 'validate_po_readiness',
     'link_product_to_pr_item', 'search_products_for_linking',
     'get_pr_costbook_status',
+    'get_costbook_warnings_batch',
     'get_payment_terms', 'get_trade_terms',
     'get_contacts_for_company', 'get_company_address',
     'get_po_enrichment_data',
