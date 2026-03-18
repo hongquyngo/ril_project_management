@@ -1143,7 +1143,7 @@ with tab_notifications:
         )
         # Wrap with the full email template so preview matches what recipients see
         from utils.il_project.approval_notify import _base_template
-        full_preview_html = _base_template("Approval Authority Summary", preview_body)
+        full_preview_html = _base_template("Approval Authority Notification", preview_body)
 
         with st.expander("📧 Email Preview", expanded=True):
             # ── Recipient bar ──
