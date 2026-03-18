@@ -20,6 +20,7 @@ import logging
 from utils.auth import AuthManager
 from utils.db import execute_query, execute_update, get_transaction
 from sqlalchemy import text
+import streamlit.components.v1 as components
 
 try:
     from utils.il_project.approval_guide import render_approval_guide
@@ -1133,21 +1134,38 @@ with tab_notifications:
     if st.session_state.get('_show_preview') and _has_notify_module:
         st.session_state['_show_preview'] = False
         authorities = _load_authorities()
-        preview_html = build_summary_html(
+        preview_body = build_summary_html(
             authorities=authorities,
             type_filter=scope_code,
             admin_note=admin_note,
             include_validity=include_validity,
             include_history=include_history,
         )
+        # Wrap with the full email template so preview matches what recipients see
+        from utils.il_project.approval_notify import _base_template
+        full_preview_html = _base_template("Approval Authority Summary", preview_body)
+
         with st.expander("📧 Email Preview", expanded=True):
-            st.caption(f"TO: {', '.join(all_to) if all_to else '(none)'} | "
-                       f"CC: {', '.join(all_cc) if all_cc else '(none)'}")
+            # ── Recipient bar ──
+            _to_str = ', '.join(all_to) if all_to else '(none)'
+            _cc_str = ', '.join(all_cc) if all_cc else '(none)'
             st.markdown(
-                f'<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">'
-                f'{preview_html}</div>',
+                f'<div style="padding:10px 14px;background:#f0f4f8;border-radius:6px;'
+                f'font-size:13px;line-height:1.6;margin-bottom:12px;">'
+                f'<strong style="color:#374151;">TO:</strong> '
+                f'<span style="color:#1e40af;">{_to_str}</span><br>'
+                f'<strong style="color:#374151;">CC:</strong> '
+                f'<span style="color:#6b7280;">{_cc_str}</span>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
+            # ── Rendered email preview (iframe) ──
+            # Wrap in a minimal HTML doc so it renders cleanly inside the iframe
+            iframe_html = f'''<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>body{{margin:0;padding:16px;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif;}}</style>
+</head><body>{full_preview_html}</body></html>'''
+            components.html(iframe_html, height=620, scrolling=True)
 
     # ── Section 6: Preset Management (Phase 3) ───────────────────
     st.divider()
