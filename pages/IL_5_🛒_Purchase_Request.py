@@ -56,6 +56,7 @@ from utils.il_project.pr_queries import (
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
+from utils.il_project.po_pdf import generate_po_pdf
 from utils.il_project.email_notify import (
     notify_pr_submitted,
     notify_pr_approved,
@@ -2050,6 +2051,36 @@ def _dialog_pr_view(pr_id: int):
             st.caption(f"{hicon} Level {h['approval_level']} — {h['approver_name']} — "
                        f"**{h['approval_status']}** — {h.get('comments', '')}")
 
+    # ── PO PDF Download ──
+    if pr.get('po_id'):
+        st.divider()
+        _po_num = pr.get('po_number', '—')
+        st.markdown(f"**📦 Purchase Order: `{_po_num}`**")
+        _pdf_c1, _pdf_c2, _pdf_c3 = st.columns([2, 1, 1])
+        _pdf_lang = _pdf_c1.selectbox(
+            "PDF Language", options=['en', 'vi', 'bilingual'],
+            format_func=lambda x: {'en': '🇬🇧 English', 'vi': '🇻🇳 Tiếng Việt',
+                                    'bilingual': '🌐 Bilingual'}[x],
+            key=f'po_pdf_lang_{pr_id}', label_visibility='collapsed',
+        )
+        if _pdf_c2.button("📄 Download PO PDF", use_container_width=True, key=f'po_pdf_dl_{pr_id}'):
+            with st.spinner("Generating PDF..."):
+                _pdf_result = generate_po_pdf(pr['po_id'], language=_pdf_lang)
+            if _pdf_result['success']:
+                st.session_state[f'_po_pdf_bytes_{pr_id}'] = _pdf_result['pdf_bytes']
+                st.session_state[f'_po_pdf_fname_{pr_id}'] = _pdf_result['filename']
+                st.rerun()
+            else:
+                st.error(f"PDF generation failed: {_pdf_result['message']}")
+        # Show download button if PDF was just generated
+        _cached_pdf = st.session_state.pop(f'_po_pdf_bytes_{pr_id}', None)
+        _cached_fname = st.session_state.pop(f'_po_pdf_fname_{pr_id}', None)
+        if _cached_pdf:
+            _pdf_c3.download_button(
+                "📥 Save", data=_cached_pdf, file_name=_cached_fname,
+                mime='application/pdf', use_container_width=True,
+            )
+
     # ── Action Buttons (context-sensitive) ──
     st.divider()
     if can_submit and not items_df.empty:
@@ -2139,9 +2170,6 @@ def _dialog_pr_view(pr_id: int):
                 st.success(f"📧 Nhắc nhở đã gửi đến **{cur_app['approver_name']}** ({cur_app['approver_email']})")
             else:
                 st.warning("Không tìm thấy approver hiện tại.")
-
-    if pr.get('po_number'):
-        ac3.success(f"PO: **{pr['po_number']}**")
 
     if can_cancel:
         if ac4.button("🗑 Cancel PR", use_container_width=True):
@@ -2878,6 +2906,8 @@ def _dialog_confirm_po(pr_id: int):
             )
             _cleanup_po_dialog(pr_id)
             st.cache_data.clear()
+            # Re-open PR view → PO PDF download section visible immediately
+            st.session_state['open_pr_view'] = pr_id
             st.rerun()
         else:
             st.error(f"❌ {result['message']}")
