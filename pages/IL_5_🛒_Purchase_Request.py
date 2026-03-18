@@ -3064,7 +3064,7 @@ def _render_overview(f_status_filter, f_priority_filter):
         on_select="rerun", selection_mode="single-row",
         column_config={
             '●': st.column_config.TextColumn('', width=30),
-            '⏰': st.column_config.TextColumn('', width=30),
+            '⏰': st.column_config.TextColumn('⏰', width=30, help='Pending age: 🔴 >7d, 🟡 >3d'),
             'pri': st.column_config.TextColumn('Pri', width=35),
             'pr_number': st.column_config.TextColumn('PR#'),
             'project_code': st.column_config.TextColumn('Project', width=140),
@@ -3140,7 +3140,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
         on_select="rerun", selection_mode="single-row",
         column_config={
             '●': st.column_config.TextColumn('', width=30),
-            '⏰': st.column_config.TextColumn('', width=30),
+            '⏰': st.column_config.TextColumn('⏰', width=30, help='Pending age: 🔴 >7d, 🟡 >3d'),
             'pri': st.column_config.TextColumn('Pri', width=35),
             'pr_number': st.column_config.TextColumn('PR#'),
             'project_code': st.column_config.TextColumn('Project', width=140),
@@ -3214,7 +3214,7 @@ def _render_pending_tab():
         on_select="rerun", selection_mode="single-row",
         column_config={
             '●': st.column_config.TextColumn('', width=30),
-            '⏰': st.column_config.TextColumn('', width=30),
+            '⏰': st.column_config.TextColumn('⏰', width=30, help='Pending age: 🔴 >7d, 🟡 >3d'),
             'pr_number': st.column_config.TextColumn('PR#'),
             'project_code': st.column_config.TextColumn('Project', width=140),
             'requester_name': st.column_config.TextColumn('Requester'),
@@ -3299,7 +3299,7 @@ def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
         on_select="rerun", selection_mode="single-row",
         column_config={
             '●': st.column_config.TextColumn('', width=30),
-            '⏰': st.column_config.TextColumn('', width=30),
+            '⏰': st.column_config.TextColumn('⏰', width=30, help='Pending age: 🔴 >7d, 🟡 >3d'),
             'pri': st.column_config.TextColumn('Pri', width=35),
             'pr_number': st.column_config.TextColumn('PR#'),
             'project_code': st.column_config.TextColumn('Project', width=140),
