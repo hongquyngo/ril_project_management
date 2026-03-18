@@ -165,7 +165,7 @@ def get_vendor_companies() -> List[Dict]:
                 c.id,
                 COALESCE(c.english_name, c.local_name, c.company_code) AS name,
                 c.company_code AS code,
-                c.tax_number
+                COALESCE(c.registration_code, c.tax_number) AS tax_number
             FROM companies c
             JOIN companies_company_types cct ON cct.companies_id = c.id
             JOIN company_types ct            ON ct.id = cct.company_type_id

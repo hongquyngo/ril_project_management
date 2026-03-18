@@ -128,6 +128,17 @@ def _fmt_amount_flow(val) -> str:
     return f"≤{_fmt_amount(val)}"
 
 
+def _fmt_amount_exact(val) -> str:
+    """Full exact number for workflow section (500,000,000 ₫)."""
+    if val is None:
+        return 'Unlimited'
+    try:
+        v = float(val)
+        return f"{v:,.0f} ₫"
+    except (TypeError, ValueError):
+        return str(val)
+
+
 def _build_flow_steps_html(auths_sorted: List[Dict]) -> str:
     """
     Build a clear approval workflow visualization.
@@ -145,7 +156,7 @@ def _build_flow_steps_html(auths_sorted: List[Dict]) -> str:
         pos = a.get('position', '') or ''
         lvl = a.get('approval_level', '?')
         max_amt = a.get('max_amount')
-        amt_display = _fmt_amount(max_amt)
+        amt_display = _fmt_amount_exact(max_amt)
 
         # Describe what this level handles
         if max_amt is not None:
@@ -194,7 +205,7 @@ def _build_flow_steps_html(auths_sorted: List[Dict]) -> str:
         name_short = a.get('employee_name', '?').split()[0]
 
         if max_amt is not None:
-            amt_label = _fmt_amount(max_amt)
+            amt_label = _fmt_amount_exact(max_amt)
             # This level is sufficient for amounts up to max_amt
             levels_needed = ' + '.join(
                 f"L{auths_sorted[j].get('approval_level', '?')}"
@@ -213,7 +224,7 @@ def _build_flow_steps_html(auths_sorted: List[Dict]) -> str:
             if i > 0:
                 prev_amt = auths_sorted[i - 1].get('max_amount')
                 if prev_amt is not None:
-                    prev_label = _fmt_amount(prev_amt)
+                    prev_label = _fmt_amount_exact(prev_amt)
                     levels_needed = ' + '.join(
                         f"L{auths_sorted[j].get('approval_level', '?')}"
                         for j in range(i + 1)
