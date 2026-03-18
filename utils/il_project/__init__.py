@@ -141,6 +141,7 @@ from .pr_queries import (
     validate_po_readiness,
     link_product_to_pr_item,
     search_products_for_linking,
+    get_pr_costbook_status,
     # PO Enrichment (new)
     get_payment_terms,
     get_trade_terms,
@@ -211,6 +212,7 @@ __all__ = [
     'create_po_from_pr',
     'resolve_product_ids', 'validate_po_readiness',
     'link_product_to_pr_item', 'search_products_for_linking',
+    'get_pr_costbook_status',
     'get_payment_terms', 'get_trade_terms',
     'get_contacts_for_company', 'get_company_address',
     'get_po_enrichment_data',

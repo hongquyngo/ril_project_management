@@ -180,7 +180,7 @@ def get_pr(pr_id: int) -> Optional[Dict]:
 
 
 def get_pr_items_df(pr_id: int) -> pd.DataFrame:
-    """Get line items for a PR."""
+    """Get line items for a PR, including PO tracking and costbook status."""
     return _execute_query_df("""
         SELECT
             pri.id, pri.cogs_category, pri.product_id,
@@ -190,12 +190,74 @@ def get_pr_items_df(pr_id: int) -> pd.DataFrame:
             cur.code AS currency_code, pri.exchange_rate,
             pri.amount_vnd,
             pri.costbook_detail_id, pri.estimate_line_item_id,
-            pri.specifications, pri.notes, pri.view_order
+            pri.specifications, pri.notes, pri.view_order,
+            pri.po_id,
+            po.po_number AS po_number
         FROM il_purchase_request_items pri
         LEFT JOIN currencies cur ON pri.currency_id = cur.id
+        LEFT JOIN purchase_orders po ON pri.po_id = po.id
         WHERE pri.pr_id = :prid AND pri.delete_flag = 0
         ORDER BY pri.cogs_category, pri.view_order, pri.id
     """, {'prid': pr_id})
+
+
+def get_pr_costbook_status(pr_id: int) -> Dict:
+    """
+    Summary of costbook and PO status for PR items.
+    Used by UI to show warnings and eligibility.
+
+    Returns:
+        {
+            'total': int,
+            'with_costbook': int,
+            'without_costbook': int,
+            'already_in_po': int,
+            'eligible_for_po': int,     # has costbook + no po_id yet
+            'items_without_costbook': [  # for display
+                {'id': ..., 'description': ..., 'cogs_category': ..., 'amount_vnd': ...},
+            ],
+            'items_eligible': [          # has costbook + no po_id
+                {'id': ..., 'description': ..., 'amount_vnd': ...},
+            ],
+        }
+    """
+    items = _execute_query("""
+        SELECT
+            pri.id, pri.item_description, pri.cogs_category,
+            pri.costbook_detail_id, pri.product_id, pri.po_id,
+            pri.amount_vnd
+        FROM il_purchase_request_items pri
+        WHERE pri.pr_id = :prid AND pri.delete_flag = 0
+        ORDER BY pri.view_order, pri.id
+    """, {'prid': pr_id})
+
+    total = len(items)
+    with_cb = [it for it in items if it.get('costbook_detail_id')]
+    without_cb = [it for it in items if not it.get('costbook_detail_id')]
+    in_po = [it for it in items if it.get('po_id')]
+    eligible = [it for it in items
+                if it.get('costbook_detail_id') and not it.get('po_id')]
+
+    return {
+        'total': total,
+        'with_costbook': len(with_cb),
+        'without_costbook': len(without_cb),
+        'already_in_po': len(in_po),
+        'eligible_for_po': len(eligible),
+        'eligible_amount_vnd': sum(float(it.get('amount_vnd', 0) or 0) for it in eligible),
+        'excluded_amount_vnd': sum(float(it.get('amount_vnd', 0) or 0) for it in without_cb),
+        'items_without_costbook': [
+            {'id': it['id'], 'description': it.get('item_description', ''),
+             'cogs_category': it.get('cogs_category', ''),
+             'amount_vnd': float(it.get('amount_vnd', 0) or 0)}
+            for it in without_cb
+        ],
+        'items_eligible': [
+            {'id': it['id'], 'description': it.get('item_description', ''),
+             'amount_vnd': float(it.get('amount_vnd', 0) or 0)}
+            for it in eligible
+        ],
+    }
 
 
 def create_pr(data: Dict, created_by: str) -> int:
@@ -1117,24 +1179,35 @@ def get_importable_estimate_items(estimate_id: int) -> List[Dict]:
 
 def resolve_product_ids(pr_id: int) -> Dict:
     """
-    Attempt to resolve NULL product_id on PR items from linked sources.
+    Attempt to resolve NULL product_id AND NULL costbook_detail_id on PR items.
 
     Resolution chain per item:
-      1. product_id already set                   → skip
-      2. costbook_detail_id → costbook_details.product_id
-      3. estimate_line_item_id → il_estimate_line_items.product_id
+      Phase 1 — product_id:
+        1. product_id already set                   → skip
+        2. costbook_detail_id → costbook_details.product_id
+        3. estimate_line_item_id → il_estimate_line_items.product_id
+
+      Phase 2 — costbook_detail_id (runs for ALL items, even those with product_id):
+        1. costbook_detail_id already set           → skip
+        2. estimate_line_item_id → il_estimate_line_items.costbook_detail_id
+        3. product_id + PR vendor → best active costbook_details entry
 
     Returns:
         {
-            'resolved_count': int,      # items that were NULL and got resolved
+            'resolved_count': int,      # items that had product_id resolved
+            'costbook_resolved': int,   # items that had costbook_detail_id resolved
             'still_missing': int,       # items still without product_id
             'total_items': int,
-            'details': [                # per-item status
-                {'item_id': ..., 'description': ..., 'status': 'ok'|'resolved'|'missing',
-                 'resolved_from': 'costbook'|'estimate'|None},
-            ],
+            'details': [...]
         }
     """
+    # Get PR vendor_id for costbook lookups
+    pr_rows = _execute_query("""
+        SELECT vendor_id FROM il_purchase_requests
+        WHERE id = :prid AND delete_flag = 0
+    """, {'prid': pr_id})
+    pr_vendor_id = pr_rows[0]['vendor_id'] if pr_rows else None
+
     items = _execute_query("""
         SELECT
             pri.id, pri.item_description, pri.product_id,
@@ -1145,80 +1218,119 @@ def resolve_product_ids(pr_id: int) -> Dict:
     """, {'prid': pr_id})
 
     resolved_count = 0
+    costbook_resolved = 0
     still_missing = 0
     details = []
 
     for item in items:
         item_id = item['id']
         desc = item.get('item_description', '')
+        current_pid = item.get('product_id')
+        current_cbid = item.get('costbook_detail_id')
 
-        # Already has product_id
-        if item.get('product_id'):
-            details.append({
-                'item_id': item_id, 'description': desc,
-                'status': 'ok', 'resolved_from': None,
-                'product_id': item['product_id'],
-            })
-            continue
-
-        resolved_pid = None
+        # ── Phase 1: Resolve product_id ──────────────────────────
+        resolved_pid = current_pid
         resolved_from = None
 
-        # Try costbook_detail_id → costbook_details.product_id
-        if not resolved_pid and item.get('costbook_detail_id'):
-            rows = _execute_query("""
-                SELECT product_id FROM costbook_details
-                WHERE id = :cid AND delete_flag = 0 AND product_id IS NOT NULL
-                LIMIT 1
-            """, {'cid': item['costbook_detail_id']})
-            if rows and rows[0].get('product_id'):
-                resolved_pid = rows[0]['product_id']
-                resolved_from = 'costbook'
+        if not resolved_pid:
+            # Try costbook_detail_id → costbook_details.product_id
+            if current_cbid:
+                rows = _execute_query("""
+                    SELECT product_id FROM costbook_details
+                    WHERE id = :cid AND delete_flag = 0 AND product_id IS NOT NULL
+                    LIMIT 1
+                """, {'cid': current_cbid})
+                if rows and rows[0].get('product_id'):
+                    resolved_pid = rows[0]['product_id']
+                    resolved_from = 'costbook'
 
-        # Try estimate_line_item_id → il_estimate_line_items.product_id
-        if not resolved_pid and item.get('estimate_line_item_id'):
-            rows = _execute_query("""
-                SELECT product_id FROM il_estimate_line_items
-                WHERE id = :eid AND delete_flag = 0 AND product_id IS NOT NULL
-                LIMIT 1
-            """, {'eid': item['estimate_line_item_id']})
-            if rows and rows[0].get('product_id'):
-                resolved_pid = rows[0]['product_id']
-                resolved_from = 'estimate'
+            # Try estimate_line_item_id → il_estimate_line_items.product_id
+            if not resolved_pid and item.get('estimate_line_item_id'):
+                rows = _execute_query("""
+                    SELECT product_id, costbook_detail_id
+                    FROM il_estimate_line_items
+                    WHERE id = :eid AND delete_flag = 0 AND product_id IS NOT NULL
+                    LIMIT 1
+                """, {'eid': item['estimate_line_item_id']})
+                if rows and rows[0].get('product_id'):
+                    resolved_pid = rows[0]['product_id']
+                    resolved_from = 'estimate'
+                    # Also backfill costbook_detail_id from estimate if missing
+                    if not current_cbid and rows[0].get('costbook_detail_id'):
+                        current_cbid = rows[0]['costbook_detail_id']
 
-        if resolved_pid:
-            # Update the PR item with resolved product_id + pt_code
+        # ── Phase 2: Resolve costbook_detail_id ──────────────────
+        resolved_cbid = current_cbid
+        cb_resolved_from = None
+
+        if not resolved_cbid and (resolved_pid or current_pid):
+            pid = resolved_pid or current_pid
+            # Try: product_id + PR vendor → best active costbook_details
+            if pr_vendor_id:
+                rows = _execute_query("""
+                    SELECT cd.id AS costbook_detail_id
+                    FROM costbook_details cd
+                    JOIN costbooks cb ON cd.costbook_id = cb.id
+                    WHERE cd.product_id = :pid
+                      AND cb.vendor_id = :vid
+                      AND cd.delete_flag = 0
+                      AND cb.delete_flag = 0
+                      AND cd.is_active = 1
+                    ORDER BY cd.modified_date DESC
+                    LIMIT 1
+                """, {'pid': pid, 'vid': pr_vendor_id})
+                if rows and rows[0].get('costbook_detail_id'):
+                    resolved_cbid = rows[0]['costbook_detail_id']
+                    cb_resolved_from = 'vendor_costbook'
+
+        # ── Apply updates ────────────────────────────────────────
+        update_parts = []
+        update_params = {'item_id': item_id}
+
+        if resolved_pid and resolved_pid != current_pid:
+            update_parts.append("product_id = :pid")
+            update_parts.append("pt_code = (SELECT pt_code FROM products WHERE id = :pid)")
+            update_params['pid'] = resolved_pid
+            resolved_count += 1
+
+        if resolved_cbid and resolved_cbid != item.get('costbook_detail_id'):
+            update_parts.append("costbook_detail_id = :cbid")
+            update_params['cbid'] = resolved_cbid
+            costbook_resolved += 1
+
+        if update_parts:
             try:
-                _execute_update("""
-                    UPDATE il_purchase_request_items
-                    SET product_id = :pid,
-                        pt_code = (SELECT pt_code FROM products WHERE id = :pid)
-                    WHERE id = :item_id
-                """, {'pid': resolved_pid, 'item_id': item_id})
-                resolved_count += 1
-                details.append({
-                    'item_id': item_id, 'description': desc,
-                    'status': 'resolved', 'resolved_from': resolved_from,
-                    'product_id': resolved_pid,
-                })
+                sql = f"UPDATE il_purchase_request_items SET {', '.join(update_parts)} WHERE id = :item_id"
+                _execute_update(sql, update_params)
             except Exception as e:
                 logger.warning(f"resolve_product_ids: could not update item {item_id}: {e}")
-                still_missing += 1
-                details.append({
-                    'item_id': item_id, 'description': desc,
-                    'status': 'missing', 'resolved_from': None,
-                    'product_id': None,
-                })
+                if not current_pid and resolved_pid:
+                    resolved_count -= 1
+                if resolved_cbid != item.get('costbook_detail_id'):
+                    costbook_resolved -= 1
+
+        # Status
+        final_pid = resolved_pid or current_pid
+        if final_pid:
+            details.append({
+                'item_id': item_id, 'description': desc,
+                'status': 'ok' if current_pid else 'resolved',
+                'resolved_from': resolved_from,
+                'product_id': final_pid,
+                'costbook_detail_id': resolved_cbid,
+            })
         else:
             still_missing += 1
             details.append({
                 'item_id': item_id, 'description': desc,
                 'status': 'missing', 'resolved_from': None,
                 'product_id': None,
+                'costbook_detail_id': resolved_cbid,
             })
 
     return {
         'resolved_count': resolved_count,
+        'costbook_resolved': costbook_resolved,
         'still_missing': still_missing,
         'total_items': len(items),
         'details': details,
@@ -1229,15 +1341,57 @@ def link_product_to_pr_item(item_id: int, product_id: int) -> bool:
     """
     Manually link a product to a PR item.
     Called from UI when user selects a product for an unlinked item.
-    Also updates pt_code from the product.
+    Also updates pt_code from the product AND auto-links costbook_detail_id
+    from the best matching active costbook for product + PR vendor.
     """
     try:
-        rows = _execute_update("""
-            UPDATE il_purchase_request_items
-            SET product_id = :pid,
-                pt_code = (SELECT pt_code FROM products WHERE id = :pid)
-            WHERE id = :item_id AND delete_flag = 0
-        """, {'pid': product_id, 'item_id': item_id})
+        # Find PR vendor for costbook lookup
+        vendor_rows = _execute_query("""
+            SELECT pr.vendor_id
+            FROM il_purchase_request_items pri
+            JOIN il_purchase_requests pr ON pri.pr_id = pr.id
+            WHERE pri.id = :item_id AND pri.delete_flag = 0
+        """, {'item_id': item_id})
+        vendor_id = vendor_rows[0]['vendor_id'] if vendor_rows else None
+
+        # Find best costbook_detail for product + vendor
+        costbook_detail_id = None
+        if vendor_id:
+            cb_rows = _execute_query("""
+                SELECT cd.id AS costbook_detail_id
+                FROM costbook_details cd
+                JOIN costbooks cb ON cd.costbook_id = cb.id
+                WHERE cd.product_id = :pid
+                  AND cb.vendor_id = :vid
+                  AND cd.delete_flag = 0
+                  AND cb.delete_flag = 0
+                  AND cd.is_active = 1
+                ORDER BY cd.modified_date DESC
+                LIMIT 1
+            """, {'pid': product_id, 'vid': vendor_id})
+            if cb_rows:
+                costbook_detail_id = cb_rows[0]['costbook_detail_id']
+
+        # Update PR item: product_id + pt_code + costbook_detail_id (if found)
+        if costbook_detail_id:
+            rows = _execute_update("""
+                UPDATE il_purchase_request_items
+                SET product_id = :pid,
+                    pt_code = (SELECT pt_code FROM products WHERE id = :pid),
+                    costbook_detail_id = :cbid
+                WHERE id = :item_id AND delete_flag = 0
+            """, {'pid': product_id, 'cbid': costbook_detail_id, 'item_id': item_id})
+            logger.info(f"link_product_to_pr_item: item={item_id}, product={product_id}, "
+                        f"costbook_detail={costbook_detail_id}")
+        else:
+            rows = _execute_update("""
+                UPDATE il_purchase_request_items
+                SET product_id = :pid,
+                    pt_code = (SELECT pt_code FROM products WHERE id = :pid)
+                WHERE id = :item_id AND delete_flag = 0
+            """, {'pid': product_id, 'item_id': item_id})
+            logger.info(f"link_product_to_pr_item: item={item_id}, product={product_id}, "
+                        f"no costbook found for vendor={vendor_id}")
         return rows > 0
     except Exception as e:
         logger.error(f"link_product_to_pr_item failed: {e}")
@@ -1278,16 +1432,26 @@ def search_products_for_linking(keyword: str, limit: int = 20) -> list:
 def validate_po_readiness(pr_id: int) -> Dict:
     """
     Validate that a PR is ready for PO creation.
-    Checks all requirements that legacy ERP needs.
+
+    Key rules:
+      - Only items WITH costbook_detail_id are eligible for PO
+      - Items already sent to a PO (po_id IS NOT NULL) are skipped
+      - Items without costbook are excluded (warning, not blocker)
+      - Multiple POs per PR are allowed (partial PO)
 
     Returns:
         {
-            'ready': bool,              # True if PO can be created
-            'blockers': [...],          # Critical issues — must fix
-            'warnings': [...],          # Non-critical — PO possible but incomplete
-            'items_without_product': [  # Items needing product link
-                {'item_id': ..., 'description': ..., 'costbook_detail_id': ...},
-            ],
+            'ready': bool,
+            'blockers': [...],
+            'warnings': [...],
+            'eligible_items': [...],          # will be in PO
+            'excluded_items': [...],          # no costbook → excluded
+            'already_in_po_items': [...],     # already sent to PO
+            'items_without_product': [...],   # eligible but missing product (blocker)
+            'eligible_count': int,
+            'excluded_count': int,
+            'eligible_amount_vnd': float,
+            'excluded_amount_vnd': float,
         }
     """
     pr = _execute_query("""
@@ -1297,7 +1461,11 @@ def validate_po_readiness(pr_id: int) -> Dict:
         WHERE pr.id = :id AND pr.delete_flag = 0
     """, {'id': pr_id})
     if not pr:
-        return {'ready': False, 'blockers': ['PR not found'], 'warnings': [], 'items_without_product': []}
+        return {'ready': False, 'blockers': ['PR not found'], 'warnings': [],
+                'eligible_items': [], 'excluded_items': [], 'already_in_po_items': [],
+                'items_without_product': [],
+                'eligible_count': 0, 'excluded_count': 0,
+                'eligible_amount_vnd': 0, 'excluded_amount_vnd': 0}
     pr = pr[0]
 
     blockers = []
@@ -1306,10 +1474,6 @@ def validate_po_readiness(pr_id: int) -> Dict:
     # Status check
     if pr.get('status') != 'APPROVED':
         blockers.append(f"PR status is {pr.get('status')} — must be APPROVED")
-
-    # Already has PO
-    if pr.get('po_id'):
-        blockers.append(f"PO already created (po_id={pr['po_id']})")
 
     # Vendor check
     if not pr.get('vendor_id'):
@@ -1327,8 +1491,11 @@ def validate_po_readiness(pr_id: int) -> Dict:
             pri.product_id,
             pri.costbook_detail_id,
             pri.estimate_line_item_id,
+            pri.cogs_category,
             pri.quantity,
             pri.unit_cost,
+            pri.amount_vnd,
+            pri.po_id,
             pri.currency_id AS item_currency_id
         FROM il_purchase_request_items pri
         WHERE pri.pr_id = :prid AND pri.delete_flag = 0
@@ -1338,35 +1505,81 @@ def validate_po_readiness(pr_id: int) -> Dict:
     if not items:
         blockers.append("PR has no line items")
 
-    items_without_product = []
+    # Classify items into 3 groups
+    eligible_items = []      # has costbook + no po_id → will go in PO
+    excluded_items = []      # no costbook → excluded from PO
+    already_in_po = []       # already sent to a PO
+    items_without_product = []  # eligible but missing product_id (blocker)
+
     for it in items:
-        if not it.get('product_id'):
-            items_without_product.append({
-                'item_id': it['item_id'],
-                'description': it.get('item_description', ''),
-                'costbook_detail_id': it.get('costbook_detail_id'),
-                'estimate_line_item_id': it.get('estimate_line_item_id'),
-            })
+        item_data = {
+            'item_id': it['item_id'],
+            'description': it.get('item_description', ''),
+            'cogs_category': it.get('cogs_category', ''),
+            'amount_vnd': float(it.get('amount_vnd', 0) or 0),
+            'costbook_detail_id': it.get('costbook_detail_id'),
+            'product_id': it.get('product_id'),
+        }
+
+        if it.get('po_id'):
+            already_in_po.append(item_data)
+        elif it.get('costbook_detail_id'):
+            eligible_items.append(item_data)
+            # Also check product_id — needed for PO line item
+            if not it.get('product_id'):
+                items_without_product.append(item_data)
+        else:
+            excluded_items.append(item_data)
+
+    # Blockers
+    if not eligible_items and not already_in_po:
+        blockers.append(
+            "No items eligible for PO — all items missing costbook link. "
+            "Create a vendor costbook (Vendor Quotation) first."
+        )
+    elif not eligible_items and already_in_po:
+        blockers.append(
+            "All eligible items already sent to PO. "
+            "Remaining items need costbook links to create another PO."
+        )
 
     if items_without_product:
         blockers.append(
-            f"{len(items_without_product)} item(s) missing product_id — "
+            f"{len(items_without_product)} eligible item(s) missing product_id — "
             f"legacy ERP requires product link for every PO line item"
         )
 
-    # Warnings (non-blocking but good to flag)
+    # Warnings
     if not pr.get('exchange_rate') or float(pr.get('exchange_rate', 0)) <= 0:
         warnings.append("Exchange rate is 0 or missing")
 
-    total_vnd = float(pr.get('total_amount_vnd', 0) or 0)
-    if total_vnd <= 0:
-        warnings.append("Total amount VND is 0")
+    if excluded_items:
+        excluded_vnd = sum(it['amount_vnd'] for it in excluded_items)
+        warnings.append(
+            f"{len(excluded_items)} item(s) excluded (no costbook) — "
+            f"{excluded_vnd:,.0f} ₫ will NOT be in this PO"
+        )
+
+    if already_in_po:
+        warnings.append(
+            f"{len(already_in_po)} item(s) already in PO — skipped"
+        )
+
+    eligible_vnd = sum(it['amount_vnd'] for it in eligible_items)
+    excluded_vnd = sum(it['amount_vnd'] for it in excluded_items)
 
     return {
         'ready': len(blockers) == 0,
         'blockers': blockers,
         'warnings': warnings,
+        'eligible_items': eligible_items,
+        'excluded_items': excluded_items,
+        'already_in_po_items': already_in_po,
         'items_without_product': items_without_product,
+        'eligible_count': len(eligible_items),
+        'excluded_count': len(excluded_items),
+        'eligible_amount_vnd': eligible_vnd,
+        'excluded_amount_vnd': excluded_vnd,
     }
 
 
@@ -1428,13 +1641,11 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
 
             if not pr:
                 return {'success': False, 'message': 'PR not found or not in APPROVED status'}
-            if pr.po_id:
-                return {'success': False, 'message': f'PO already created: {pr.po_id}'}
             if not pr.vendor_id:
                 return {'success': False, 'message': 'PR has no vendor — cannot create PO'}
 
-            # ── 2. Get PR items + product + costbook enrichment ────
-            items = conn.execute(text("""
+            # ── 2. Get ELIGIBLE PR items (costbook + not yet in PO) ────
+            all_items = conn.execute(text("""
                 SELECT
                     pri.*,
                     cur.code AS item_ccy_code,
@@ -1468,16 +1679,34 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 ORDER BY pri.view_order, pri.id
             """), {'prid': pr_id}).fetchall()
 
-            if not items:
+            if not all_items:
                 return {'success': False, 'message': 'PR has no line items'}
+
+            # Split: eligible (has costbook + no po_id) vs excluded
+            items = [it for it in all_items
+                     if it.costbook_detail_id and not it.po_id]
+            excluded = [it for it in all_items
+                        if not it.costbook_detail_id and not it.po_id]
+            already_in_po = [it for it in all_items if it.po_id]
+
+            if not items:
+                return {
+                    'success': False,
+                    'message': f'No eligible items — '
+                               f'{len(excluded)} item(s) missing costbook, '
+                               f'{len(already_in_po)} already in PO'
+                }
 
             missing_product = [it for it in items if not it.product_id]
             if missing_product:
                 descs = ', '.join((it.item_description or '')[:30] for it in missing_product[:3])
                 return {
                     'success': False,
-                    'message': f'{len(missing_product)} item(s) missing product link: {descs}...'
+                    'message': f'{len(missing_product)} eligible item(s) missing product link: {descs}...'
                 }
+
+            excluded_count = len(excluded)
+            excluded_vnd = sum(float(it.amount_vnd or 0) for it in excluded)
 
             # ── 3. Lookup costbook header for PO enrichment ────────
             #    Find dominant costbook (most items linked to same costbook)
@@ -1684,10 +1913,12 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 # ── Conversion fallback ────────────────────────────
                 # If no costbook link on PR item, try to find conversion
                 # from the most recent active costbook for this product + vendor
+                # Also captures cd.id → product_costbook_id when original is NULL
+                _resolved_costbook_id = item.costbook_detail_id  # start with existing
                 if not conversion and item.product_id and pr.vendor_id:
                     try:
                         _cb_fallback = conn.execute(text("""
-                            SELECT cd.conversion, cd.purchase_uom, cd.product_uom
+                            SELECT cd.id, cd.conversion, cd.purchase_uom, cd.product_uom
                             FROM costbook_details cd
                             JOIN costbooks cb ON cd.costbook_id = cb.id
                             WHERE cd.product_id = :pid
@@ -1704,8 +1935,12 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                                 buy_uom = _cb_fallback.purchase_uom or buy_uom
                             if not std_uom:
                                 std_uom = _cb_fallback.product_uom or std_uom
+                            # Backfill costbook_detail_id if missing
+                            if not _resolved_costbook_id and _cb_fallback.id:
+                                _resolved_costbook_id = _cb_fallback.id
                             logger.info(f"Conversion fallback for product {item.product_id}: "
-                                        f"conversion={conversion}, buy_uom={buy_uom}")
+                                        f"conversion={conversion}, buy_uom={buy_uom}, "
+                                        f"costbook_detail_id={_resolved_costbook_id}")
                     except Exception as e:
                         logger.debug(f"Conversion fallback lookup failed: {e}")
                 moq = float(item.cb_moq) if item.cb_moq else None
@@ -1770,7 +2005,7 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                 """), {
                     'po_id': po_id,
                     'prod_id': item.product_id,
-                    'costbook_id': item.costbook_detail_id,
+                    'costbook_id': _resolved_costbook_id,
                     'std_qty': std_qty,
                     'std_cost': std_cost,
                     'buy_qty': buy_qty,
@@ -1791,17 +2026,50 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     'price_type': _price_type,
                 })
 
-            # ── 7. Update PR → link to PO ──────────────────────────
-            conn.execute(text("""
-                UPDATE il_purchase_requests SET
-                    status = 'PO_CREATED',
-                    po_id = :po_id,
-                    modified_by = :m,
-                    version = version + 1
-                WHERE id = :id
-            """), {'id': pr_id, 'po_id': po_id, 'm': created_by_keycloak})
+            # ── 7. Mark PR items with this PO ──────────────────────
+            included_item_ids = [item.id for item in items]
+            for iid in included_item_ids:
+                conn.execute(text("""
+                    UPDATE il_purchase_request_items
+                    SET po_id = :po_id
+                    WHERE id = :item_id
+                """), {'po_id': po_id, 'item_id': iid})
 
-            # ── 8. Link PO to il_project_documents ─────────────────
+            # ── 8. Update PR header ───────────────────────────────
+            # Check if any items still remain without PO
+            remaining = conn.execute(text("""
+                SELECT COUNT(*) AS cnt
+                FROM il_purchase_request_items
+                WHERE pr_id = :prid AND delete_flag = 0
+                  AND po_id IS NULL
+            """), {'prid': pr_id}).fetchone()
+            all_items_covered = (remaining.cnt == 0)
+
+            # PR.po_id = first PO (backward compat, don't overwrite)
+            new_status = 'PO_CREATED' if all_items_covered else 'APPROVED'
+            if pr.po_id:
+                # Already has a PO linked — don't overwrite header po_id
+                conn.execute(text("""
+                    UPDATE il_purchase_requests SET
+                        status = :status,
+                        modified_by = :m,
+                        version = version + 1
+                    WHERE id = :id
+                """), {'id': pr_id, 'status': new_status, 'm': created_by_keycloak})
+            else:
+                conn.execute(text("""
+                    UPDATE il_purchase_requests SET
+                        status = :status,
+                        po_id = :po_id,
+                        modified_by = :m,
+                        version = version + 1
+                    WHERE id = :id
+                """), {'id': pr_id, 'po_id': po_id, 'status': new_status,
+                       'm': created_by_keycloak})
+
+            # ── 9. Link PO to il_project_documents ─────────────────
+            # Amount = only the items in THIS PO
+            po_amount = sum(float(it.quantity or 0) * float(it.unit_cost or 0) for it in items)
             conn.execute(text("""
                 INSERT INTO il_project_documents (
                     project_id, document_type, document_id, document_number,
@@ -1815,18 +2083,24 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
             """), {
                 'proj_id': pr.project_id, 'po_id': po_id, 'po_num': po_number,
                 'cogs': pr.cogs_category or 'A',
-                'amt': float(pr.total_amount or 0),
+                'amt': po_amount,
                 'cur': pr.currency_id, 'rate': float(pr.exchange_rate or 1),
-                'desc': f'PO from PR {pr.pr_number}',
+                'desc': f'PO from PR {pr.pr_number} ({len(items)}/{len(all_items)} items)',
                 'by': created_by_keycloak,
             })
 
-        logger.info(f"PO created: {po_number} (id={po_id}) from PR {pr.pr_number}")
+        logger.info(f"PO created: {po_number} (id={po_id}) from PR {pr.pr_number} — "
+                    f"{len(items)} items included, {excluded_count} excluded (no costbook)")
         return {
             'success': True,
             'po_id': po_id,
             'po_number': po_number,
-            'message': f'PO {po_number} created successfully',
+            'message': f'PO {po_number} created with {len(items)} item(s)',
+            'included_count': len(items),
+            'excluded_count': excluded_count,
+            'excluded_amount_vnd': excluded_vnd,
+            'all_items_covered': all_items_covered,
+            'pr_status': new_status,
         }
     except Exception as e:
         logger.error(f"create_po_from_pr failed: {e}")

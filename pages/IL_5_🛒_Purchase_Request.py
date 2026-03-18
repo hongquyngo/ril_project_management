@@ -40,6 +40,7 @@ from utils.il_project.pr_queries import (
     is_project_pm, is_approver_for_pr,
     get_project_pm_email,
     get_budget_vs_pr,
+    get_pr_costbook_status,
     # PO readiness (new)
     resolve_product_ids,
     validate_po_readiness,
@@ -773,7 +774,11 @@ def _wiz_step2_items(project_id, project, est):
     st.divider()
     if items:
         rows = []
+        _no_cb_count = 0
         for i, it in enumerate(items):
+            has_cb = bool(it.get('costbook_detail_id'))
+            if not has_cb:
+                _no_cb_count += 1
             rows.append({
                 '#': i + 1,
                 'Cat':     it.get('cogs_category', ''),
@@ -783,8 +788,15 @@ def _wiz_step2_items(project_id, project, est):
                 'Unit Cost': f"{it.get('unit_cost', 0):,.2f}",
                 'CCY':     it.get('currency_code', ''),
                 'VND':     f"{float(it.get('amount_vnd', 0)):,.0f}",
+                'CB':      '✅' if has_cb else '⚠️',
                 'Source':  '📋' if it.get('estimate_line_item_id') else '✏️',
             })
+
+        # Warning if items missing costbook
+        if _no_cb_count > 0:
+            st.warning(f"⚠️ **{_no_cb_count}/{len(items)} item(s) thiếu costbook link** — "
+                       f"Các item này sẽ KHÔNG được đưa vào PO. "
+                       f"Tạo vendor costbook (Vendor Quotation) trước khi convert sang PO.")
 
         tbl_key = f"wiz_items_{st.session_state.get('pr_wiz_tbl_ver', 0)}"
         event = st.dataframe(
@@ -800,13 +812,16 @@ def _wiz_step2_items(project_id, project, est):
                 'Unit Cost':  st.column_config.TextColumn('Cost'),
                 'CCY':        st.column_config.TextColumn('CCY', width=45),
                 'VND':        st.column_config.TextColumn('VND'),
+                'CB':         st.column_config.TextColumn('CB', width=30,
+                              help='Costbook: ✅ = linked, ⚠️ = missing (cannot go to PO)'),
                 'Source':     st.column_config.TextColumn('', width=30),
             },
         )
 
         total_vnd = sum(float(it.get('amount_vnd', 0) or 0) for it in items)
         st.markdown(f"**Total: {fmt_vnd(total_vnd)}** &nbsp;·&nbsp; {len(items)} items "
-                    f"&nbsp;·&nbsp; 📋 = estimate &nbsp; ✏️ = manual")
+                    f"&nbsp;·&nbsp; 📋 = estimate &nbsp; ✏️ = manual "
+                    f"&nbsp;·&nbsp; CB: ✅ = costbook linked &nbsp; ⚠️ = no costbook")
 
         # ── Selected-item actions ────────────────────────────
         sel = event.selection.rows
@@ -1086,12 +1101,26 @@ def _wiz_step3_review(project_id, project, est):
         if header.get('required_date'):
             st.caption(f"📅 Required: {header['required_date']}")
 
-    # ── Items table (read-only) ──────────────────────────────
+    # ── Items table (read-only) — with costbook status ─────
     st.divider()
+    _items_with_cb = [it for it in items if it.get('costbook_detail_id')]
+    _items_no_cb = [it for it in items if not it.get('costbook_detail_id')]
+    _no_cb_vnd = sum(float(it.get('amount_vnd', 0) or 0) for it in _items_no_cb)
+
+    if _items_no_cb:
+        st.warning(
+            f"⚠️ **{len(_items_no_cb)}/{len(items)} item(s) thiếu costbook link** "
+            f"({fmt_vnd(_no_cb_vnd)})\n\n"
+            f"Các item thiếu costbook sẽ **KHÔNG** được đưa vào PO. "
+            f"Tạo vendor costbook (Vendor Quotation) cho các sản phẩm này trước khi convert sang PO."
+        )
+
     st.markdown("**📋 Line Items**")
     rows = []
     for it in items:
+        has_cb = bool(it.get('costbook_detail_id'))
         rows.append({
+            'CB':          '✅' if has_cb else '⚠️',
             'Cat':         it.get('cogs_category', ''),
             'Description': it.get('item_description', ''),
             'Vendor':      (it.get('vendor_name', '') or '')[:25],
@@ -1331,6 +1360,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False, cc_emails
 
         # 4. Optionally submit ─────────────────────────────────
         if submit_now:
+            resolve_product_ids(new_id)  # auto-link costbook before submit
             result = submit_pr(new_id, user_id)
             if result['success']:
                 st.success(f"✅ **{pr_number}** created ({len(items)} items, "
@@ -1796,8 +1826,15 @@ def _dialog_pr_view(pr_id: int):
         display = items_df.copy()
         display['amount_fmt'] = display['amount_vnd'].apply(
             lambda v: f"{v:,.0f}" if v else '—')
+        # Costbook + PO status columns
+        display.insert(0, 'CB', display['costbook_detail_id'].apply(
+            lambda v: '✅' if v else '⚠️'))
+        display['PO'] = display['po_number'].apply(
+            lambda v: str(v) if v and str(v) not in ('', 'nan', 'None') else '')
         st.dataframe(display, width="stretch", hide_index=True,
             column_config={
+                'CB': st.column_config.TextColumn('CB', width=30,
+                      help='Costbook: ✅ = linked, ⚠️ = missing'),
                 'cogs_category': st.column_config.TextColumn('Cat', width=40),
                 'item_description': st.column_config.TextColumn('Product'),
                 'brand_name': st.column_config.TextColumn('Brand', width=80),
@@ -1806,11 +1843,13 @@ def _dialog_pr_view(pr_id: int):
                 'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
                 'currency_code': st.column_config.TextColumn('CCY', width=40),
                 'amount_fmt': st.column_config.TextColumn('VND'),
+                'PO': st.column_config.TextColumn('PO#', width=100),
                 'id': None, 'product_id': None, 'costbook_detail_id': None,
                 'estimate_line_item_id': None, 'vendor_id': None,
                 'exchange_rate': None, 'amount_vnd': None,
                 'specifications': None, 'notes': None, 'view_order': None,
                 'vendor_quote_ref': None, 'pt_code': None, 'uom': None,
+                'po_id': None, 'po_number': None,
             })
     else:
         st.info("No items yet." + (" Click ✏️ Edit to add items." if can_edit else ""))
@@ -1843,6 +1882,7 @@ def _dialog_pr_view(pr_id: int):
 
     if can_submit and not items_df.empty:
         if ac1.button("📤 Submit for Approval", type="primary", use_container_width=True):
+            resolve_product_ids(pr_id)  # auto-link costbook before submit
             result = submit_pr(pr_id, user_id)
             if result['success']:
                 st.success(result['message'])
@@ -1867,13 +1907,27 @@ def _dialog_pr_view(pr_id: int):
             else:
                 st.error(result['message'])
 
-    if pr['status'] == 'APPROVED' and not pr.get('po_id'):
-        can_create_po = is_pm_of_project or is_admin
+    if pr['status'] == 'APPROVED':
+        # Check if there are items eligible for PO (has costbook + no po_id)
+        _cb_status = get_pr_costbook_status(pr_id) if not items_df.empty else {}
+        _has_eligible = _cb_status.get('eligible_for_po', 0) > 0
+        can_create_po = (is_pm_of_project or is_admin) and _has_eligible
         if can_create_po:
-            if ac2.button("🛒 Create PO", type="primary", use_container_width=True):
+            _po_label = "🛒 Create PO"
+            if pr.get('po_id'):
+                _po_label = "🛒 Create Another PO"
+            if ac2.button(_po_label, type="primary", use_container_width=True):
                 st.session_state['confirm_create_po'] = pr_id
                 st.rerun()
-        else:
+        elif not _has_eligible and not items_df.empty:
+            if _cb_status.get('without_costbook', 0) > 0:
+                ac2.button("🛒 Create PO", disabled=True, use_container_width=True,
+                           help=f"{_cb_status['without_costbook']} item(s) thiếu costbook — "
+                                f"tạo vendor costbook trước")
+            else:
+                ac2.button("🛒 Create PO", disabled=True, use_container_width=True,
+                           help="All items already in PO")
+        elif not (is_pm_of_project or is_admin):
             ac2.button("🛒 Create PO", disabled=True, use_container_width=True,
                        help="Chỉ PM của project hoặc Admin mới có thể tạo PO")
 
@@ -2040,6 +2094,7 @@ def _dialog_pr_edit(pr_id: int):
     ba1, ba2, ba3 = st.columns([2, 1, 1])
     if not items_df.empty:
         if ba1.button("📤 Submit for Approval", type="primary", use_container_width=True):
+            resolve_product_ids(pr_id)  # auto-link costbook before submit
             result = submit_pr(pr_id, user_id)
             if result['success']:
                 st.success(result['message'])
@@ -2242,31 +2297,40 @@ def _dialog_confirm_po(pr_id: int):
         st.error("⛔ Only the project PM or Admin can create a PO.")
         return
 
-    # ── Step 1: Auto-resolve (ONE TIME per dialog open) ────────────
+    # ── Step 1: Auto-resolve (cached, with manual re-check) ───────
     _resolve_key = f'_po_resolved_{pr_id}'
     if _resolve_key not in st.session_state:
         resolve_result = resolve_product_ids(pr_id)
         st.session_state[_resolve_key] = resolve_result
     else:
         resolve_result = st.session_state[_resolve_key]
-    if resolve_result.get('resolved_count', 0) > 0:
-        st.success(f"✅ Auto-linked {resolve_result['resolved_count']} item(s) "
-                   f"to products (from costbook/estimate)")
+    if resolve_result.get('resolved_count', 0) > 0 or resolve_result.get('costbook_resolved', 0) > 0:
+        _msgs = []
+        if resolve_result.get('resolved_count', 0) > 0:
+            _msgs.append(f"{resolve_result['resolved_count']} product link(s)")
+        if resolve_result.get('costbook_resolved', 0) > 0:
+            _msgs.append(f"{resolve_result['costbook_resolved']} costbook link(s)")
+        st.success(f"✅ Auto-resolved: {' + '.join(_msgs)} (from costbook/estimate)")
+
+    # Re-check button (run resolve again after user creates costbook externally)
+    if st.button("🔄 Re-check costbook links", use_container_width=False,
+                 help="Chạy lại auto-resolve sau khi đã tạo costbook mới"):
+        st.session_state.pop(_resolve_key, None)
+        st.session_state.pop(f'_po_data_{pr_id}', None)
+        st.rerun()
 
     # ── Step 2: Validate PO readiness ──────────────────────────────
     validation = validate_po_readiness(pr_id)
     for w in validation.get('warnings', []):
         st.warning(f"⚠️ {w}")
 
-    # ── Step 3: Product linking (fragment — self-contained rerun) ──
+    # ── Step 3: Product linking for eligible items missing product ──
     missing_items = validation.get('items_without_product', [])
     if missing_items:
         _frag_product_linking(pr_id, missing_items)
 
-    # Blockers (other than missing product)
-    other_blockers = [b for b in validation.get('blockers', [])
-                      if 'missing product' not in b.lower()]
-    for b in other_blockers:
+    # Blockers
+    for b in validation.get('blockers', []):
         st.error(f"❌ {b}")
 
     if not validation['ready']:
@@ -2278,6 +2342,78 @@ def _dialog_confirm_po(pr_id: int):
             _cleanup_po_dialog(pr_id)
             st.rerun()
         return
+
+    # ══════════════════════════════════════════════════════════════
+    # SPLIT VIEW: Eligible vs Excluded items
+    # ══════════════════════════════════════════════════════════════
+    st.divider()
+    eligible = validation['eligible_items']
+    excluded = validation['excluded_items']
+    already_in_po = validation.get('already_in_po_items', [])
+    eligible_vnd = validation['eligible_amount_vnd']
+    excluded_vnd = validation['excluded_amount_vnd']
+    pr_total_vnd = float(pr.get('total_amount_vnd') or 0)
+    is_partial = len(excluded) > 0
+
+    # Summary comparison
+    if is_partial:
+        st.markdown("##### 📊 PO Coverage")
+        comp_rows = []
+        comp_rows.append({'': 'PR Total', 'Items': len(eligible) + len(excluded) + len(already_in_po),
+                          'Amount VND': f"{pr_total_vnd:,.0f}"})
+        if already_in_po:
+            _aip_vnd = sum(it['amount_vnd'] for it in already_in_po)
+            comp_rows.append({'': '✅ Already in PO', 'Items': len(already_in_po),
+                              'Amount VND': f"{_aip_vnd:,.0f}"})
+        comp_rows.append({'': '✅ This PO (has costbook)', 'Items': len(eligible),
+                          'Amount VND': f"{eligible_vnd:,.0f}"})
+        comp_rows.append({'': '⚠️ Excluded (no costbook)', 'Items': len(excluded),
+                          'Amount VND': f"{excluded_vnd:,.0f}"})
+        st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True, height=38 + 35*len(comp_rows))
+
+    # ── Eligible items (will be in PO) ────────────────────────────
+    st.markdown(f"##### ✅ Items in this PO ({len(eligible)})")
+    if eligible:
+        elig_rows = []
+        for it in eligible:
+            elig_rows.append({
+                'Cat': it.get('cogs_category', ''),
+                'Description': (it.get('description', '') or '')[:40],
+                'Amount VND': f"{it['amount_vnd']:,.0f}",
+            })
+        st.dataframe(pd.DataFrame(elig_rows), width="stretch", hide_index=True,
+                     height=min(35*len(elig_rows)+38, 200))
+
+    # ── Excluded items (no costbook) ─────────────────────────────
+    if excluded:
+        st.markdown(f"##### ⚠️ Excluded — no costbook ({len(excluded)})")
+        excl_rows = []
+        for it in excluded:
+            excl_rows.append({
+                'Cat': it.get('cogs_category', ''),
+                'Description': (it.get('description', '') or '')[:40],
+                'Amount VND': f"{it['amount_vnd']:,.0f}",
+            })
+        st.dataframe(pd.DataFrame(excl_rows), width="stretch", hide_index=True,
+                     height=min(35*len(excl_rows)+38, 150))
+        st.caption("💡 Tạo costbook cho các item trên rồi ấn **🔄 Re-check** để chuyển sang eligible. "
+                   "Hoặc tạo PO riêng cho các item này sau.")
+
+    # ── Already in PO ────────────────────────────────────────────
+    if already_in_po:
+        with st.expander(f"ℹ️ {len(already_in_po)} item(s) already in PO — skipped"):
+            for it in already_in_po:
+                st.caption(f"- {it.get('description', '')[:50]} — {fmt_vnd(it['amount_vnd'])}")
+
+    # ── PO summary ────────────────────────────────────────────────
+    st.divider()
+    if is_partial:
+        st.info(f"🛒 **PO sẽ tạo:** {len(eligible)} item(s) — "
+                f"**{fmt_vnd(eligible_vnd)}** / {fmt_vnd(pr_total_vnd)} "
+                f"({eligible_vnd / pr_total_vnd * 100:.0f}%)" if pr_total_vnd > 0 else
+                f"🛒 **PO sẽ tạo:** {len(eligible)} item(s) — {fmt_vnd(eligible_vnd)}")
+    else:
+        st.success(f"✅ **PO sẽ tạo:** {len(eligible)} item(s) — {fmt_vnd(eligible_vnd)} (toàn bộ PR)")
 
     # ══════════════════════════════════════════════════════════════
     # LOAD ALL DATA ONCE — cache in session_state
@@ -2303,6 +2439,11 @@ def _dialog_confirm_po(pr_id: int):
     _auto_addr         = _d['auto_addr']
     items_df           = _d['items_df']
     cc_emp_list        = _d['cc_employees']
+
+    # Filter enriched_items to only eligible (has costbook + no po_id)
+    _eligible_ids = {it['item_id'] for it in eligible}
+    enriched_items = [eit for eit in enriched_items
+                      if eit.get('item_id') in _eligible_ids]
 
     # ── Pre-calculate defaults for form (BEFORE form renders) ──────
     from datetime import timedelta
@@ -2365,31 +2506,6 @@ def _dialog_confirm_po(pr_id: int):
     cc_email_map = {f"{e['name']} ({e['email']})": e['email'] for e in cc_emp_list}
 
     # ══════════════════════════════════════════════════════════════
-    # PO Preview (read-only — outside form)
-    # ══════════════════════════════════════════════════════════════
-    st.divider()
-    st.success("✅ **Ready to create PO** — all items linked to products, vendor selected.")
-
-    if not items_df.empty:
-        preview = items_df[['cogs_category', 'item_description', 'vendor_name',
-                            'quantity', 'unit_cost']].copy()
-        preview['amount'] = (items_df['quantity'] * items_df['unit_cost']).apply(
-            lambda v: f"{v:,.2f}")
-        st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(preview)+38, 200),
-                     column_config={
-                         'cogs_category': st.column_config.TextColumn('Cat', width=40),
-                         'item_description': st.column_config.TextColumn('Product'),
-                         'vendor_name': st.column_config.TextColumn('Vendor'),
-                         'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
-                         'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
-                         'amount': st.column_config.TextColumn('Amount'),
-                     })
-
-    st.markdown(f"**PO will be created for:** Vendor **{pr.get('vendor_name', '—')}** | "
-                f"Currency **{pr.get('currency_code', 'VND')}** | "
-                f"Total **{fmt_vnd(pr.get('total_amount_vnd'))}**")
-
-    # ══════════════════════════════════════════════════════════════
     # ④ + ⑤ + ⑥  ALL IN ONE FORM — zero reruns while filling
     # ══════════════════════════════════════════════════════════════
     with st.form("po_create_form"):
@@ -2431,10 +2547,10 @@ def _dialog_confirm_po(pr_id: int):
                                            index=_pm_idx, key="po_f_owner",
                                            help="Inventory owner — defaults to PM")
 
-        # Per-item ETD / ETA (in expanders)
-        _form_item_keys = []  # track keys for value collection on submit
+        # Per-item ETD / ETA (in expanders) — only eligible items
+        _form_item_keys = []
         if enriched_items:
-            st.caption(f"📦 {len(enriched_items)} items — expand to set ETD/ETA per item")
+            st.caption(f"📦 {len(enriched_items)} eligible items — expand to set ETD/ETA per item")
             for idx, eit in enumerate(enriched_items):
                 item_id = eit.get('item_id')
                 desc = (eit.get('item_description', '') or '')[:50]
@@ -2445,7 +2561,6 @@ def _dialog_confirm_po(pr_id: int):
                 shipping_mode = eit.get('cb_shipping_mode_name', '') or eit.get('cb_shipping_mode_code', '')
                 pkg = eit.get('cb_package_size') or eit.get('product_package_size', '')
 
-                # Build compact label
                 info_parts = []
                 if lt_num or lt_min:
                     info_parts.append(f"⏱ {lt_num or lt_min} {lt_uom}")
@@ -2467,8 +2582,20 @@ def _dialog_confirm_po(pr_id: int):
                                    help="Auto-calculated from ETD + lead time (override if needed)")
                     _form_item_keys.append((item_id, _etd_key, _eta_key))
 
-        # ── ⑥ CC + Submit ─────────────────────────────────────────
+        # ── ⑥ Confirmation + CC + Submit ──────────────────────────
         st.divider()
+
+        # Mandatory checkbox for partial PO
+        if is_partial:
+            _confirm = st.checkbox(
+                f"Tôi xác nhận PO chỉ gồm **{len(eligible)}/{len(eligible)+len(excluded)} items** "
+                f"(**{fmt_vnd(eligible_vnd)}** / {fmt_vnd(pr_total_vnd)}). "
+                f"{len(excluded)} item(s) không có costbook sẽ bị loại.",
+                key="po_f_confirm_partial",
+            )
+        else:
+            _confirm = True  # Full PO — no checkbox needed
+
         _po_cc_sel = st.multiselect("📧 CC (e.g. finance, optional)", cc_options,
                                     key="po_f_cc", help="Select employees to CC on email notification")
 
@@ -2484,18 +2611,20 @@ def _dialog_confirm_po(pr_id: int):
         st.rerun()
 
     if submitted:
+        # Check confirmation for partial PO
+        if is_partial and not _confirm:
+            st.error("⚠️ Vui lòng tick xác nhận partial PO trước khi tạo.")
+            return
+
         # ── Collect all values from form ──────────────────────
-        # Payment term
         _sel_pt_id = None
         if sel_pt != "(Auto from costbook)":
             _sel_pt_id = next((t['id'] for t in payment_terms_list if t['name'] == sel_pt), None)
 
-        # Trade term
         _sel_tt_id = None
         if sel_tt != "(Auto from costbook)":
             _sel_tt_id = next((t['id'] for t in trade_terms_list if t['name'] == sel_tt), None)
 
-        # Contacts
         _ship_contact_id = None
         if sel_ship_contact != "(None)" and buyer_contacts:
             _sc_idx = bc_options.index(sel_ship_contact) - 1
@@ -2508,7 +2637,6 @@ def _dialog_confirm_po(pr_id: int):
             if 0 <= _bc_idx < len(buyer_contacts):
                 _bill_contact_id = buyer_contacts[_bc_idx]['id']
 
-        # Stock owner
         _stock_owner_id = None
         if default_stock_owner != "(None)":
             try:
@@ -2516,7 +2644,6 @@ def _dialog_confirm_po(pr_id: int):
             except (ValueError, IndexError):
                 _stock_owner_id = emp_int_id
 
-        # Per-item ETD/ETA from form keys
         _item_etd_eta = {}
         for item_id, etd_key, eta_key in _form_item_keys:
             _etd_val = st.session_state.get(etd_key)
@@ -2527,7 +2654,6 @@ def _dialog_confirm_po(pr_id: int):
                 'stock_owner_id': _stock_owner_id,
             }
 
-        # Items without custom ETD → use default_etd
         if enriched_items and not _form_item_keys:
             for eit in enriched_items:
                 _iid = str(eit.get('item_id'))
@@ -2538,7 +2664,6 @@ def _dialog_confirm_po(pr_id: int):
                     'stock_owner_id': _stock_owner_id,
                 }
 
-        # CC emails
         _po_cc = [cc_email_map[s] for s in _po_cc_sel if s in cc_email_map]
 
         po_settings = {
@@ -2555,11 +2680,18 @@ def _dialog_confirm_po(pr_id: int):
         keycloak_id = st.session_state.get('user_keycloak_id', user_id)
         result = create_po_from_pr(pr_id, 1, keycloak_id, po_settings=po_settings)
         if result['success']:
-            st.success(f"✅ {result['message']}")
+            # Build success message with excluded info
+            msg = f"✅ {result['message']}"
+            if result.get('excluded_count', 0) > 0:
+                msg += (f"\n\n⚠️ {result['excluded_count']} item(s) excluded (no costbook) — "
+                        f"{fmt_vnd(result.get('excluded_amount_vnd', 0))} not in PO.")
+                if not result.get('all_items_covered'):
+                    msg += " PR remains APPROVED — bạn có thể tạo PO thêm cho các item còn lại."
+            st.success(msg)
             notify_po_created(
                 pr_number=pr['pr_number'], po_number=result['po_number'],
                 project_code=pr.get('project_code', ''),
-                total_vnd=float(pr.get('total_amount_vnd') or 0),
+                total_vnd=float(eligible_vnd),
                 vendor_name=pr.get('vendor_name', ''),
                 requester_email=pr.get('requester_email', ''),
                 requester_name=pr.get('requester_name', ''),
@@ -2870,6 +3002,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
             item_count = int(row.get('item_count', 0) or 0)
             if item_count > 0:
                 if cols[col_idx].button("📤 Submit", use_container_width=True, key="my_submit"):
+                    resolve_product_ids(int(row['pr_id']))  # auto-link costbook
                     result = submit_pr(int(row['pr_id']), user_id)
                     if result['success']:
                         st.success(result['message'])
@@ -2899,8 +3032,8 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
                         st.error(result['message'])
                 col_idx += 1
 
-        # APPROVED: Create PO
-        elif row['status'] == 'APPROVED' and not row.get('po_id'):
+        # APPROVED: Create PO (may be partial — PO dialog handles eligibility)
+        elif row['status'] == 'APPROVED':
             if cols[col_idx].button("🛒 Create PO", use_container_width=True, key="my_po"):
                 st.session_state['confirm_create_po'] = int(row['pr_id'])
                 st.rerun(scope="app")
