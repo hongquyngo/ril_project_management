@@ -128,6 +128,123 @@ def _fmt_amount_flow(val) -> str:
     return f"≤{_fmt_amount(val)}"
 
 
+def _build_flow_steps_html(auths_sorted: List[Dict]) -> str:
+    """
+    Build a clear approval workflow visualization.
+    Shows each level as a rule card with threshold logic.
+    Includes a scenario guide so Finance understands when each level applies.
+    Email-client safe (inline styles, table layout).
+    """
+    if not auths_sorted:
+        return ''
+
+    # ── Level cards ──
+    rows = []
+    for a in auths_sorted:
+        name = a.get('employee_name', '?')
+        pos = a.get('position', '') or ''
+        lvl = a.get('approval_level', '?')
+        max_amt = a.get('max_amount')
+        amt_display = _fmt_amount(max_amt)
+
+        # Describe what this level handles
+        if max_amt is not None:
+            rule_text = f"Approves requests up to <strong>{amt_display}</strong>"
+        else:
+            rule_text = "Approves requests of <strong>any amount</strong>"
+
+        rows.append(f'''
+        <tr>
+            <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;
+                       vertical-align:middle;width:70px;">
+                <div style="background:#1e3a5f;color:#fff;font-size:11px;font-weight:700;
+                            display:inline-block;padding:3px 12px;border-radius:10px;">
+                    Level {lvl}</div>
+            </td>
+            <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;vertical-align:middle;">
+                <div style="font-weight:700;font-size:13px;color:#1e293b;">{name}</div>
+                <div style="font-size:11px;color:#64748b;">{pos}</div>
+            </td>
+            <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;
+                       vertical-align:middle;font-size:12px;color:#374151;">
+                {rule_text}
+            </td>
+        </tr>''')
+
+    cards_html = f'''
+    <table style="width:100%;border-collapse:collapse;background:#fff;
+                  border:1px solid #e2e8f0;border-radius:8px;font-size:13px;">
+        <tr style="background:#f1f5f9;">
+            <th style="padding:8px 12px;text-align:center;font-size:11px;
+                       color:#64748b;font-weight:600;">LEVEL</th>
+            <th style="padding:8px 12px;text-align:left;font-size:11px;
+                       color:#64748b;font-weight:600;">APPROVER</th>
+            <th style="padding:8px 12px;text-align:left;font-size:11px;
+                       color:#64748b;font-weight:600;">AUTHORITY</th>
+        </tr>
+        {''.join(rows)}
+    </table>'''
+
+    # ── Scenario guide (when does each level apply?) ──
+    # Build threshold breakpoints from the sorted levels
+    scenarios = []
+    for i, a in enumerate(auths_sorted):
+        lvl = a.get('approval_level', '?')
+        max_amt = a.get('max_amount')
+        name_short = a.get('employee_name', '?').split()[0]
+
+        if max_amt is not None:
+            amt_label = _fmt_amount(max_amt)
+            # This level is sufficient for amounts up to max_amt
+            levels_needed = ' + '.join(
+                f"L{auths_sorted[j].get('approval_level', '?')}"
+                for j in range(i + 1)
+            )
+            approvers_needed = ' → '.join(
+                auths_sorted[j].get('employee_name', '?').split()[0]
+                for j in range(i + 1)
+            )
+            scenarios.append(
+                f'<span style="font-weight:600;color:#1e3a5f;">≤ {amt_label}</span>'
+                f' — {levels_needed} ({approvers_needed})'
+            )
+        else:
+            # Unlimited level — only show if there were previous limited levels
+            if i > 0:
+                prev_amt = auths_sorted[i - 1].get('max_amount')
+                if prev_amt is not None:
+                    prev_label = _fmt_amount(prev_amt)
+                    levels_needed = ' + '.join(
+                        f"L{auths_sorted[j].get('approval_level', '?')}"
+                        for j in range(i + 1)
+                    )
+                    approvers_needed = ' → '.join(
+                        auths_sorted[j].get('employee_name', '?').split()[0]
+                        for j in range(i + 1)
+                    )
+                    scenarios.append(
+                        f'<span style="font-weight:600;color:#1e3a5f;">&gt; {prev_label}</span>'
+                        f' — {levels_needed} ({approvers_needed})'
+                    )
+
+    scenario_html = ''
+    if scenarios:
+        scenario_items = ''.join(
+            f'<div style="padding:3px 0;font-size:12px;color:#374151;">'
+            f'<span style="color:#94a3b8;margin-right:4px;">●</span> {s}</div>'
+            for s in scenarios
+        )
+        scenario_html = f'''
+        <div style="margin-top:10px;padding:10px 14px;background:#f0f9ff;
+                    border-radius:6px;border:1px solid #dbeafe;">
+            <div style="font-size:11px;font-weight:600;color:#1e40af;
+                        margin-bottom:4px;">When is each level required?</div>
+            {scenario_items}
+        </div>'''
+
+    return f'{cards_html}{scenario_html}'
+
+
 def _info_row(label: str, value: str) -> str:
     return f'''<tr>
         <td style="padding:4px 0;color:#6b7280;width:160px;">{label}</td>
@@ -258,24 +375,23 @@ def build_summary_html(
     for type_code, auths in type_groups.items():
         type_name = auths[0].get('type_name', type_code) if auths else type_code
         auths_sorted = sorted(auths, key=lambda a: a.get('approval_level', 0))
-        steps = []
-        for a in auths_sorted:
-            name = a.get('employee_name', '?').split()[0]  # first name
-            amt_label = _fmt_amount_flow(a.get('max_amount'))
-            steps.append(f"L{a.get('approval_level', '?')}: {name} ({amt_label})")
-        chain_str = " → ".join(steps)
+        steps_html = _build_flow_steps_html(auths_sorted)
         flow_html += f'''
-        <div style="background:#f8fafc;padding:8px 12px;margin:4px 0;border-radius:4px;
-                    font-size:12px;color:#374151;">
-            <strong>{type_name}:</strong> {chain_str}
+        <div style="margin:8px 0 16px 0;">
+            <div style="font-size:12px;color:#64748b;margin-bottom:8px;text-align:center;">
+                {type_name}
+            </div>
+            {steps_html}
         </div>'''
 
     if flow_html:
         flow_html = f'''
-        <div style="margin:20px 0 8px 0;">
+        <div style="margin:24px 0 8px 0;">
             <strong style="color:#1e3a5f;">Approval Workflow</strong>
         </div>
-        {flow_html}'''
+        <div style="background:#f8fafc;border-radius:8px;padding:16px 12px;">
+            {flow_html}
+        </div>'''
 
     # Recent changes (Phase 3)
     history_html = ""
@@ -542,22 +658,18 @@ def build_change_html(
     chain_html = ""
     if current_chain:
         sorted_chain = sorted(current_chain, key=lambda a: a.get('approval_level', 0))
-        steps = []
-        for a in sorted_chain:
-            if not a.get('is_active'):
-                continue
-            name = a.get('employee_name', '?')
-            amt_label = _fmt_amount_flow(a.get('max_amount'))
-            steps.append(
-                f"<strong>L{a.get('approval_level', '?')}</strong>: {name} ({amt_label})"
-            )
-        chain_str = " → ".join(steps)
-        chain_html = f'''
-        <div style="background:#f0f9ff;border-left:3px solid #3b82f6;padding:12px;
-                    margin:16px 0;font-size:13px;">
-            <strong>Current Approval Workflow:</strong><br>
-            {chain_str}
-        </div>'''
+        active_chain = [a for a in sorted_chain if a.get('is_active')]
+        if active_chain:
+            steps_html = _build_flow_steps_html(active_chain)
+            chain_html = f'''
+            <div style="margin:16px 0;">
+                <div style="font-weight:600;color:#1e3a5f;margin-bottom:8px;">
+                    Current Approval Workflow
+                </div>
+                <div style="background:#f8fafc;border-radius:8px;padding:16px 12px;">
+                    {steps_html}
+                </div>
+            </div>'''
 
     # Change note
     note_html = ""
