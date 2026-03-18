@@ -482,7 +482,8 @@ def _age_icon(submitted_date) -> str:
 # HELPER — Reusable PR Action Bar (consistent across all views)
 # ══════════════════════════════════════════════════════════════════
 
-def _render_pr_action_bar(row, key_prefix: str, show_approve: bool = False):
+def _render_pr_action_bar(row, key_prefix: str, show_approve: bool = False,
+                          tbl_version_key: str = ""):
     """
     Render context-sensitive action buttons for a selected PR row.
     Used by: My PRs, All PRs, Overview, Pending tabs — all views.
@@ -491,6 +492,8 @@ def _render_pr_action_bar(row, key_prefix: str, show_approve: bool = False):
         row: DataFrame row with pr_id, status, requester_id, project_id, etc.
         key_prefix: unique prefix to avoid widget key conflicts
         show_approve: True for Pending tab — show Review & Act button
+        tbl_version_key: session_state key to bump for deselecting the dataframe
+                         (each tab uses a different key, e.g. '_ov_all_pr_key')
     """
     pr_id = int(row['pr_id'])
     status = row['status']
@@ -615,7 +618,7 @@ def _render_pr_action_bar(row, key_prefix: str, show_approve: bool = False):
             if cols[i].button("✖ Deselect", use_container_width=True,
                               key=f"{key_prefix}_desel"):
                 # Bump table version to clear selection
-                _ver_key = f'_{key_prefix}_tbl_key'
+                _ver_key = tbl_version_key or f'_{key_prefix}_tbl_key'
                 st.session_state[_ver_key] = st.session_state.get(_ver_key, 0) + 1
                 st.rerun()
 
@@ -3103,7 +3106,7 @@ def _render_overview(f_status_filter, f_priority_filter):
                     f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']} | "
                     f"Project: {row.get('project_code', '—')} | "
                     f"By: {row.get('requester_name', '—')}")
-        _render_pr_action_bar(row, "ov")
+        _render_pr_action_bar(row, "ov", tbl_version_key="_ov_all_pr_key")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -3177,7 +3180,7 @@ def _render_my_prs_tab(project_id_filter, status_filter, priority_filter):
         row = my_df.iloc[sel[0]]
         st.markdown(f"**Selected:** {row['pr_number']} — "
                     f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']}")
-        _render_pr_action_bar(row, "my")
+        _render_pr_action_bar(row, "my", tbl_version_key="_my_pr_key")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -3253,7 +3256,7 @@ def _render_pending_tab():
         )
         if row.get('justification'):
             st.caption(f"📝 {str(row['justification'])[:200]}")
-        _render_pr_action_bar(row, "pend", show_approve=True)
+        _render_pr_action_bar(row, "pend", show_approve=True, tbl_version_key="_pend_tbl_key")
     else:
         if len(pending_df) > 1:
             st.divider()
@@ -3337,7 +3340,7 @@ def _render_all_prs_tab(project_id_filter, status_filter, priority_filter):
         st.markdown(f"**Selected:** {row['pr_number']} — "
                     f"{PR_STATUS_ICONS.get(row['status'], '')} {row['status']} | "
                     f"By: {row.get('requester_name', '—')}")
-        _render_pr_action_bar(row, "all")
+        _render_pr_action_bar(row, "all", tbl_version_key="_all_tbl_key")
 
 
 # ══════════════════════════════════════════════════════════════════

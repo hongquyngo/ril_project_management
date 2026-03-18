@@ -1125,10 +1125,10 @@ def _build_filename(header: Dict, po_number: str, language: str) -> str:
     Build a descriptive PDF filename from PO header data.
 
     Format:
-        {PO_Number}_{VendorCode}_{BuyerCode}_{Date}_{Type}_{Lang}.pdf
+        {PO_Number}_{VendorName}_{BuyerName}_{Date}_{Type}_{Lang}.pdf
 
     Example:
-        PO20260318-123-5_ACME_PROSTECH_20260318_Regular_EN.pdf
+        PO20260318-123-5_Acme_Corp_Prostech_Vietnam_20260318_Regular_EN.pdf
 
     Fallback (missing data):
         PO20260318-123-5_EN.pdf
@@ -1153,13 +1153,13 @@ def _build_filename(header: Dict, po_number: str, language: str) -> str:
     # 1. PO Number (always present)
     parts.append(_safe(po_number, f'PO-{header.get("id", "0")}'))
 
-    # 2. Vendor (prefer code, fallback to name)
-    vendor = _safe(header.get('seller_code')) or _safe(header.get('seller_name'))
+    # 2. Vendor (prefer name, fallback to code)
+    vendor = _safe(header.get('seller_name')) or _safe(header.get('seller_code'))
     if vendor:
         parts.append(vendor)
 
-    # 3. Buyer (prefer code, fallback to name)
-    buyer = _safe(header.get('buyer_code')) or _safe(header.get('buyer_name'))
+    # 3. Buyer (prefer name, fallback to code)
+    buyer = _safe(header.get('buyer_name')) or _safe(header.get('buyer_code'))
     if buyer:
         parts.append(buyer)
 
@@ -1194,7 +1194,7 @@ def _build_filename(header: Dict, po_number: str, language: str) -> str:
 def generate_po_pdf(
     po_id: int,
     language: str = 'en',
-    orientation: str = 'portrait',
+    orientation: str = 'landscape',
 ) -> Dict:
     """
     Generate a PO PDF on-the-fly from DB data.
