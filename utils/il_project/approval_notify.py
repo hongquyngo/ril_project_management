@@ -12,6 +12,8 @@ Triggers:
 Public API:
     send_config_summary()       → Phase 1 on-demand summary
     send_config_change_alert()  → Phase 2 auto-notify
+    auto_notify_crud()          → Phase 2 single entry point for CRUD auto-notify
+    get_mandatory_cc()          → Resolve mandatory CC list (sender + approvers in scope)
     get_presets()               → Phase 3 saved recipient presets
     save_preset()               → Phase 3 create/update preset
     delete_preset()             → Phase 3 remove preset
@@ -347,11 +349,16 @@ def send_config_summary(
     app_url: Optional[str] = None,
     sent_by: str = "",
     sent_by_employee_id: Optional[int] = None,
+    sender_email: Optional[str] = None,
 ) -> Dict:
     """
     Phase 1: Send on-demand approval config summary email.
 
-    Returns: {success: bool, message: str, recipient_count: int}
+    Automatically merges mandatory CC (sender + all approvers in scope)
+    into the CC list. Manual TO/CC from the UI are preserved.
+
+    Returns: {success: bool, message: str, recipient_count: int,
+              mandatory_cc: [...], final_to: [...], final_cc: [...]}
     """
     if not _is_configured():
         return {'success': False, 'message': 'Email not configured', 'recipient_count': 0}
@@ -362,6 +369,23 @@ def send_config_summary(
     # Load authorities if not provided
     if authorities is None:
         authorities = _load_all_authorities()
+
+    # Resolve sender email if not provided
+    if not sender_email:
+        sender_email = _get_sender_email(sent_by_employee_id, sent_by)
+
+    # Auto-merge mandatory CC (sender + approvers in scope)
+    mandatory_emails, _ = get_mandatory_cc(
+        type_filter=type_filter,
+        sender_email=sender_email,
+        authorities=authorities,
+    )
+
+    # Merge: mandatory CC that are not already in TO
+    merged_cc = list(cc_emails or [])
+    for me in mandatory_emails:
+        if me and me not in to_emails and me not in merged_cc:
+            merged_cc.append(me)
 
     body = build_summary_html(
         authorities=authorities,
@@ -376,16 +400,16 @@ def send_config_summary(
     subject = f"[Notice] Approval Authority — {scope} ({datetime.now().strftime('%Y-%m-%d')})"
 
     html = _base_template("Approval Authority Notification", body, app_url)
-    ok = _send_email(to_emails, subject, html, cc_emails)
+    ok = _send_email(to_emails, subject, html, merged_cc or None)
 
-    recipient_count = len(to_emails) + len(cc_emails or [])
+    recipient_count = len(to_emails) + len(merged_cc)
     if ok:
         # Log the send (Phase 3)
         _log_notification(
             notification_type='SUMMARY',
             subject=subject,
             to_emails=to_emails,
-            cc_emails=cc_emails,
+            cc_emails=merged_cc,
             sent_by=sent_by,
             sent_by_employee_id=sent_by_employee_id,
             details=f"Scope: {scope}, Recipients: {recipient_count}",
@@ -393,8 +417,11 @@ def send_config_summary(
 
     return {
         'success': ok,
-        'message': f'Summary sent to {recipient_count} recipient(s)' if ok else 'Failed to send email',
+        'message': f'Notification sent to {recipient_count} recipient(s)' if ok else 'Failed to send email',
         'recipient_count': recipient_count,
+        'mandatory_cc': mandatory_emails,
+        'final_to': to_emails,
+        'final_cc': merged_cc,
     }
 
 
@@ -636,6 +663,192 @@ def send_config_change_alert(
         'success': ok,
         'message': f'Change alert sent ({change_type})' if ok else 'Failed to send email',
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# MANDATORY RECIPIENTS & AUTO-NOTIFY
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_sender_email(sent_by_employee_id: Optional[int] = None, sent_by: str = "") -> Optional[str]:
+    """Resolve current admin/sender email from employee_id or user_id."""
+    try:
+        if sent_by_employee_id:
+            rows = _execute_query(
+                "SELECT email FROM employees WHERE id = :id AND delete_flag = 0",
+                {'id': sent_by_employee_id},
+            )
+            if rows and rows[0].get('email'):
+                return rows[0]['email']
+        if sent_by:
+            rows = _execute_query(
+                "SELECT email FROM employees WHERE (id = :uid OR keycloak_id = :uid) AND delete_flag = 0 LIMIT 1",
+                {'uid': sent_by},
+            )
+            if rows and rows[0].get('email'):
+                return rows[0]['email']
+    except Exception as e:
+        logger.debug(f"_get_sender_email failed: {e}")
+    return None
+
+
+def get_mandatory_cc(
+    type_filter: Optional[str] = None,
+    sender_email: Optional[str] = None,
+    authorities: Optional[List[Dict]] = None,
+) -> Tuple[List[str], List[str]]:
+    """
+    Resolve mandatory CC recipients that must always be included.
+
+    Returns:
+        (emails, labels) — deduplicated, with human-readable labels.
+
+    Mandatory CC includes:
+      1. Sender (admin performing the action)
+      2. All active approvers in the filtered scope
+    """
+    if authorities is None:
+        authorities = _load_all_authorities()
+
+    emails: List[str] = []
+    labels: List[str] = []
+
+    # 1. Sender
+    if sender_email and sender_email not in emails:
+        emails.append(sender_email)
+        labels.append(f"{sender_email} (sender)")
+
+    # 2. Active approvers in scope
+    scope_auth = authorities
+    if type_filter:
+        scope_auth = [a for a in authorities if a.get('type_code') == type_filter]
+    active_auth = [a for a in scope_auth if a.get('is_active')]
+
+    for a in active_auth:
+        email = a.get('email', '')
+        if email and email not in emails:
+            emails.append(email)
+            name = a.get('employee_name', '—')
+            lvl = a.get('approval_level', '?')
+            labels.append(f"{name} — L{lvl} ({email})")
+
+    return emails, labels
+
+
+def auto_notify_crud(
+    change_type: str,
+    authority_data: Dict,
+    old_data: Optional[Dict] = None,
+    changed_by_name: str = "",
+    sender_email: Optional[str] = None,
+    sent_by: str = "",
+    sent_by_employee_id: Optional[int] = None,
+) -> Dict:
+    """
+    Auto-notify after a CRUD operation on approval authorities.
+    Automatically resolves all recipients — no manual selection needed.
+
+    TO:  The affected approver (the one being created/updated/deleted)
+    CC:  Sender + all other active approvers in the same type + finance preset
+
+    Args:
+        change_type: 'CREATED' | 'UPDATED' | 'DELETED' | 'DEACTIVATED' | 'ACTIVATED'
+        authority_data: dict with employee_name, email, type_code, type_name,
+                        approval_level, max_amount, is_active, position
+        old_data: previous values (for UPDATED — shows diff)
+        changed_by_name: display name of admin performing the change
+        sender_email: email of admin performing the change
+        sent_by: user_id string
+        sent_by_employee_id: employee_id int
+
+    Returns: {success: bool, message: str, to: [...], cc: [...]}
+    """
+    if not _is_configured():
+        return {'success': False, 'message': 'Email not configured', 'to': [], 'cc': []}
+
+    # Resolve sender email if not provided
+    if not sender_email:
+        sender_email = _get_sender_email(sent_by_employee_id, sent_by)
+
+    type_code = authority_data.get('type_code', '')
+    affected_email = authority_data.get('email', '')
+
+    # ── Build TO list ──
+    to_emails: List[str] = []
+    if affected_email:
+        to_emails.append(affected_email)
+
+    # ── Build CC list ──
+    cc_emails: List[str] = []
+
+    # 1. Sender (admin)
+    if sender_email and sender_email not in to_emails:
+        cc_emails.append(sender_email)
+
+    # 2. All active approvers in the same type (excluding affected)
+    try:
+        all_auth = _load_all_authorities()
+        same_type = [
+            a for a in all_auth
+            if a.get('type_code') == type_code and a.get('is_active')
+        ]
+        for a in same_type:
+            email = a.get('email', '')
+            if email and email not in to_emails and email not in cc_emails:
+                cc_emails.append(email)
+    except Exception as e:
+        logger.debug(f"auto_notify_crud: failed to load approvers: {e}")
+
+    # 3. Finance preset (if type is finance-related)
+    _finance_keywords = {'PURCHASE', 'PAYMENT', 'INVOICE', 'PO', 'PR', 'FINANCE', 'COST'}
+    if any(kw in type_code.upper() for kw in _finance_keywords):
+        try:
+            presets = get_presets()
+            finance_preset = next(
+                (p for p in presets
+                 if 'finance' in (p.get('preset_name', '') or '').lower()),
+                None,
+            )
+            if finance_preset:
+                f_emails, _ = resolve_preset_emails(finance_preset)
+                for fe in f_emails:
+                    if fe and fe not in to_emails and fe not in cc_emails:
+                        cc_emails.append(fe)
+        except Exception as e:
+            logger.debug(f"auto_notify_crud: failed to resolve finance preset: {e}")
+
+    # Ensure at least one TO
+    if not to_emails:
+        if cc_emails:
+            to_emails.append(cc_emails.pop(0))
+        else:
+            return {'success': False, 'message': 'No recipients resolved', 'to': [], 'cc': []}
+
+    # Build chain for visualization
+    current_chain = []
+    try:
+        current_chain = [
+            a for a in _load_all_authorities()
+            if a.get('type_code') == type_code and a.get('is_active')
+        ]
+    except Exception:
+        pass
+
+    # Send
+    result = send_config_change_alert(
+        change_type=change_type,
+        authority_data=authority_data,
+        to_emails=to_emails,
+        cc_emails=cc_emails or None,
+        old_data=old_data,
+        changed_by_name=changed_by_name,
+        current_chain=current_chain,
+        sent_by=sent_by,
+        sent_by_employee_id=sent_by_employee_id,
+    )
+
+    result['to'] = to_emails
+    result['cc'] = cc_emails
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════

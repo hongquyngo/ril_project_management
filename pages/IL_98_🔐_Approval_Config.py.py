@@ -172,177 +172,80 @@ def _get_chain_for_type(type_code: str) -> list:
 # PHASE 2: AUTO-NOTIFY AFTER CONFIG CHANGE
 # ══════════════════════════════════════════════════════════════════════
 
-def _show_change_notification_prompt(
-    change_type: str,
-    authority_data: dict,
-    old_data: dict = None,
-):
-    """
-    Show inline notification prompt after a config change.
-    Stores the change in session_state → rendered on next rerun.
-    """
-    st.session_state['_pending_notification'] = {
-        'change_type': change_type,
-        'authority_data': authority_data,
-        'old_data': old_data,
-        'timestamp': datetime.now().isoformat(),
-    }
-
-
-def _render_pending_notification():
-    """
-    Render the notification prompt if a config change just happened.
-    Called at the top of the Authorities tab.
-    """
-    pending = st.session_state.pop('_pending_notification', None)
-    if not pending:
-        return
-
-    change_type = pending['change_type']
-    authority_data = pending['authority_data']
-    old_data = pending.get('old_data')
-
-    type_icons = {
-        'CREATED': '🆕', 'UPDATED': '✏️', 'DELETED': '🗑️',
-        'DEACTIVATED': '🔴', 'ACTIVATED': '🟢',
-    }
-    icon = type_icons.get(change_type, '⚡')
-    emp_name = authority_data.get('employee_name', '—')
-    type_code = authority_data.get('type_code', '—')
-    level = authority_data.get('approval_level', '—')
-
-    with st.container(border=True):
-        st.markdown(
-            f"### {icon} Authority {change_type}\n"
-            f"**{emp_name}** — {type_code} Level {level} — "
-            f"Max: {_fmt_amount(authority_data.get('max_amount'))}"
-        )
-
-        # Show diff for UPDATED
-        if change_type == 'UPDATED' and old_data:
-            diff_parts = []
-            if old_data.get('max_amount') != authority_data.get('max_amount'):
-                diff_parts.append(
-                    f"Max Amount: {_fmt_amount(old_data.get('max_amount'))} → "
-                    f"**{_fmt_amount(authority_data.get('max_amount'))}**"
-                )
-            if old_data.get('approval_level') != authority_data.get('approval_level'):
-                diff_parts.append(f"Level: {old_data.get('approval_level')} → **{authority_data.get('approval_level')}**")
-            if bool(old_data.get('is_active')) != bool(authority_data.get('is_active')):
-                diff_parts.append(
-                    f"Status: {'Active' if old_data.get('is_active') else 'Inactive'} → "
-                    f"**{'Active' if authority_data.get('is_active') else 'Inactive'}**"
-                )
-            if diff_parts:
-                st.caption("Changes: " + " | ".join(diff_parts))
-
-        st.markdown("📧 **Notify stakeholders about this change?**")
-
-        # Quick checkboxes
-        nc1, nc2, nc3 = st.columns(3)
-        notify_approver = nc1.checkbox(
-            f"Affected approver ({authority_data.get('email', '—')})",
-            value=True, key="_notify_approver"
-        )
-        notify_finance = nc2.checkbox(
-            "Finance team", value=True, key="_notify_finance"
-        )
-        notify_all_approvers = nc3.checkbox(
-            f"All {type_code} approvers", value=False, key="_notify_all_approvers"
-        )
-
-        change_note = st.text_input(
-            "Change note (optional)", key="_change_note",
-            placeholder="e.g. Updated per management approval on 2026-03-18"
-        )
-
-        btn_col1, btn_col2, _ = st.columns([1, 1, 2])
-        if btn_col1.button("📧 Send Now", type="primary", key="_send_change_notify"):
-            _do_send_change_alert(
-                change_type=change_type,
-                authority_data=authority_data,
-                old_data=old_data,
-                notify_approver=notify_approver,
-                notify_finance=notify_finance,
-                notify_all_approvers=notify_all_approvers,
-                change_note=change_note,
-            )
-        if btn_col2.button("Skip", key="_skip_change_notify"):
-            st.rerun()
-
-
-def _do_send_change_alert(
-    change_type: str,
-    authority_data: dict,
-    old_data: dict = None,
-    notify_approver: bool = True,
-    notify_finance: bool = True,
-    notify_all_approvers: bool = False,
-    change_note: str = "",
-):
-    """Execute the config change alert send."""
+def _get_admin_email() -> str:
+    """Get current admin's email address."""
     try:
-        from utils.il_project.approval_notify import send_config_change_alert, get_presets, resolve_preset_emails
+        emp_id = st.session_state.get('employee_id')
+        if emp_id:
+            rows = execute_query(
+                "SELECT email FROM employees WHERE id = :id AND delete_flag = 0",
+                {'id': emp_id}
+            )
+            if rows and rows[0].get('email'):
+                return rows[0]['email']
+    except Exception:
+        pass
+    return ""
+
+
+def _auto_notify_change(
+    change_type: str,
+    authority_data: dict,
+    old_data: dict = None,
+):
+    """
+    Auto-send notification after CRUD. Non-blocking — CRUD succeeds
+    regardless of email result. Stores result in session_state for
+    display on next rerun.
+    """
+    try:
+        from utils.il_project.approval_notify import auto_notify_crud
     except ImportError:
-        st.error("approval_notify module not found."); return
-
-    to_emails = []
-    cc_emails = []
-
-    # Approver email
-    if notify_approver and authority_data.get('email'):
-        to_emails.append(authority_data['email'])
-
-    # Finance preset
-    if notify_finance:
-        presets = get_presets()
-        finance_preset = next(
-            (p for p in presets if 'finance' in (p.get('preset_name', '') or '').lower()),
-            None
-        )
-        if finance_preset:
-            emails, _ = resolve_preset_emails(finance_preset)
-            cc_emails.extend(emails)
-        else:
-            st.warning("No 'Finance Team' preset configured. Create one in the Notifications tab.")
-
-    # All approvers for this type
-    if notify_all_approvers:
-        type_code = authority_data.get('type_code')
-        chain = _get_chain_for_type(type_code)
-        for a in chain:
-            email = a.get('email', '')
-            if email and email not in to_emails and email not in cc_emails:
-                cc_emails.append(email)
-
-    if not to_emails and not cc_emails:
-        st.warning("No recipients resolved. Skipped.")
+        logger.debug("auto_notify_crud not available — skipping notification.")
         return
 
-    # If only CC, move first to TO
-    if not to_emails and cc_emails:
-        to_emails.append(cc_emails.pop(0))
-
-    chain = _get_chain_for_type(authority_data.get('type_code', ''))
     admin_name = _get_admin_name()
+    admin_email = _get_admin_email()
 
-    result = send_config_change_alert(
+    result = auto_notify_crud(
         change_type=change_type,
         authority_data=authority_data,
-        to_emails=to_emails,
-        cc_emails=cc_emails or None,
         old_data=old_data,
         changed_by_name=admin_name,
-        change_note=change_note,
-        current_chain=chain,
+        sender_email=admin_email,
         sent_by=user_id,
         sent_by_employee_id=st.session_state.get('employee_id'),
     )
 
+    # Store result for display after rerun
+    st.session_state['_crud_notify_result'] = result
+
+
+def _render_crud_notify_result():
+    """
+    Display auto-notify result banner at the top of Authorities tab.
+    Called once per rerun, pops the result from session_state.
+    """
+    result = st.session_state.pop('_crud_notify_result', None)
+    if not result:
+        return
+
     if result.get('success'):
-        st.success(f"📧 {result['message']} → {', '.join(to_emails)}")
+        to_list = result.get('to', [])
+        cc_list = result.get('cc', [])
+        total = len(to_list) + len(cc_list)
+        st.success(
+            f"📧 Notification sent to {total} recipient(s)  \n"
+            f"**TO:** {', '.join(to_list)}  \n"
+            f"**CC:** {', '.join(cc_list) if cc_list else '—'}"
+        )
     else:
-        st.error(f"Send failed: {result.get('message', 'Unknown error')}")
+        msg = result.get('message', 'Unknown error')
+        # Don't show error for non-configured email — just info
+        if 'not configured' in msg.lower():
+            st.info(f"ℹ️ Email notification skipped: {msg}")
+        else:
+            st.warning(f"⚠️ Notification failed: {msg}  \n(The changes were saved successfully.)")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -519,8 +422,8 @@ def _dialog_create_authority():
             })
             st.success(f"✅ Authority created: {emps[emp_idx]['full_name']} — Level {level}")
 
-            # Phase 2: trigger auto-notify prompt
-            _show_change_notification_prompt(
+            # Auto-notify all relevant parties
+            _auto_notify_change(
                 change_type='CREATED',
                 authority_data={
                     'employee_name': emps[emp_idx]['full_name'],
@@ -630,7 +533,7 @@ def _dialog_edit_authority(auth_data: dict):
             })
             st.success("✅ Updated!")
 
-            # Phase 2: trigger auto-notify
+            # Auto-notify all relevant parties
             new_data = {
                 'employee_name': emps[emp_idx]['full_name'],
                 'email': emps[emp_idx]['email'],
@@ -641,7 +544,7 @@ def _dialog_edit_authority(auth_data: dict):
                 'max_amount': max_amount,
                 'is_active': is_active,
             }
-            _show_change_notification_prompt(
+            _auto_notify_change(
                 change_type='UPDATED',
                 authority_data=new_data,
                 old_data=old_data,
@@ -656,8 +559,8 @@ def _dialog_edit_authority(auth_data: dict):
             {'id': auth_data['id'], 'by': user_id}
         )
         st.success("Deleted.")
-        # Phase 2: trigger auto-notify for delete
-        _show_change_notification_prompt(
+        # Auto-notify all relevant parties
+        _auto_notify_change(
             change_type='DELETED',
             authority_data=auth_data,
         )
@@ -840,8 +743,8 @@ tab_authorities, tab_types, tab_notifications, tab_history = st.tabs([
 # ══════════════════════════════════════════════════════════════════════
 
 with tab_authorities:
-    # Phase 2: render pending notification prompt (if a change just happened)
-    _render_pending_notification()
+    # Show auto-notify result banner (if a CRUD just happened)
+    _render_crud_notify_result()
 
     # Toolbar
     th1, th2, th3 = st.columns([3, 2, 1])
@@ -997,20 +900,40 @@ with tab_notifications:
     # ── Section 3: Recipients ─────────────────────────────────────
     st.markdown("##### 📬 Recipients")
 
-    # Quick presets
+    # Import notify module
     try:
         from utils.il_project.approval_notify import (
             get_presets, resolve_preset_emails,
             build_summary_html, send_config_summary,
-            get_notification_log,
+            get_notification_log, get_mandatory_cc,
         )
         _has_notify_module = True
     except ImportError:
         _has_notify_module = False
         st.warning("⚠️ `approval_notify` module not found. Place `approval_notify.py` in `utils/il_project/`.")
 
+    # ── 3a: Mandatory CC (locked — sender + all approvers in scope) ──
+    mandatory_cc_emails = []
+    mandatory_cc_labels = []
+    sender_email = _get_admin_email()
+
+    if _has_notify_module:
+        authorities_for_cc = _load_authorities()
+        mandatory_cc_emails, mandatory_cc_labels = get_mandatory_cc(
+            type_filter=scope_code,
+            sender_email=sender_email,
+            authorities=authorities_for_cc,
+        )
+
+    if mandatory_cc_emails:
+        with st.container(border=True):
+            st.markdown("**🔒 Required CC** — automatically included, cannot be removed")
+            for lbl in mandatory_cc_labels:
+                st.caption(f"  • {lbl}")
+            st.caption(f"Total: {len(mandatory_cc_emails)} required recipient(s)")
+
+    # ── 3b: Quick Presets for additional TO ──
     preset_to_emails = []
-    preset_cc_emails = []
 
     if _has_notify_module:
         presets = get_presets(scope_code)
@@ -1042,18 +965,19 @@ with tab_notifications:
                             + (f" +{len(labels) - 5} more" if len(labels) > 5 else ""))
                     preset_to_emails = resolved
 
-    # Employee multiselect for TO
+    # ── 3c: Additional TO (manual selection) ──
+    st.markdown("**Additional Recipients**")
     emps = _load_employees()
     emp_with_email = [e for e in emps if e.get('email')]
     emp_opts_to = [f"{e['full_name']} — {e.get('position', '')} ({e['email']})" for e in emp_with_email]
 
     to_sel = st.multiselect("TO: Select from employees", emp_opts_to, key="notify_to_emps",
-                             help="Primary recipients")
+                             help="Primary recipients (in addition to required CC)")
     to_emp_emails = [emp_with_email[emp_opts_to.index(s)]['email'] for s in to_sel]
 
-    # CC multiselect
-    cc_sel = st.multiselect("CC: Select from employees", emp_opts_to, key="notify_cc_emps",
-                             help="CC recipients")
+    # Additional CC
+    cc_sel = st.multiselect("Additional CC: Select from employees", emp_opts_to, key="notify_cc_emps",
+                             help="Extra CC recipients beyond the required list")
     cc_emp_emails = [emp_with_email[emp_opts_to.index(s)]['email'] for s in cc_sel]
 
     # Manual email input
@@ -1075,14 +999,24 @@ with tab_notifications:
         if e.strip() and '@' in e
     ]
 
-    # Merge all recipients
+    # Merge all recipients (mandatory CC is handled server-side by send_config_summary)
     all_to = list(dict.fromkeys(preset_to_emails + to_emp_emails + manual_to_list))
-    all_cc = list(dict.fromkeys(cc_emp_emails + manual_cc_list))
-    # Remove TO from CC
+    user_cc = list(dict.fromkeys(cc_emp_emails + manual_cc_list))
+    # Remove TO from user CC
+    user_cc = [e for e in user_cc if e not in all_to]
+    # Final CC = mandatory + user-selected (deduped, mandatory handled server-side)
+    all_cc = list(dict.fromkeys(mandatory_cc_emails + user_cc))
+    # Remove any that are already in TO
     all_cc = [e for e in all_cc if e not in all_to]
 
-    if all_to or all_cc:
-        st.caption(f"📧 TO: {len(all_to)} | CC: {len(all_cc)} | Total: {len(all_to) + len(all_cc)}")
+    # Summary
+    total_recipients = len(all_to) + len(all_cc)
+    if total_recipients:
+        st.caption(
+            f"📧 TO: {len(all_to)} | "
+            f"CC: {len(all_cc)} (incl. {len(mandatory_cc_emails)} required) | "
+            f"Total: {total_recipients}"
+        )
 
     # ── Section 4: Options ────────────────────────────────────────
     st.markdown("##### ⚙️ Options")
@@ -1121,6 +1055,7 @@ with tab_notifications:
                     include_history=include_history,
                     sent_by=user_id,
                     sent_by_employee_id=st.session_state.get('employee_id'),
+                    sender_email=sender_email,
                 )
             if result.get('success'):
                 st.success(f"✅ {result['message']}")
@@ -1148,14 +1083,22 @@ with tab_notifications:
         with st.expander("📧 Email Preview", expanded=True):
             # ── Recipient bar ──
             _to_str = ', '.join(all_to) if all_to else '(none)'
-            _cc_str = ', '.join(all_cc) if all_cc else '(none)'
+            _mcc_str = ', '.join(mandatory_cc_emails) if mandatory_cc_emails else ''
+            _extra_cc = [e for e in all_cc if e not in mandatory_cc_emails]
+            _extra_cc_str = ', '.join(_extra_cc) if _extra_cc else ''
+            _cc_parts = []
+            if _mcc_str:
+                _cc_parts.append(f'<span style="color:#1e40af;">{_mcc_str}</span> <span style="color:#9ca3af;">(required)</span>')
+            if _extra_cc_str:
+                _cc_parts.append(f'<span style="color:#6b7280;">{_extra_cc_str}</span>')
+            _cc_display = ', '.join(_cc_parts) if _cc_parts else '(none)'
             st.markdown(
                 f'<div style="padding:10px 14px;background:#f0f4f8;border-radius:6px;'
                 f'font-size:13px;line-height:1.6;margin-bottom:12px;">'
                 f'<strong style="color:#374151;">TO:</strong> '
                 f'<span style="color:#1e40af;">{_to_str}</span><br>'
                 f'<strong style="color:#374151;">CC:</strong> '
-                f'<span style="color:#6b7280;">{_cc_str}</span>'
+                f'{_cc_display}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
