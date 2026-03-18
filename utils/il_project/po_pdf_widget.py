@@ -132,7 +132,22 @@ def render_po_pdf_download(
             key=f"{key_prefix}_gen_{po_id}",
         ):
             _do_generate(po_id, lang, orient, state_key, params_key)
-            st.rerun()
+            # NOTE: Do NOT call st.rerun() here!
+            # This widget runs inside @st.dialog which behaves like a fragment.
+            # st.rerun() = full-app rerun → dialog trigger (pop'd) is gone → dialog closes.
+            # Instead, render download inline immediately after generation.
+            result = st.session_state.get(state_key)
+            if result and result.get('success'):
+                st.download_button(
+                    "📥 Download PDF",
+                    data=result['pdf_bytes'],
+                    file_name=result['filename'],
+                    mime='application/pdf',
+                    use_container_width=True,
+                    key=f"{key_prefix}_dl_immediate_{po_id}",
+                )
+            elif result:
+                st.warning(f"⚠️ PDF generation failed: {result.get('message', '')}")
 
 
 def _do_generate(
