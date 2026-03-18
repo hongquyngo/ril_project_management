@@ -221,10 +221,10 @@ def calculate_estimate(
     a = float(a_equipment or 0)
     c = float(c_fabrication or 0)
 
-    b = float(b_override) if b_override else round(a * alpha, 0)
-    d = float(d_override) if d_override else round(man_days * man_day_rate * team_size, 0)
-    e = float(e_override) if e_override else round(d * beta, 0)
-    f = float(f_override) if f_override else round((a + c) * gamma, 0)
+    b = float(b_override) if b_override is not None else round(a * alpha, 0)
+    d = float(d_override) if d_override is not None else round(man_days * man_day_rate * team_size, 0)
+    e = float(e_override) if e_override is not None else round(d * beta, 0)
+    f = float(f_override) if f_override is not None else round((a + c) * gamma, 0)
 
     total_cogs = a + b + c + d + e + f
     sales      = float(sales_value or 0)

@@ -406,6 +406,16 @@ def create_pr_item(data: Dict, created_by: str) -> int:
     ]
     params = {col: data.get(col) for col in base_cols}
 
+    # Ensure amount_vnd is computed (caller may provide; fallback = qty × cost × rate)
+    amt_vnd = data.get('amount_vnd')
+    if amt_vnd is None:
+        qty  = float(params.get('quantity') or 0)
+        cost = float(params.get('unit_cost') or 0)
+        rate = float(params.get('exchange_rate') or 1)
+        amt_vnd = round(qty * cost * rate, 0)
+    base_cols.append('amount_vnd')
+    params['amount_vnd'] = amt_vnd
+
     # Optional FK columns — only include when not None
     optional_fks = ['estimate_line_item_id', 'costbook_detail_id',
                     'product_id', 'vendor_id', 'currency_id']
@@ -475,11 +485,16 @@ def reduce_pr_item(item_id: int, new_quantity: float, new_unit_cost: float,
         if new_quantity <= 0:
             return {'success': False, 'message': 'Quantity must be > 0. Use Cancel PR to remove entirely.'}
 
+        exchange_rate = float(item.get('exchange_rate') or 1)
+        new_amount_vnd = round(new_quantity * new_unit_cost * exchange_rate, 0)
+
         _execute_update("""
             UPDATE il_purchase_request_items
-            SET quantity = :qty, unit_cost = :cost, modified_date = NOW()
+            SET quantity = :qty, unit_cost = :cost,
+                amount_vnd = :amt_vnd, modified_date = NOW()
             WHERE id = :iid
-        """, {'qty': new_quantity, 'cost': new_unit_cost, 'iid': item_id})
+        """, {'qty': new_quantity, 'cost': new_unit_cost,
+              'amt_vnd': new_amount_vnd, 'iid': item_id})
 
         # Recalc PR totals
         recalc_pr_totals(item['pr_id'])
@@ -498,7 +513,7 @@ def reduce_pr_item(item_id: int, new_quantity: float, new_unit_cost: float,
 def recalc_pr_totals(pr_id: int) -> bool:
     """Recalculate total_amount and total_amount_vnd from items."""
     rows = _execute_update("""
-        UPDATE il_purchase_requests pr SET
+        UPDATE il_purchase_requests SET
             total_amount = (
                 SELECT COALESCE(SUM(quantity * unit_cost), 0)
                 FROM il_purchase_request_items
@@ -510,7 +525,7 @@ def recalc_pr_totals(pr_id: int) -> bool:
                 WHERE pr_id = :id AND delete_flag = 0
             ),
             version = version + 1
-        WHERE pr.id = :id AND pr.delete_flag = 0
+        WHERE id = :id AND delete_flag = 0
     """, {'id': pr_id})
     return rows > 0
 
@@ -815,6 +830,21 @@ def approve_pr(pr_id: int, approver_employee_id: int, comments: str = '') -> Dic
                 if next_approver:
                     result['next_approver_name'] = next_approver.name
                     result['next_approver_email'] = next_approver.email
+
+                    # Log PENDING for next approver (mirrors SUBMITTED in submit_pr)
+                    conn.execute(text("""
+                        INSERT INTO approval_history
+                            (approval_type_id, entity_id, entity_reference, approver_id,
+                             approval_status, approval_level, comments, created_by)
+                        VALUES
+                            (:atid, :eid, :ref, :approver, 'SUBMITTED', :lvl,
+                             :comments, :by)
+                    """), {
+                        'atid': at_id.id, 'eid': pr_id, 'ref': pr_row.pr_number,
+                        'approver': next_approver.employee_id, 'lvl': next_level,
+                        'comments': f'Escalated to level {next_level} after level {cur_level} approval',
+                        'by': str(approver_employee_id),
+                    })
 
         return result
     except Exception as e:
@@ -2218,7 +2248,12 @@ def get_company_address(company_id: int) -> str:
 
 
 def create_po_note(note_text: str, creator: str) -> Optional[int]:
-    """Insert into notes table, return id. Used for PO important notes."""
+    """Insert into notes table, return id. Used for PO important notes.
+
+    NOTE: create_po_from_pr() inlines the same INSERT logic within its
+    transaction. This standalone function is kept for external callers
+    but is not used internally by this module.
+    """
     if not note_text or not note_text.strip():
         return None
     try:
