@@ -110,6 +110,8 @@ from .email_notify import (
 
 from .po_pdf import (
     generate_po_pdf,
+    VALID_LANGUAGES,
+    LANGUAGE_DISPLAY,
 )
 
 from .pr_queries import (
@@ -207,7 +209,7 @@ __all__ = [
     'notify_pr_reminder',
     'build_pr_deep_link',
     # ── PO PDF ──
-    'generate_po_pdf',
+    'generate_po_pdf', 'VALID_LANGUAGES', 'LANGUAGE_DISPLAY',
     # ── Purchase Request ──
     'generate_pr_number',
     'get_pr_list_df', 'get_pending_for_approver', 'get_pr', 'get_pr_items_df',

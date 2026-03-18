@@ -56,7 +56,7 @@ from utils.il_project.pr_queries import (
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
-from utils.il_project.po_pdf import generate_po_pdf
+from utils.il_project.po_pdf import generate_po_pdf, VALID_LANGUAGES, LANGUAGE_DISPLAY
 from utils.il_project.email_notify import (
     notify_pr_submitted,
     notify_pr_approved,
@@ -2056,16 +2056,21 @@ def _dialog_pr_view(pr_id: int):
         st.divider()
         _po_num = pr.get('po_number', '—')
         st.markdown(f"**📦 Purchase Order: `{_po_num}`**")
-        _pdf_c1, _pdf_c2, _pdf_c3 = st.columns([2, 1, 1])
+        _pdf_c1, _pdf_c2, _pdf_c3, _pdf_c4 = st.columns([2, 1, 1, 1])
         _pdf_lang = _pdf_c1.selectbox(
-            "PDF Language", options=['en', 'vi', 'bilingual'],
-            format_func=lambda x: {'en': '🇬🇧 English', 'vi': '🇻🇳 Tiếng Việt',
-                                    'bilingual': '🌐 Bilingual'}[x],
+            "Language", options=VALID_LANGUAGES,
+            format_func=lambda x: LANGUAGE_DISPLAY.get(x, x),
             key=f'po_pdf_lang_{pr_id}', label_visibility='collapsed',
         )
-        if _pdf_c2.button("📄 Download PO PDF", use_container_width=True, key=f'po_pdf_dl_{pr_id}'):
+        _pdf_orient = _pdf_c2.selectbox(
+            "Orientation", options=['portrait', 'landscape'],
+            format_func=lambda x: '📐 Portrait' if x == 'portrait' else '📐 Landscape',
+            key=f'po_pdf_orient_{pr_id}', label_visibility='collapsed',
+        )
+        if _pdf_c3.button("📄 Generate", use_container_width=True, key=f'po_pdf_dl_{pr_id}'):
             with st.spinner("Generating PDF..."):
-                _pdf_result = generate_po_pdf(pr['po_id'], language=_pdf_lang)
+                _pdf_result = generate_po_pdf(pr['po_id'], language=_pdf_lang,
+                                              orientation=_pdf_orient)
             if _pdf_result['success']:
                 st.session_state[f'_po_pdf_bytes_{pr_id}'] = _pdf_result['pdf_bytes']
                 st.session_state[f'_po_pdf_fname_{pr_id}'] = _pdf_result['filename']
@@ -2076,7 +2081,7 @@ def _dialog_pr_view(pr_id: int):
         _cached_pdf = st.session_state.pop(f'_po_pdf_bytes_{pr_id}', None)
         _cached_fname = st.session_state.pop(f'_po_pdf_fname_{pr_id}', None)
         if _cached_pdf:
-            _pdf_c3.download_button(
+            _pdf_c4.download_button(
                 "📥 Save", data=_cached_pdf, file_name=_cached_fname,
                 mime='application/pdf', use_container_width=True,
             )
@@ -2893,6 +2898,8 @@ def _dialog_confirm_po(pr_id: int):
                 if not result.get('all_items_covered'):
                     msg += " PR remains APPROVED — bạn có thể tạo PO thêm cho các item còn lại."
             st.success(msg)
+
+            # Send email notification (non-blocking)
             notify_po_created(
                 pr_number=pr['pr_number'], po_number=result['po_number'],
                 project_code=pr.get('project_code', ''),
@@ -2904,11 +2911,40 @@ def _dialog_confirm_po(pr_id: int):
                 cc_emails=_po_cc,
                 app_url=_pr_link(pr_id, 'view'),
             )
-            _cleanup_po_dialog(pr_id)
-            st.cache_data.clear()
-            # Re-open PR view → PO PDF download section visible immediately
-            st.session_state['open_pr_view'] = pr_id
-            st.rerun()
+
+            # ── PO PDF download — right here in dialog ──
+            st.divider()
+            st.markdown(f"### 📄 Download PO: **{result['po_number']}**")
+            _done_c1, _done_c2, _done_c3 = st.columns([2, 1, 1])
+            _done_lang = _done_c1.selectbox(
+                "Language", options=VALID_LANGUAGES,
+                format_func=lambda x: LANGUAGE_DISPLAY.get(x, x),
+                key=f'po_done_lang_{pr_id}',
+            )
+            _done_orient = _done_c2.selectbox(
+                "Orientation", options=['portrait', 'landscape'],
+                format_func=lambda x: '📐 Portrait' if x == 'portrait' else '📐 Landscape',
+                key=f'po_done_orient_{pr_id}',
+            )
+            _done_po_id = result['po_id']
+            _pdf_res = generate_po_pdf(_done_po_id, language=_done_lang,
+                                        orientation=_done_orient)
+            if _pdf_res['success']:
+                _done_c3.download_button(
+                    "📥 Download PDF",
+                    data=_pdf_res['pdf_bytes'],
+                    file_name=_pdf_res['filename'],
+                    mime='application/pdf',
+                    use_container_width=True,
+                )
+            else:
+                _done_c3.warning("PDF failed")
+
+            st.divider()
+            if st.button("✅ Done — Close", type="primary", use_container_width=True):
+                _cleanup_po_dialog(pr_id)
+                st.cache_data.clear()
+                st.rerun()
         else:
             st.error(f"❌ {result['message']}")
 

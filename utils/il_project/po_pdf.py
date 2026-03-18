@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════
 
 _FONT_REGISTERED = False
+_CJK_FONTS_REGISTERED = False
 
 # Resolve project root: po_pdf.py is at utils/il_project/po_pdf.py
 # Project root = 2 levels up from this file's parent
@@ -69,6 +70,9 @@ _FONT_PATHS_SYSTEM = {
 _FALLBACK_FONT = 'Helvetica'
 _FALLBACK_FONT_BOLD = 'Helvetica-Bold'
 
+# CJK font mapping: language → (regular, bold)
+_CJK_FONT_MAP: Dict[str, Tuple[str, str]] = {}
+
 
 def _register_fonts() -> Tuple[str, str]:
     """Register Unicode fonts (DejaVu Sans). Returns (regular, bold) font names.
@@ -79,7 +83,6 @@ def _register_fonts() -> Tuple[str, str]:
         return 'DejaVu', 'DejaVu-Bold'
 
     import os
-    # Try project fonts first, then system
     for source, paths in [('project', _FONT_PATHS), ('system', _FONT_PATHS_SYSTEM)]:
         if os.path.isfile(paths['DejaVu']) and os.path.isfile(paths['DejaVu-Bold']):
             try:
@@ -94,6 +97,38 @@ def _register_fonts() -> Tuple[str, str]:
 
     logger.warning("DejaVu fonts not found — using Helvetica (no Vietnamese support).")
     return _FALLBACK_FONT, _FALLBACK_FONT_BOLD
+
+
+def _register_cjk_fonts() -> None:
+    """Register CJK fonts using ReportLab built-in CID fonts (no external files needed)."""
+    global _CJK_FONTS_REGISTERED, _CJK_FONT_MAP
+    if _CJK_FONTS_REGISTERED:
+        return
+
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+    for lang, font_name in [('ja', 'HeiseiKakuGo-W5'), ('zh', 'STSong-Light')]:
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+            _CJK_FONT_MAP[lang] = (font_name, font_name)
+            logger.debug(f"CJK font registered: {lang} → {font_name}")
+        except Exception as e:
+            logger.warning(f"CJK font {font_name} ({lang}) failed: {e}")
+
+    _CJK_FONTS_REGISTERED = True
+
+
+def _get_fonts_for_language(language: str) -> Tuple[str, str]:
+    """Return (regular, bold) font pair for a language.
+    CJK languages use CID fonts; all others use DejaVu.
+    """
+    base_lang = language.split('_')[0]  # 'ja_en' → 'ja'
+    if base_lang in ('ja', 'zh'):
+        _register_cjk_fonts()
+        if base_lang in _CJK_FONT_MAP:
+            return _CJK_FONT_MAP[base_lang]
+        logger.warning(f"CJK font not available for {base_lang}, falling back to DejaVu")
+    return _register_fonts()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -183,18 +218,121 @@ _LABELS = {
         'generated':        'Ngày tạo',
         'dual_uom_note':    'ĐVT mua / ĐVT chuẩn hiển thị khi khác nhau',
     },
+    'ja': {
+        'title':            '注文書',
+        'po_number':        '注文番号',
+        'po_date':          '注文日',
+        'po_type':          '注文タイプ',
+        'currency':         '通貨',
+        'exchange_rate':    'USD為替レート',
+        'payment_terms':    '支払条件',
+        'trade_terms':      '貿易条件 (インコタームズ)',
+        'external_ref':     '外部参照',
+        'seller':           '売主',
+        'buyer':            '買主',
+        'company':          '会社',
+        'address':          '住所',
+        'contact':          '担当者',
+        'phone':            '電話',
+        'email':            'メール',
+        'tax_number':       '税番号',
+        'ship_to':          '納品先',
+        'bill_to':          '請求先',
+        'line_items':       '注文明細',
+        'col_no':           '#',
+        'col_pt_code':      '品番',
+        'col_description':  '品名',
+        'col_brand':        'ブランド',
+        'col_qty':          '数量',
+        'col_uom':          '単位',
+        'col_unit_cost':    '単価',
+        'col_amount':       '金額',
+        'col_vat':          'VAT %',
+        'subtotal':         '小計',
+        'vat_total':        '消費税合計',
+        'grand_total':      '合計金額',
+        'notes':            '備考',
+        'signature':        '承認署名',
+        'buyer_sign':       '買主',
+        'seller_sign':      '売主',
+        'page':             'ページ',
+        'generated':        '作成日',
+        'dual_uom_note':    '購買単位 / 標準単位（異なる場合に表示）',
+    },
+    'zh': {
+        'title':            '采购订单',
+        'po_number':        '订单编号',
+        'po_date':          '订单日期',
+        'po_type':          '订单类型',
+        'currency':         '币种',
+        'exchange_rate':    'USD汇率',
+        'payment_terms':    '付款条件',
+        'trade_terms':      '贸易条件 (国际贸易术语)',
+        'external_ref':     '外部参考号',
+        'seller':           '卖方',
+        'buyer':            '买方',
+        'company':          '公司',
+        'address':          '地址',
+        'contact':          '联系人',
+        'phone':            '电话',
+        'email':            '邮箱',
+        'tax_number':       '税号',
+        'ship_to':          '收货地址',
+        'bill_to':          '账单地址',
+        'line_items':       '订单明细',
+        'col_no':           '#',
+        'col_pt_code':      '产品编号',
+        'col_description':  '描述',
+        'col_brand':        '品牌',
+        'col_qty':          '数量',
+        'col_uom':          '单位',
+        'col_unit_cost':    '单价',
+        'col_amount':       '金额',
+        'col_vat':          'VAT %',
+        'subtotal':         '小计',
+        'vat_total':        '增值税合计',
+        'grand_total':      '总计',
+        'notes':            '重要备注',
+        'signature':        '授权签名',
+        'buyer_sign':       '买方',
+        'seller_sign':      '卖方',
+        'page':             '页',
+        'generated':        '生成日期',
+        'dual_uom_note':    '采购单位 / 标准单位（不同时显示）',
+    },
+}
+
+# Supported bilingual combos: primary_secondary
+_BILINGUAL_COMBOS = {
+    'bilingual':  ('en', 'vi'),
+    'ja_en':      ('ja', 'en'),
+    'zh_en':      ('zh', 'en'),
+}
+
+# All valid language codes
+VALID_LANGUAGES = ['en', 'vi', 'ja', 'zh', 'bilingual', 'ja_en', 'zh_en']
+
+LANGUAGE_DISPLAY = {
+    'en':        '🇬🇧 English',
+    'vi':        '🇻🇳 Tiếng Việt',
+    'ja':        '🇯🇵 日本語',
+    'zh':        '🇨🇳 中文',
+    'bilingual': '🌐 EN / VN',
+    'ja_en':     '🌐 日本語 / EN',
+    'zh_en':     '🌐 中文 / EN',
 }
 
 
 def _get_labels(language: str) -> Dict[str, str]:
-    """Get label set. Bilingual = 'en' primary with 'vi' in parentheses."""
-    if language == 'vi':
-        return _LABELS['vi']
-    if language == 'bilingual':
-        en = _LABELS['en']
-        vi = _LABELS['vi']
-        return {k: f"{en[k]} / {vi[k]}" if k not in ('col_no',) else en[k]
-                for k in en}
+    """Get label set for a language. Bilingual combos merge primary + secondary."""
+    if language in _LABELS:
+        return _LABELS[language]
+    if language in _BILINGUAL_COMBOS:
+        primary_lang, secondary_lang = _BILINGUAL_COMBOS[language]
+        primary = _LABELS[primary_lang]
+        secondary = _LABELS[secondary_lang]
+        return {k: f"{primary[k]} / {secondary[k]}" if k not in ('col_no',) else primary[k]
+                for k in primary}
     return _LABELS['en']
 
 
@@ -551,18 +689,19 @@ def _build_address(street, state, zip_code, country) -> str:
     return ', '.join(parts) if parts else '—'
 
 
-def _build_po_pdf(data: Dict, language: str = 'en') -> bytes:
+def _build_po_pdf(data: Dict, language: str = 'en', orientation: str = 'portrait') -> bytes:
     """
     Build PDF bytes from PO data dict.
 
     Args:
         data: from _get_po_full_data()
-        language: 'en' | 'vi' | 'bilingual'
+        language: 'en' | 'vi' | 'ja' | 'zh' | 'bilingual' | 'ja_en' | 'zh_en'
+        orientation: 'portrait' | 'landscape'
 
     Returns:
         PDF file content as bytes.
     """
-    font, font_bold = _register_fonts()
+    font, font_bold = _get_fonts_for_language(language)
     styles = _build_styles(font, font_bold)
     labels = _get_labels(language)
 
@@ -570,15 +709,17 @@ def _build_po_pdf(data: Dict, language: str = 'en') -> bytes:
     items = data['items']
     ccy = _safe_str(header.get('currency_code'), 'USD')
 
+    page_size = landscape(A4) if orientation == 'landscape' else A4
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=A4,
+        buf, pagesize=page_size,
         leftMargin=15 * mm, rightMargin=15 * mm,
         topMargin=15 * mm, bottomMargin=20 * mm,
     )
 
     story: List = []
-    page_width = A4[0] - 30 * mm   # usable width
+    page_width = page_size[0] - 30 * mm   # usable width
 
     # ── Header with Logo ──────────────────────────────────────────
     po_num = _safe_str(header.get('po_number'))
@@ -956,6 +1097,7 @@ def _build_po_pdf(data: Dict, language: str = 'en') -> bytes:
 def generate_po_pdf(
     po_id: int,
     language: str = 'en',
+    orientation: str = 'portrait',
 ) -> Dict:
     """
     Generate a PO PDF on-the-fly from DB data.
@@ -964,8 +1106,9 @@ def generate_po_pdf(
     Caller uses pdf_bytes for st.download_button() or email attachment.
 
     Args:
-        po_id:     Purchase Order ID
-        language:  'en' | 'vi' | 'bilingual'
+        po_id:       Purchase Order ID
+        language:    'en' | 'vi' | 'ja' | 'zh' | 'bilingual' | 'ja_en' | 'zh_en'
+        orientation: 'portrait' | 'landscape'
 
     Returns:
         {
@@ -976,8 +1119,10 @@ def generate_po_pdf(
             'message':   str,
         }
     """
-    if language not in ('en', 'vi', 'bilingual'):
+    if language not in VALID_LANGUAGES:
         language = 'en'
+    if orientation not in ('portrait', 'landscape'):
+        orientation = 'portrait'
 
     data = _get_po_full_data(po_id)
     if not data:
@@ -991,7 +1136,7 @@ def generate_po_pdf(
     safe_name = po_number.replace('/', '_').replace(' ', '_')
 
     try:
-        pdf_bytes = _build_po_pdf(data, language)
+        pdf_bytes = _build_po_pdf(data, language, orientation)
     except Exception as e:
         logger.error(f"generate_po_pdf: build failed for PO {po_id}: {e}")
         return {
