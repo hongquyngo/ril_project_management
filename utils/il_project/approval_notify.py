@@ -88,7 +88,7 @@ def _base_template(title: str, body_html: str, action_url: Optional[str] = None)
         </div>'''
 
     return f'''
-    <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:700px;margin:0 auto;
+    <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:960px;margin:0 auto;
                 background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
         <div style="background:#1e3a5f;padding:16px 24px;">
             <h2 style="color:#fff;margin:0;font-size:18px;">{title}</h2>
