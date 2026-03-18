@@ -56,7 +56,12 @@ from utils.il_project.pr_queries import (
 )
 from utils.il_project.currency import get_rate_to_vnd
 from utils.il_project.helpers import get_vendor_companies
-from utils.il_project.po_pdf import generate_po_pdf, VALID_LANGUAGES, LANGUAGE_DISPLAY
+from utils.il_project.po_pdf_widget import (
+    render_po_pdf_download,
+    render_po_pdf_downloads_for_pr,
+    render_po_created_success,
+    cleanup_pdf_state,
+)
 from utils.il_project.email_notify import (
     notify_pr_submitted,
     notify_pr_approved,
@@ -2051,32 +2056,10 @@ def _dialog_pr_view(pr_id: int):
             st.caption(f"{hicon} Level {h['approval_level']} — {h['approver_name']} — "
                        f"**{h['approval_status']}** — {h.get('comments', '')}")
 
-    # ── PO PDF Download ──
-    if pr.get('po_id'):
-        st.divider()
-        _po_num = pr.get('po_number', '—')
-        st.markdown(f"**📦 Purchase Order: `{_po_num}`**")
-        _pdf_c1, _pdf_c2, _pdf_c3 = st.columns([2, 1, 1])
-        _pdf_lang = _pdf_c1.selectbox(
-            "Language", options=VALID_LANGUAGES,
-            format_func=lambda x: LANGUAGE_DISPLAY.get(x, x),
-            key=f'po_pdf_lang_{pr_id}', label_visibility='collapsed',
-        )
-        _pdf_orient = _pdf_c2.selectbox(
-            "Orientation", options=['portrait', 'landscape'],
-            format_func=lambda x: '📐 Portrait' if x == 'portrait' else '📐 Landscape',
-            key=f'po_pdf_orient_{pr_id}', label_visibility='collapsed',
-        )
-        _pdf_result = generate_po_pdf(pr['po_id'], language=_pdf_lang,
-                                      orientation=_pdf_orient)
-        if _pdf_result['success']:
-            _pdf_c3.download_button(
-                "📥 Download PDF", data=_pdf_result['pdf_bytes'],
-                file_name=_pdf_result['filename'], mime='application/pdf',
-                use_container_width=True,
-            )
-        else:
-            _pdf_c3.error("PDF failed")
+    # ── PO PDF Download (supports multi-PO) ──
+    render_po_pdf_downloads_for_pr(
+        pr_id=pr_id, pr_data=pr, items_df=items_df, context="view",
+    )
 
     # ── Action Buttons (context-sensitive) ──
     st.divider()
@@ -2901,49 +2884,9 @@ def _dialog_confirm_po(pr_id: int):
             st.error(f"❌ {result['message']}")
 
     # ── Post-creation: Success message + PDF download ──────────────
-    # Rendered outside `if submitted:` so selectbox changes don't lose it
-    _po_result = st.session_state.get(f'_po_created_{pr_id}')
-    if _po_result:
-        msg = f"✅ {_po_result['message']}"
-        if _po_result.get('excluded_count', 0) > 0:
-            msg += (f"\n\n⚠️ {_po_result['excluded_count']} item(s) excluded (no costbook) — "
-                    f"{fmt_vnd(_po_result.get('excluded_amount_vnd', 0))} not in PO.")
-            if not _po_result.get('all_items_covered'):
-                msg += " PR remains APPROVED — bạn có thể tạo PO thêm cho các item còn lại."
-        st.success(msg)
-
-        st.divider()
-        st.markdown(f"### 📄 Download PO: **{_po_result['po_number']}**")
-        _done_c1, _done_c2, _done_c3 = st.columns([2, 1, 1])
-        _done_lang = _done_c1.selectbox(
-            "Language", options=VALID_LANGUAGES,
-            format_func=lambda x: LANGUAGE_DISPLAY.get(x, x),
-            key=f'po_done_lang_{pr_id}',
-        )
-        _done_orient = _done_c2.selectbox(
-            "Orientation", options=['portrait', 'landscape'],
-            format_func=lambda x: '📐 Portrait' if x == 'portrait' else '📐 Landscape',
-            key=f'po_done_orient_{pr_id}',
-        )
-        _pdf_res = generate_po_pdf(_po_result['po_id'], language=_done_lang,
-                                    orientation=_done_orient)
-        if _pdf_res['success']:
-            _done_c3.download_button(
-                "📥 Download PDF",
-                data=_pdf_res['pdf_bytes'],
-                file_name=_pdf_res['filename'],
-                mime='application/pdf',
-                use_container_width=True,
-            )
-        else:
-            _done_c3.warning("PDF failed")
-
-        st.divider()
-        if st.button("✅ Done — Close", type="primary", use_container_width=True):
-            st.session_state.pop(f'_po_created_{pr_id}', None)
-            _cleanup_po_dialog(pr_id)
-            st.cache_data.clear()
-            st.rerun()
+    # Uses centralized widget — cached PDF, consistent UI, proper cleanup
+    if render_po_created_success(pr_id):
+        pass  # Panel rendered — Done button is inside the widget
 
 
 # ── Product linking fragment (self-contained rerun) ───────────────
@@ -2995,7 +2938,7 @@ def _frag_product_linking(pr_id: int, missing_items: list):
 
 
 def _cleanup_po_dialog(pr_id: int):
-    """Remove all PO dialog cached state."""
+    """Remove all PO dialog cached state including PDF widget keys."""
     for k in list(st.session_state):
         if k.startswith(f'_po_') and str(pr_id) in k:
             del st.session_state[k]
@@ -3003,6 +2946,8 @@ def _cleanup_po_dialog(pr_id: int):
     for k in list(st.session_state):
         if k.startswith('po_f_'):
             del st.session_state[k]
+    # Clean PDF widget state (new unified + legacy keys)
+    cleanup_pdf_state(pr_id)
 
 
 # ══════════════════════════════════════════════════════════════════
