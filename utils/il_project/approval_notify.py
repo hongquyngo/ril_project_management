@@ -1,0 +1,927 @@
+# utils/il_project/approval_notify.py
+"""
+Approval Config Notification — Email for approval authority changes & summaries.
+
+Reuses _send_email infrastructure from email_notify.py.
+
+Triggers:
+  Phase 1 — On-demand Summary: admin sends current config snapshot
+  Phase 2 — Config Change Alert: auto-notify when authority is added/edited/deleted
+  Phase 3 — Saved Presets + Notification Log (audit trail)
+
+Public API:
+    send_config_summary()       → Phase 1 on-demand summary
+    send_config_change_alert()  → Phase 2 auto-notify
+    get_presets()               → Phase 3 saved recipient presets
+    save_preset()               → Phase 3 create/update preset
+    delete_preset()             → Phase 3 remove preset
+    resolve_preset_emails()     → Phase 3 resolve preset → email list
+    log_notification_sent()     → Phase 3 audit trail
+    get_notification_log()      → Phase 3 audit trail read
+"""
+
+import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DB HELPERS (lazy import — avoid circular)
+# ══════════════════════════════════════════════════════════════════════
+
+def _execute_query(sql, params=None):
+    from ..db import execute_query
+    return execute_query(sql, params or {})
+
+
+def _execute_update(sql, params=None):
+    from ..db import execute_update
+    return execute_update(sql, params or {})
+
+
+def _get_engine():
+    from ..db import get_db_engine
+    return get_db_engine()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SHARED: EMAIL SEND (reuses email_notify infra)
+# ══════════════════════════════════════════════════════════════════════
+
+def _send_email(to_emails, subject, html_body, cc_emails=None) -> bool:
+    """Delegate to email_notify._send_email. Non-blocking."""
+    try:
+        from .email_notify import _send_email as _do_send
+        return _do_send(to_emails, subject, html_body, cc_emails)
+    except Exception as e:
+        logger.error(f"approval_notify._send_email failed: {e}")
+        return False
+
+
+def _is_configured() -> bool:
+    try:
+        from .email_notify import _is_configured as _check
+        return _check()
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════
+# HTML TEMPLATES
+# ══════════════════════════════════════════════════════════════════════
+
+def _base_template(title: str, body_html: str, action_url: Optional[str] = None) -> str:
+    """Wrap body in a clean HTML email template — matches email_notify style."""
+    action_btn = ""
+    if action_url:
+        action_btn = f'''
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{action_url}"
+               style="background:#2563eb;color:#fff;padding:12px 28px;
+                      border-radius:6px;text-decoration:none;font-weight:600;
+                      display:inline-block;">
+                Open in ERP
+            </a>
+        </div>'''
+
+    return f'''
+    <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:700px;margin:0 auto;
+                background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+        <div style="background:#1e3a5f;padding:16px 24px;">
+            <h2 style="color:#fff;margin:0;font-size:18px;">🔐 Approval Config — {title}</h2>
+        </div>
+        <div style="padding:24px;">
+            {body_html}
+            {action_btn}
+        </div>
+        <div style="background:#f9fafb;padding:12px 24px;border-top:1px solid #e5e7eb;
+                    font-size:12px;color:#6b7280;">
+            Rozitek Intralogistic Solution — ERP System<br>
+            This is an automated notification. Please do not reply to this email.
+        </div>
+    </div>'''
+
+
+def _fmt_amount(val) -> str:
+    if val is None:
+        return '∞ Unlimited'
+    try:
+        v = float(val)
+        if v >= 1_000_000_000:
+            return f"{v / 1_000_000_000:,.1f}B ₫"
+        if v >= 1_000_000:
+            return f"{v / 1_000_000:,.0f}M ₫"
+        return f"{v:,.0f} ₫"
+    except (TypeError, ValueError):
+        return str(val)
+
+
+def _info_row(label: str, value: str) -> str:
+    return f'''<tr>
+        <td style="padding:4px 0;color:#6b7280;width:160px;">{label}</td>
+        <td style="padding:4px 0;font-weight:500;">{value}</td>
+    </tr>'''
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE 1: ON-DEMAND CONFIG SUMMARY
+# ══════════════════════════════════════════════════════════════════════
+
+def build_summary_html(
+    authorities: List[Dict],
+    type_filter: Optional[str] = None,
+    admin_note: str = "",
+    include_validity: bool = True,
+    include_history: bool = False,
+    recent_changes: Optional[List[Dict]] = None,
+) -> str:
+    """
+    Build HTML email body for approval config summary.
+    Used for both preview (in UI) and actual email send.
+
+    Args:
+        authorities: list of authority dicts (from _load_authorities query)
+        type_filter: filter to specific approval type code, or None for all
+        admin_note: optional note from admin
+        include_validity: include valid_from/valid_to columns
+        include_history: include recent changes section
+        recent_changes: list of recent change dicts for history section
+
+    Returns:
+        HTML string (body only — caller wraps with _base_template for email)
+    """
+    if type_filter:
+        authorities = [a for a in authorities if a.get('type_code') == type_filter]
+
+    # Only active
+    active_auth = [a for a in authorities if a.get('is_active')]
+
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    # Group by type
+    type_groups: Dict[str, List[Dict]] = {}
+    for a in active_auth:
+        key = a.get('type_code', 'UNKNOWN')
+        if key not in type_groups:
+            type_groups[key] = []
+        type_groups[key].append(a)
+
+    # Header info
+    summary_meta = f'''
+    <table style="width:100%;margin:8px 0 16px 0;">
+        {_info_row('Generated', f'<strong>{now_str}</strong>')}
+        {_info_row('Scope', f'{type_filter or "All Approval Types"}')}
+        {_info_row('Active Authorities', f'{len(active_auth)}')}
+        {_info_row('Approval Types', f'{len(type_groups)}')}
+    </table>'''
+
+    # Admin note
+    note_html = ""
+    if admin_note and admin_note.strip():
+        note_html = f'''
+        <div style="background:#f0f9ff;border-left:3px solid #3b82f6;padding:12px;
+                    margin:12px 0;font-size:13px;">
+            <strong>Note from admin:</strong> {admin_note}
+        </div>'''
+
+    # Authority tables (grouped by type)
+    tables_html = ""
+    for type_code, auths in type_groups.items():
+        type_name = auths[0].get('type_name', type_code) if auths else type_code
+        auths_sorted = sorted(auths, key=lambda a: (a.get('approval_level', 0)))
+
+        # Table header
+        validity_hdr = '<th style="padding:8px;text-align:left;">Valid Period</th>' if include_validity else ''
+        tables_html += f'''
+        <div style="margin:20px 0 8px 0;">
+            <strong style="color:#1e3a5f;font-size:14px;">📋 {type_code}</strong>
+            <span style="color:#6b7280;font-size:12px;"> — {type_name}</span>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <tr style="background:#f3f4f6;">
+                <th style="padding:8px;text-align:center;width:50px;">Level</th>
+                <th style="padding:8px;text-align:left;">Approver</th>
+                <th style="padding:8px;text-align:left;">Position</th>
+                <th style="padding:8px;text-align:left;">Email</th>
+                <th style="padding:8px;text-align:right;">Max Amount</th>
+                <th style="padding:8px;text-align:center;">Status</th>
+                {validity_hdr}
+            </tr>'''
+
+        for a in auths_sorted:
+            lvl = a.get('approval_level', '—')
+            name = a.get('employee_name', '—')
+            pos = a.get('position', '—') or '—'
+            email = a.get('email', '—') or '—'
+            amt = _fmt_amount(a.get('max_amount'))
+            status_icon = '🟢' if a.get('is_active') else '🔴'
+
+            validity_cell = ""
+            if include_validity:
+                vf = str(a.get('valid_from', ''))[:10]
+                vt = str(a.get('valid_to', ''))[:10] if a.get('valid_to') else '∞'
+                validity_cell = f'<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px;">{vf} → {vt}</td>'
+
+            tables_html += f'''
+            <tr>
+                <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;
+                           font-weight:700;color:#1e3a5f;">L{lvl}</td>
+                <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-weight:600;">{name}</td>
+                <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;color:#6b7280;">{pos}</td>
+                <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;color:#6b7280;font-size:12px;">{email}</td>
+                <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;">{amt}</td>
+                <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;">{status_icon}</td>
+                {validity_cell}
+            </tr>'''
+
+        tables_html += '</table>'
+
+    # Approval flow visualization (per type)
+    flow_html = ""
+    for type_code, auths in type_groups.items():
+        auths_sorted = sorted(auths, key=lambda a: a.get('approval_level', 0))
+        steps = []
+        for a in auths_sorted:
+            name = a.get('employee_name', '?').split()[0]  # first name
+            amt = _fmt_amount(a.get('max_amount'))
+            steps.append(f"L{a.get('approval_level', '?')}: {name} (≤{amt})")
+        chain_str = " → ".join(steps)
+        flow_html += f'''
+        <div style="background:#f8fafc;padding:8px 12px;margin:4px 0;border-radius:4px;
+                    font-size:12px;color:#374151;">
+            <strong>{type_code}:</strong> {chain_str}
+        </div>'''
+
+    if flow_html:
+        flow_html = f'''
+        <div style="margin:20px 0 8px 0;">
+            <strong style="color:#1e3a5f;">🔗 Approval Flow Summary</strong>
+        </div>
+        {flow_html}'''
+
+    # Recent changes (Phase 3)
+    history_html = ""
+    if include_history and recent_changes:
+        history_html = '''
+        <div style="margin:24px 0 8px 0;">
+            <strong style="color:#1e3a5f;">📜 Recent Changes (Last 30 days)</strong>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <tr style="background:#f3f4f6;">
+                <th style="padding:6px 8px;text-align:left;">Date</th>
+                <th style="padding:6px 8px;text-align:left;">Action</th>
+                <th style="padding:6px 8px;text-align:left;">Details</th>
+                <th style="padding:6px 8px;text-align:left;">Changed by</th>
+            </tr>'''
+        for ch in recent_changes[:15]:
+            history_html += f'''
+            <tr>
+                <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">{ch.get('date', '')}</td>
+                <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">{ch.get('action', '')}</td>
+                <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">{ch.get('details', '')}</td>
+                <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">{ch.get('changed_by', '')}</td>
+            </tr>'''
+        history_html += '</table>'
+
+    # Finance callout
+    finance_callout = '''
+    <div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;
+                margin:20px 0;font-size:13px;">
+        <strong>⚠️ Finance Team Notice:</strong> Please update your payment verification checklist
+        to reflect the current approval authorities. Only purchases approved through
+        the correct chain should be processed for payment.
+    </div>'''
+
+    body = f'''
+    <p style="margin-top:0;">Current Approval Authority configuration as of <strong>{now_str}</strong>:</p>
+    {summary_meta}
+    {note_html}
+    {tables_html}
+    {flow_html}
+    {finance_callout}
+    {history_html}
+    '''
+    return body
+
+
+def send_config_summary(
+    to_emails: List[str],
+    cc_emails: Optional[List[str]] = None,
+    authorities: Optional[List[Dict]] = None,
+    type_filter: Optional[str] = None,
+    admin_note: str = "",
+    include_validity: bool = True,
+    include_history: bool = False,
+    recent_changes: Optional[List[Dict]] = None,
+    app_url: Optional[str] = None,
+    sent_by: str = "",
+    sent_by_employee_id: Optional[int] = None,
+) -> Dict:
+    """
+    Phase 1: Send on-demand approval config summary email.
+
+    Returns: {success: bool, message: str, recipient_count: int}
+    """
+    if not _is_configured():
+        return {'success': False, 'message': 'Email not configured', 'recipient_count': 0}
+
+    if not to_emails:
+        return {'success': False, 'message': 'No recipients specified', 'recipient_count': 0}
+
+    # Load authorities if not provided
+    if authorities is None:
+        authorities = _load_all_authorities()
+
+    body = build_summary_html(
+        authorities=authorities,
+        type_filter=type_filter,
+        admin_note=admin_note,
+        include_validity=include_validity,
+        include_history=include_history,
+        recent_changes=recent_changes,
+    )
+
+    scope = type_filter or "All Types"
+    subject = f"[Approval Summary] {scope} — Current Configuration ({datetime.now().strftime('%Y-%m-%d')})"
+
+    html = _base_template("Approval Authority Summary", body, app_url)
+    ok = _send_email(to_emails, subject, html, cc_emails)
+
+    recipient_count = len(to_emails) + len(cc_emails or [])
+    if ok:
+        # Log the send (Phase 3)
+        _log_notification(
+            notification_type='SUMMARY',
+            subject=subject,
+            to_emails=to_emails,
+            cc_emails=cc_emails,
+            sent_by=sent_by,
+            sent_by_employee_id=sent_by_employee_id,
+            details=f"Scope: {scope}, Recipients: {recipient_count}",
+        )
+
+    return {
+        'success': ok,
+        'message': f'Summary sent to {recipient_count} recipient(s)' if ok else 'Failed to send email',
+        'recipient_count': recipient_count,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE 2: CONFIG CHANGE ALERT
+# ══════════════════════════════════════════════════════════════════════
+
+def build_change_html(
+    change_type: str,
+    changed_by_name: str,
+    authority_data: Dict,
+    old_data: Optional[Dict] = None,
+    change_note: str = "",
+    current_chain: Optional[List[Dict]] = None,
+) -> str:
+    """
+    Build HTML body for a config change alert.
+
+    Args:
+        change_type: 'CREATED' | 'UPDATED' | 'DELETED' | 'DEACTIVATED' | 'ACTIVATED'
+        changed_by_name: admin who made the change
+        authority_data: current authority dict (after change)
+        old_data: previous values (for UPDATED — shows diff)
+        change_note: optional note from admin
+        current_chain: full current chain for this type (for flow visualization)
+    """
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    type_icons = {
+        'CREATED': '🆕', 'UPDATED': '✏️', 'DELETED': '🗑️',
+        'DEACTIVATED': '🔴', 'ACTIVATED': '🟢',
+    }
+    icon = type_icons.get(change_type, '⚡')
+
+    # Change meta
+    meta_html = f'''
+    <table style="width:100%;margin:8px 0 16px 0;">
+        {_info_row('Change Type', f'<strong>{icon} {change_type}</strong>')}
+        {_info_row('Changed by', changed_by_name)}
+        {_info_row('Date', now_str)}
+        {_info_row('Approval Type', f"<strong>{authority_data.get('type_code', '—')}</strong> — {authority_data.get('type_name', '')}")}
+    </table>'''
+
+    # What changed (detail box)
+    detail_rows = f'''
+        {_info_row('Approver', f"<strong>{authority_data.get('employee_name', '—')}</strong>")}
+        {_info_row('Email', authority_data.get('email', '—'))}
+        {_info_row('Position', authority_data.get('position', '—') or '—')}
+        {_info_row('Level', str(authority_data.get('approval_level', '—')))}
+        {_info_row('Max Amount', _fmt_amount(authority_data.get('max_amount')))}
+        {_info_row('Status', '🟢 Active' if authority_data.get('is_active') else '🔴 Inactive')}
+    '''
+
+    detail_html = f'''
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;
+                padding:16px;margin:12px 0;">
+        <div style="font-weight:600;color:#1e3a5f;margin-bottom:8px;">
+            {'📋 New Authority' if change_type == 'CREATED' else '📋 Authority Details'}
+        </div>
+        <table style="width:100%;">{detail_rows}</table>
+    </div>'''
+
+    # Diff for UPDATED
+    diff_html = ""
+    if change_type == 'UPDATED' and old_data:
+        changes = []
+        field_labels = {
+            'employee_name': 'Approver', 'approval_level': 'Level',
+            'max_amount': 'Max Amount', 'is_active': 'Status',
+            'valid_from': 'Valid From', 'valid_to': 'Valid To',
+            'notes': 'Notes', 'company_name': 'Company Scope',
+        }
+        for field, label in field_labels.items():
+            old_val = old_data.get(field)
+            new_val = authority_data.get(field)
+            if field == 'max_amount':
+                old_val = _fmt_amount(old_val)
+                new_val = _fmt_amount(new_val)
+            elif field == 'is_active':
+                old_val = '🟢 Active' if old_val else '🔴 Inactive'
+                new_val = '🟢 Active' if new_val else '🔴 Inactive'
+            else:
+                old_val = str(old_val or '—')[:50]
+                new_val = str(new_val or '—')[:50]
+
+            if old_val != new_val:
+                changes.append(f'''
+                <tr>
+                    <td style="padding:4px 8px;color:#6b7280;width:120px;">{label}</td>
+                    <td style="padding:4px 8px;text-decoration:line-through;color:#ef4444;">{old_val}</td>
+                    <td style="padding:4px 8px;font-weight:600;color:#16a34a;">{new_val}</td>
+                </tr>''')
+
+        if changes:
+            diff_html = f'''
+            <div style="background:#fefce8;border:1px solid #fde68a;border-radius:6px;
+                        padding:16px;margin:12px 0;">
+                <div style="font-weight:600;color:#92400e;margin-bottom:8px;">📝 Changes</div>
+                <table style="width:100%;font-size:13px;">
+                    <tr style="color:#6b7280;font-size:11px;">
+                        <td style="padding:2px 8px;">Field</td>
+                        <td style="padding:2px 8px;">Before</td>
+                        <td style="padding:2px 8px;">After</td>
+                    </tr>
+                    {''.join(changes)}
+                </table>
+            </div>'''
+
+    # Current chain
+    chain_html = ""
+    if current_chain:
+        sorted_chain = sorted(current_chain, key=lambda a: a.get('approval_level', 0))
+        steps = []
+        for a in sorted_chain:
+            if not a.get('is_active'):
+                continue
+            name = a.get('employee_name', '?')
+            amt = _fmt_amount(a.get('max_amount'))
+            steps.append(
+                f"<strong>L{a.get('approval_level', '?')}</strong>: {name} (≤{amt})"
+            )
+        chain_str = " → ".join(steps)
+        chain_html = f'''
+        <div style="background:#f0f9ff;border-left:3px solid #3b82f6;padding:12px;
+                    margin:16px 0;font-size:13px;">
+            <strong>Current Approval Chain:</strong><br>
+            {chain_str}
+        </div>'''
+
+    # Change note
+    note_html = ""
+    if change_note and change_note.strip():
+        note_html = f'''
+        <div style="background:#f9fafb;border-left:3px solid #d1d5db;padding:12px;
+                    margin:12px 0;font-size:13px;">
+            <strong>Admin note:</strong> {change_note}
+        </div>'''
+
+    # Finance callout
+    finance_html = '''
+    <div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;
+                margin:16px 0;font-size:13px;">
+        <strong>⚠️ Finance Team:</strong> Please verify this change aligns with your
+        payment authorization matrix. Update your checklist if needed.
+    </div>'''
+
+    body = f'''
+    <p style="margin-top:0;">An approval authority configuration has been changed:</p>
+    {meta_html}
+    {detail_html}
+    {diff_html}
+    {chain_html}
+    {note_html}
+    {finance_html}
+    '''
+    return body
+
+
+def send_config_change_alert(
+    change_type: str,
+    authority_data: Dict,
+    to_emails: List[str],
+    cc_emails: Optional[List[str]] = None,
+    old_data: Optional[Dict] = None,
+    changed_by_name: str = "",
+    change_note: str = "",
+    current_chain: Optional[List[Dict]] = None,
+    app_url: Optional[str] = None,
+    sent_by: str = "",
+    sent_by_employee_id: Optional[int] = None,
+) -> Dict:
+    """
+    Phase 2: Send config change alert email.
+
+    Returns: {success: bool, message: str}
+    """
+    if not _is_configured():
+        return {'success': False, 'message': 'Email not configured'}
+
+    if not to_emails:
+        return {'success': False, 'message': 'No recipients specified'}
+
+    body = build_change_html(
+        change_type=change_type,
+        changed_by_name=changed_by_name,
+        authority_data=authority_data,
+        old_data=old_data,
+        change_note=change_note,
+        current_chain=current_chain,
+    )
+
+    type_code = authority_data.get('type_code', 'CONFIG')
+    emp_name = authority_data.get('employee_name', '')
+    subject = f"[Approval Update] {type_code} — {change_type}: {emp_name}"
+
+    html = _base_template("Approval Config Changed", body, app_url)
+    ok = _send_email(to_emails, subject, html, cc_emails)
+
+    if ok:
+        _log_notification(
+            notification_type='CHANGE_ALERT',
+            subject=subject,
+            to_emails=to_emails,
+            cc_emails=cc_emails,
+            sent_by=sent_by,
+            sent_by_employee_id=sent_by_employee_id,
+            details=f"{change_type}: {emp_name} — {type_code} L{authority_data.get('approval_level', '?')}",
+        )
+
+    return {
+        'success': ok,
+        'message': f'Change alert sent ({change_type})' if ok else 'Failed to send email',
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE 3: NOTIFICATION PRESETS (CRUD)
+# ══════════════════════════════════════════════════════════════════════
+
+def get_presets(approval_type_code: Optional[str] = None) -> List[Dict]:
+    """Get saved notification presets from il_notification_presets."""
+    try:
+        sql = """
+            SELECT id, preset_name, preset_type, email_list, employee_ids,
+                   approval_type_code, created_by, created_date, modified_date
+            FROM il_notification_presets
+            WHERE delete_flag = 0
+        """
+        params = {}
+        if approval_type_code:
+            sql += " AND (approval_type_code = :code OR approval_type_code IS NULL)"
+            params['code'] = approval_type_code
+        sql += " ORDER BY preset_name"
+        rows = _execute_query(sql, params)
+        # Parse JSON fields
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['email_list'] = _parse_json_field(d.get('email_list'))
+            d['employee_ids'] = _parse_json_field(d.get('employee_ids'))
+            result.append(d)
+        return result
+    except Exception as e:
+        logger.error(f"get_presets failed: {e}")
+        return []
+
+
+def save_preset(
+    preset_name: str,
+    preset_type: str = 'MANUAL',
+    email_list: Optional[List[str]] = None,
+    employee_ids: Optional[List[int]] = None,
+    approval_type_code: Optional[str] = None,
+    created_by: str = "",
+    preset_id: Optional[int] = None,
+) -> Dict:
+    """
+    Create or update a notification preset.
+    If preset_id is provided, updates existing; else creates new.
+    """
+    try:
+        email_json = json.dumps(email_list or [])
+        emp_json = json.dumps(employee_ids or [])
+
+        if preset_id:
+            _execute_update("""
+                UPDATE il_notification_presets SET
+                    preset_name = :name,
+                    preset_type = :ptype,
+                    email_list = :emails,
+                    employee_ids = :eids,
+                    approval_type_code = :acode
+                WHERE id = :id AND delete_flag = 0
+            """, {
+                'id': preset_id, 'name': preset_name.strip(),
+                'ptype': preset_type,
+                'emails': email_json, 'eids': emp_json,
+                'acode': approval_type_code,
+            })
+            return {'success': True, 'message': f'Preset "{preset_name}" updated', 'id': preset_id}
+        else:
+            from sqlalchemy import text as _text
+            engine = _get_engine()
+            with engine.connect() as conn:
+                result = conn.execute(_text("""
+                    INSERT INTO il_notification_presets
+                        (preset_name, preset_type, email_list, employee_ids,
+                         approval_type_code, created_by)
+                    VALUES (:name, :ptype, :emails, :eids, :acode, :by)
+                """), {
+                    'name': preset_name.strip(), 'ptype': preset_type,
+                    'emails': email_json, 'eids': emp_json,
+                    'acode': approval_type_code, 'by': created_by,
+                })
+                conn.commit()
+                new_id = result.lastrowid
+            return {'success': True, 'message': f'Preset "{preset_name}" created', 'id': new_id}
+    except Exception as e:
+        logger.error(f"save_preset failed: {e}")
+        return {'success': False, 'message': str(e)}
+
+
+def delete_preset(preset_id: int) -> bool:
+    """Soft-delete a preset."""
+    try:
+        _execute_update(
+            "UPDATE il_notification_presets SET delete_flag = 1 WHERE id = :id",
+            {'id': preset_id}
+        )
+        return True
+    except Exception as e:
+        logger.error(f"delete_preset failed: {e}")
+        return False
+
+
+def resolve_preset_emails(preset: Dict) -> Tuple[List[str], List[str]]:
+    """
+    Resolve a preset to actual email addresses.
+
+    For AUTO_APPROVERS: query all active approvers for the type.
+    For AUTO_PMS: query all PMs.
+    For MANUAL: use stored email_list + resolve employee_ids.
+
+    Returns: (resolved_emails, labels_for_display)
+    """
+    preset_type = preset.get('preset_type', 'MANUAL')
+    emails = []
+    labels = []
+
+    if preset_type == 'AUTO_APPROVERS':
+        # Resolve all active approvers for this approval type
+        code = preset.get('approval_type_code')
+        sql = """
+            SELECT DISTINCT e.email, CONCAT(e.first_name, ' ', e.last_name) AS name
+            FROM approval_authorities aa
+            JOIN employees e ON aa.employee_id = e.id
+            JOIN approval_types at2 ON aa.approval_type_id = at2.id
+            WHERE aa.is_active = 1 AND aa.delete_flag = 0
+              AND e.email IS NOT NULL AND e.email != ''
+        """
+        params = {}
+        if code:
+            sql += " AND at2.code = :code"
+            params['code'] = code
+        try:
+            rows = _execute_query(sql, params)
+            for r in rows:
+                if r['email'] and r['email'] not in emails:
+                    emails.append(r['email'])
+                    labels.append(f"{r['name']} ({r['email']})")
+        except Exception as e:
+            logger.error(f"resolve AUTO_APPROVERS failed: {e}")
+
+    elif preset_type == 'AUTO_PMS':
+        try:
+            rows = _execute_query("""
+                SELECT DISTINCT e.email, CONCAT(e.first_name, ' ', e.last_name) AS name
+                FROM il_projects p
+                JOIN employees e ON p.pm_employee_id = e.id
+                WHERE p.delete_flag = 0 AND p.status NOT IN ('CLOSED', 'CANCELLED')
+                  AND e.email IS NOT NULL AND e.email != ''
+            """)
+            for r in rows:
+                if r['email'] and r['email'] not in emails:
+                    emails.append(r['email'])
+                    labels.append(f"{r['name']} ({r['email']})")
+        except Exception as e:
+            logger.error(f"resolve AUTO_PMS failed: {e}")
+
+    else:
+        # MANUAL: stored emails + employee IDs
+        stored_emails = preset.get('email_list', []) or []
+        for e in stored_emails:
+            if e and '@' in e and e not in emails:
+                emails.append(e)
+                labels.append(e)
+
+        emp_ids = preset.get('employee_ids', []) or []
+        if emp_ids:
+            placeholders = ', '.join(f':id{i}' for i in range(len(emp_ids)))
+            params = {f'id{i}': eid for i, eid in enumerate(emp_ids)}
+            try:
+                rows = _execute_query(f"""
+                    SELECT email, CONCAT(first_name, ' ', last_name) AS name
+                    FROM employees
+                    WHERE id IN ({placeholders}) AND delete_flag = 0
+                      AND email IS NOT NULL AND email != ''
+                """, params)
+                for r in rows:
+                    if r['email'] and r['email'] not in emails:
+                        emails.append(r['email'])
+                        labels.append(f"{r['name']} ({r['email']})")
+            except Exception as e:
+                logger.error(f"resolve employee_ids failed: {e}")
+
+    return emails, labels
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE 3: NOTIFICATION LOG (audit trail)
+# ══════════════════════════════════════════════════════════════════════
+
+def _log_notification(
+    notification_type: str,
+    subject: str,
+    to_emails: List[str],
+    cc_emails: Optional[List[str]] = None,
+    sent_by: str = "",
+    sent_by_employee_id: Optional[int] = None,
+    details: str = "",
+) -> None:
+    """
+    Log notification send to approval_history table as a CONFIG_NOTIFICATION record.
+    Uses a dedicated approval_type code so it's visible in the History tab.
+    Falls back silently — non-critical.
+
+    NOTE: approval_history.approver_id has FK → employees.id,
+          so we MUST use a valid employee_id (not 0).
+    """
+    try:
+        from sqlalchemy import text as _text
+        engine = _get_engine()
+        with engine.connect() as conn:
+            # Find approval_type for config notifications
+            at_row = conn.execute(_text(
+                "SELECT id FROM approval_types WHERE code = 'APPROVAL_CONFIG_NOTIFY' AND delete_flag = 0 LIMIT 1"
+            )).fetchone()
+
+            if not at_row:
+                logger.debug("APPROVAL_CONFIG_NOTIFY type not found — skipping log.")
+                return
+
+            # Resolve approver_id: must be valid FK to employees
+            approver_id = sent_by_employee_id
+            if not approver_id:
+                # Try to resolve from sent_by (users.id string → employees.keycloak_id or id)
+                if sent_by:
+                    emp_row = conn.execute(_text("""
+                        SELECT id FROM employees
+                        WHERE (id = :uid OR keycloak_id = :uid)
+                          AND delete_flag = 0
+                        LIMIT 1
+                    """), {'uid': sent_by}).fetchone()
+                    if emp_row:
+                        approver_id = emp_row[0]
+
+            if not approver_id:
+                # Last resort: use the first active admin/approver as placeholder
+                fallback = conn.execute(_text("""
+                    SELECT employee_id FROM approval_authorities
+                    WHERE is_active = 1 AND delete_flag = 0
+                    ORDER BY approval_level DESC LIMIT 1
+                """)).fetchone()
+                approver_id = fallback[0] if fallback else None
+
+            if not approver_id:
+                logger.debug("No valid employee_id for notification log — skipping.")
+                return
+
+            recipients_str = ', '.join(to_emails[:5])
+            if len(to_emails) > 5:
+                recipients_str += f' (+{len(to_emails) - 5} more)'
+
+            conn.execute(_text("""
+                INSERT INTO approval_history
+                    (approval_type_id, entity_id, entity_reference, approver_id,
+                     approval_status, approval_level, comments, created_by,
+                     created_date)
+                VALUES (:atid, :entity_id, :ref, :approver_id,
+                        :status, 0, :comments, :by,
+                        NOW())
+            """), {
+                'atid': at_row[0],
+                'entity_id': approver_id,  # use admin's employee_id as entity_id too
+                'ref': f'NOTIFY: {notification_type}',
+                'approver_id': approver_id,
+                'status': 'SENT',
+                'comments': f"[{notification_type}] {subject} | To: {recipients_str} | {details}"[:500],
+                'by': sent_by or 'SYSTEM',
+            })
+            conn.commit()
+            logger.debug(f"Notification logged: {notification_type}, approver_id={approver_id}")
+    except Exception as e:
+        logger.debug(f"_log_notification failed (non-critical): {e}")
+
+
+def get_notification_log(limit: int = 30) -> List[Dict]:
+    """Get recent notification sends from approval_history."""
+    try:
+        return _execute_query("""
+            SELECT
+                ah.id,
+                ah.entity_reference,
+                ah.comments,
+                CONCAT(e.first_name, ' ', e.last_name) AS sent_by_name,
+                ah.created_by,
+                ah.created_date
+            FROM approval_history ah
+            JOIN approval_types at2 ON ah.approval_type_id = at2.id
+            JOIN employees e ON ah.approver_id = e.id
+            WHERE at2.code = 'APPROVAL_CONFIG_NOTIFY'
+              AND ah.delete_flag = 0
+            ORDER BY ah.created_date DESC
+            LIMIT :lim
+        """, {'lim': limit})
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# INTERNAL HELPERS
+# ══════════════════════════════════════════════════════════════════════
+
+def _load_all_authorities() -> List[Dict]:
+    """Load all authorities (same query as IL_98 page)."""
+    return _execute_query("""
+        SELECT
+            aa.id,
+            aa.employee_id,
+            CONCAT(e.first_name, ' ', e.last_name) AS employee_name,
+            e.email,
+            p.name AS position,
+            aa.approval_type_id,
+            at2.code AS type_code,
+            at2.name AS type_name,
+            aa.company_id,
+            c.english_name AS company_name,
+            aa.approval_level,
+            aa.max_amount,
+            aa.is_active,
+            aa.valid_from,
+            aa.valid_to,
+            aa.notes,
+            aa.created_date,
+            aa.modified_date
+        FROM approval_authorities aa
+        JOIN employees e ON aa.employee_id = e.id
+        JOIN approval_types at2 ON aa.approval_type_id = at2.id
+        LEFT JOIN companies c ON aa.company_id = c.id
+        LEFT JOIN positions p ON e.position_id = p.id
+        WHERE aa.delete_flag = 0
+        ORDER BY at2.code, aa.approval_level, e.first_name
+    """)
+
+
+def _parse_json_field(val) -> list:
+    """Parse JSON string → list. Returns [] on failure."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return []

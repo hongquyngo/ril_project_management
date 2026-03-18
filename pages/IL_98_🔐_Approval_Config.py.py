@@ -5,6 +5,10 @@ Approval Authority Management — Admin Only
 CRUD for approval_types + approval_authorities.
 Controls who can approve what, at which level, up to what amount.
 
+Phase 1: 📧 Notifications tab — on-demand summary email
+Phase 2: Auto-notify stakeholders on config changes (inline after CRUD)
+Phase 3: Saved recipient presets + notification audit log
+
 Access: admin role only.
 """
 
@@ -131,7 +135,207 @@ def _fmt_amount(val) -> str:
     except (TypeError, ValueError):
         return str(val)
 
+
 STATUS_MAP = {True: '🟢 Active', False: '🔴 Inactive', 1: '🟢 Active', 0: '🔴 Inactive'}
+
+
+def _get_admin_name() -> str:
+    """Get current admin's display name."""
+    try:
+        emp_id = st.session_state.get('employee_id')
+        if emp_id:
+            rows = execute_query(
+                "SELECT CONCAT(first_name, ' ', last_name) AS name FROM employees WHERE id = :id",
+                {'id': emp_id}
+            )
+            if rows:
+                return rows[0]['name']
+    except Exception:
+        pass
+    return f"Admin (ID: {user_id})"
+
+
+def _get_chain_for_type(type_code: str) -> list:
+    """Get current approval chain for a specific type (for email visualization)."""
+    all_auth = _load_authorities()
+    return [a for a in all_auth if a.get('type_code') == type_code and a.get('is_active')]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE 2: AUTO-NOTIFY AFTER CONFIG CHANGE
+# ══════════════════════════════════════════════════════════════════════
+
+def _show_change_notification_prompt(
+    change_type: str,
+    authority_data: dict,
+    old_data: dict = None,
+):
+    """
+    Show inline notification prompt after a config change.
+    Stores the change in session_state → rendered on next rerun.
+    """
+    st.session_state['_pending_notification'] = {
+        'change_type': change_type,
+        'authority_data': authority_data,
+        'old_data': old_data,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+
+def _render_pending_notification():
+    """
+    Render the notification prompt if a config change just happened.
+    Called at the top of the Authorities tab.
+    """
+    pending = st.session_state.pop('_pending_notification', None)
+    if not pending:
+        return
+
+    change_type = pending['change_type']
+    authority_data = pending['authority_data']
+    old_data = pending.get('old_data')
+
+    type_icons = {
+        'CREATED': '🆕', 'UPDATED': '✏️', 'DELETED': '🗑️',
+        'DEACTIVATED': '🔴', 'ACTIVATED': '🟢',
+    }
+    icon = type_icons.get(change_type, '⚡')
+    emp_name = authority_data.get('employee_name', '—')
+    type_code = authority_data.get('type_code', '—')
+    level = authority_data.get('approval_level', '—')
+
+    with st.container(border=True):
+        st.markdown(
+            f"### {icon} Authority {change_type}\n"
+            f"**{emp_name}** — {type_code} Level {level} — "
+            f"Max: {_fmt_amount(authority_data.get('max_amount'))}"
+        )
+
+        # Show diff for UPDATED
+        if change_type == 'UPDATED' and old_data:
+            diff_parts = []
+            if old_data.get('max_amount') != authority_data.get('max_amount'):
+                diff_parts.append(
+                    f"Max Amount: {_fmt_amount(old_data.get('max_amount'))} → "
+                    f"**{_fmt_amount(authority_data.get('max_amount'))}**"
+                )
+            if old_data.get('approval_level') != authority_data.get('approval_level'):
+                diff_parts.append(f"Level: {old_data.get('approval_level')} → **{authority_data.get('approval_level')}**")
+            if bool(old_data.get('is_active')) != bool(authority_data.get('is_active')):
+                diff_parts.append(
+                    f"Status: {'Active' if old_data.get('is_active') else 'Inactive'} → "
+                    f"**{'Active' if authority_data.get('is_active') else 'Inactive'}**"
+                )
+            if diff_parts:
+                st.caption("Changes: " + " | ".join(diff_parts))
+
+        st.markdown("📧 **Notify stakeholders about this change?**")
+
+        # Quick checkboxes
+        nc1, nc2, nc3 = st.columns(3)
+        notify_approver = nc1.checkbox(
+            f"Affected approver ({authority_data.get('email', '—')})",
+            value=True, key="_notify_approver"
+        )
+        notify_finance = nc2.checkbox(
+            "Finance team", value=True, key="_notify_finance"
+        )
+        notify_all_approvers = nc3.checkbox(
+            f"All {type_code} approvers", value=False, key="_notify_all_approvers"
+        )
+
+        change_note = st.text_input(
+            "Change note (optional)", key="_change_note",
+            placeholder="e.g. Updated per management approval on 2026-03-18"
+        )
+
+        btn_col1, btn_col2, _ = st.columns([1, 1, 2])
+        if btn_col1.button("📧 Send Now", type="primary", key="_send_change_notify"):
+            _do_send_change_alert(
+                change_type=change_type,
+                authority_data=authority_data,
+                old_data=old_data,
+                notify_approver=notify_approver,
+                notify_finance=notify_finance,
+                notify_all_approvers=notify_all_approvers,
+                change_note=change_note,
+            )
+        if btn_col2.button("Skip", key="_skip_change_notify"):
+            st.rerun()
+
+
+def _do_send_change_alert(
+    change_type: str,
+    authority_data: dict,
+    old_data: dict = None,
+    notify_approver: bool = True,
+    notify_finance: bool = True,
+    notify_all_approvers: bool = False,
+    change_note: str = "",
+):
+    """Execute the config change alert send."""
+    try:
+        from utils.il_project.approval_notify import send_config_change_alert, get_presets, resolve_preset_emails
+    except ImportError:
+        st.error("approval_notify module not found."); return
+
+    to_emails = []
+    cc_emails = []
+
+    # Approver email
+    if notify_approver and authority_data.get('email'):
+        to_emails.append(authority_data['email'])
+
+    # Finance preset
+    if notify_finance:
+        presets = get_presets()
+        finance_preset = next(
+            (p for p in presets if 'finance' in (p.get('preset_name', '') or '').lower()),
+            None
+        )
+        if finance_preset:
+            emails, _ = resolve_preset_emails(finance_preset)
+            cc_emails.extend(emails)
+        else:
+            st.warning("No 'Finance Team' preset configured. Create one in the Notifications tab.")
+
+    # All approvers for this type
+    if notify_all_approvers:
+        type_code = authority_data.get('type_code')
+        chain = _get_chain_for_type(type_code)
+        for a in chain:
+            email = a.get('email', '')
+            if email and email not in to_emails and email not in cc_emails:
+                cc_emails.append(email)
+
+    if not to_emails and not cc_emails:
+        st.warning("No recipients resolved. Skipped.")
+        return
+
+    # If only CC, move first to TO
+    if not to_emails and cc_emails:
+        to_emails.append(cc_emails.pop(0))
+
+    chain = _get_chain_for_type(authority_data.get('type_code', ''))
+    admin_name = _get_admin_name()
+
+    result = send_config_change_alert(
+        change_type=change_type,
+        authority_data=authority_data,
+        to_emails=to_emails,
+        cc_emails=cc_emails or None,
+        old_data=old_data,
+        changed_by_name=admin_name,
+        change_note=change_note,
+        current_chain=chain,
+        sent_by=user_id,
+        sent_by_employee_id=st.session_state.get('employee_id'),
+    )
+
+    if result.get('success'):
+        st.success(f"📧 {result['message']} → {', '.join(to_emails)}")
+    else:
+        st.error(f"Send failed: {result.get('message', 'Unknown error')}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -152,7 +356,6 @@ def _dialog_create_type():
     if submitted:
         if not code or not name:
             st.error("Code and Name are required."); return
-        # Check unique
         existing = execute_query(
             "SELECT id FROM approval_types WHERE code = :c AND delete_flag = 0",
             {'c': code.strip().upper()}
@@ -207,7 +410,6 @@ def _dialog_edit_type(type_data: dict):
             st.error(f"Update failed: {e}")
 
     if delete:
-        # Check if any authorities reference this type
         refs = execute_query(
             "SELECT COUNT(*) AS cnt FROM approval_authorities WHERE approval_type_id = :id AND delete_flag = 0",
             {'id': type_data['id']}
@@ -225,7 +427,7 @@ def _dialog_edit_type(type_data: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# DIALOGS — Approval Authorities
+# DIALOGS — Approval Authorities (with Phase 2 auto-notify)
 # ══════════════════════════════════════════════════════════════════════
 
 @st.dialog("➕ New Approval Authority", width="large")
@@ -240,40 +442,36 @@ def _dialog_create_authority():
         st.warning("No active employees found."); return
 
     with st.form("create_auth_form"):
-        # Type
         type_opts = [f"[{t['code']}] {t['name']}" for t in types]
         type_sel = st.selectbox("Approval Type *", type_opts)
-        type_id = types[type_opts.index(type_sel)]['id']
+        type_idx = type_opts.index(type_sel)
+        type_id = types[type_idx]['id']
+        type_code = types[type_idx]['code']
+        type_name = types[type_idx]['name']
 
-        # Employee
         a1, a2 = st.columns(2)
         emp_opts = [f"{e['full_name']} ({e.get('position', '—')})" for e in emps]
         emp_sel = a1.selectbox("Approver *", emp_opts)
-        emp_id = emps[emp_opts.index(emp_sel)]['id']
-        a2.caption(f"📧 {emps[emp_opts.index(emp_sel)]['email']}")
+        emp_idx = emp_opts.index(emp_sel)
+        emp_id = emps[emp_idx]['id']
+        a2.caption(f"📧 {emps[emp_idx]['email']}")
 
-        # Level & Amount
         b1, b2 = st.columns(2)
         level = b1.number_input("Approval Level *", min_value=1, max_value=10, value=1,
-                                 help="1 = first approver, 2 = second, etc. Lower level approves first.")
-        has_limit = b2.checkbox("Set amount limit", value=True,
-                                 help="Uncheck = unlimited (approves any amount)")
+                                 help="1 = first approver, 2 = second, etc.")
+        has_limit = b2.checkbox("Set amount limit", value=True)
         max_amount = None
         if has_limit:
             max_amount = st.number_input("Max Amount (VND)", min_value=0.0, value=500_000_000.0,
-                                          format="%.0f",
-                                          help="Maximum total PR amount this approver can approve at this level")
+                                          format="%.0f")
             st.caption(f"= {_fmt_amount(max_amount)}")
 
-        # Company scope
         comp_opts = ["All companies (no restriction)"] + [c['name'] for c in comps]
-        comp_sel = st.selectbox("Company Scope", comp_opts,
-                                 help="Restrict this authority to a specific company. Usually leave as 'All'.")
+        comp_sel = st.selectbox("Company Scope", comp_opts)
         company_id = None
         if comp_sel != "All companies (no restriction)":
             company_id = comps[comp_opts.index(comp_sel) - 1]['id']
 
-        # Validity
         c1, c2 = st.columns(2)
         valid_from = c1.date_input("Valid From", value=date.today())
         has_expiry = c2.checkbox("Set expiry date", value=False)
@@ -287,15 +485,13 @@ def _dialog_create_authority():
         submitted = st.form_submit_button("💾 Create", type="primary", use_container_width=True)
 
     if submitted:
-        # Check duplicate: same employee + type + level
         dup = execute_query("""
             SELECT id FROM approval_authorities
             WHERE employee_id = :eid AND approval_type_id = :tid AND approval_level = :lvl
               AND delete_flag = 0
         """, {'eid': emp_id, 'tid': type_id, 'lvl': level})
         if dup:
-            st.error(f"Duplicate: this employee already has level {level} for this approval type. "
-                     "Edit the existing record instead."); return
+            st.error(f"Duplicate: this employee already has level {level} for this approval type."); return
 
         try:
             execute_update("""
@@ -310,12 +506,24 @@ def _dialog_create_authority():
             """, {
                 'eid': emp_id, 'tid': type_id, 'cid': company_id,
                 'active': 1 if is_active else 0,
-                'vfrom': valid_from,
-                'vto': valid_to,
+                'vfrom': valid_from, 'vto': valid_to,
                 'lvl': level, 'amt': max_amount,
                 'by': user_id, 'notes': notes.strip() or None,
             })
-            st.success(f"✅ Authority created: {emps[emp_opts.index(emp_sel)]['full_name']} — Level {level}")
+            st.success(f"✅ Authority created: {emps[emp_idx]['full_name']} — Level {level}")
+
+            # Phase 2: trigger auto-notify prompt
+            _show_change_notification_prompt(
+                change_type='CREATED',
+                authority_data={
+                    'employee_name': emps[emp_idx]['full_name'],
+                    'email': emps[emp_idx]['email'],
+                    'position': emps[emp_idx].get('position'),
+                    'type_code': type_code, 'type_name': type_name,
+                    'approval_level': level, 'max_amount': max_amount,
+                    'is_active': is_active,
+                },
+            )
             st.cache_data.clear(); st.rerun()
         except Exception as e:
             st.error(f"Create failed: {e}")
@@ -326,21 +534,23 @@ def _dialog_edit_authority(auth_data: dict):
     emps = _load_employees()
     comps = _load_companies()
 
+    # Capture old data for diff (Phase 2)
+    old_data = dict(auth_data)
+
     st.markdown(f"**{auth_data['type_code']}** — {auth_data['type_name']}")
     st.caption(f"Current: {auth_data['employee_name']} | Level {auth_data['approval_level']} | "
                f"Max: {_fmt_amount(auth_data.get('max_amount'))}")
 
     with st.form("edit_auth_form"):
-        # Employee (can change)
         emp_opts = [f"{e['full_name']} ({e.get('position', '—')})" for e in emps]
         cur_emp_idx = next(
             (i for i, e in enumerate(emps) if e['id'] == auth_data['employee_id']),
             0
         )
         emp_sel = st.selectbox("Approver", emp_opts, index=cur_emp_idx)
-        emp_id = emps[emp_opts.index(emp_sel)]['id']
+        emp_idx = emp_opts.index(emp_sel)
+        emp_id = emps[emp_idx]['id']
 
-        # Level & Amount
         b1, b2 = st.columns(2)
         level = b1.number_input("Approval Level", min_value=1, max_value=10,
                                  value=int(auth_data['approval_level']))
@@ -353,7 +563,6 @@ def _dialog_edit_authority(auth_data: dict):
                                           format="%.0f")
             st.caption(f"= {_fmt_amount(max_amount)}")
 
-        # Company scope
         comp_opts = ["All companies"] + [c['name'] for c in comps]
         cur_comp_idx = 0
         if auth_data.get('company_id'):
@@ -365,7 +574,6 @@ def _dialog_edit_authority(auth_data: dict):
         if comp_sel != "All companies":
             company_id = comps[comp_opts.index(comp_sel) - 1]['id']
 
-        # Validity
         c1, c2 = st.columns(2)
         vf = auth_data.get('valid_from')
         if isinstance(vf, datetime):
@@ -414,6 +622,23 @@ def _dialog_edit_authority(auth_data: dict):
                 'notes': notes.strip() or None, 'by': user_id,
             })
             st.success("✅ Updated!")
+
+            # Phase 2: trigger auto-notify
+            new_data = {
+                'employee_name': emps[emp_idx]['full_name'],
+                'email': emps[emp_idx]['email'],
+                'position': emps[emp_idx].get('position'),
+                'type_code': auth_data['type_code'],
+                'type_name': auth_data['type_name'],
+                'approval_level': level,
+                'max_amount': max_amount,
+                'is_active': is_active,
+            }
+            _show_change_notification_prompt(
+                change_type='UPDATED',
+                authority_data=new_data,
+                old_data=old_data,
+            )
             st.cache_data.clear(); st.rerun()
         except Exception as e:
             st.error(f"Update failed: {e}")
@@ -424,7 +649,164 @@ def _dialog_edit_authority(auth_data: dict):
             {'id': auth_data['id'], 'by': user_id}
         )
         st.success("Deleted.")
+        # Phase 2: trigger auto-notify for delete
+        _show_change_notification_prompt(
+            change_type='DELETED',
+            authority_data=auth_data,
+        )
         st.cache_data.clear(); st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DIALOGS — Preset Management (Phase 3)
+# ══════════════════════════════════════════════════════════════════════
+
+@st.dialog("➕ New Notification Preset", width="large")
+def _dialog_create_preset():
+    emps = _load_employees()
+    types = _load_approval_types()
+
+    with st.form("create_preset_form"):
+        preset_name = st.text_input("Preset Name *", placeholder="e.g. Finance Team")
+
+        preset_type = st.selectbox("Type", [
+            "MANUAL — Pick employees + enter emails",
+            "AUTO_APPROVERS — All active approvers (auto-resolved)",
+            "AUTO_PMS — All active project managers (auto-resolved)",
+        ])
+        preset_type_code = preset_type.split(" —")[0]
+
+        # Scope
+        type_opts = ["All Types"] + [t['code'] for t in types]
+        scope_sel = st.selectbox("Approval Type Scope", type_opts,
+                                  help="Filter: only show this preset when working with this type")
+        scope_code = None if scope_sel == "All Types" else scope_sel
+
+        selected_emp_ids = []
+        manual_emails = []
+        if 'MANUAL' in preset_type_code:
+            # Employee multiselect
+            emp_opts = [f"{e['full_name']} ({e.get('email', '—')})" for e in emps]
+            emp_sel = st.multiselect("Select Employees", emp_opts,
+                                      help="Pick from employee list")
+            selected_emp_ids = [emps[emp_opts.index(s)]['id'] for s in emp_sel]
+
+            # Manual emails
+            email_input = st.text_area(
+                "Additional Emails (one per line)",
+                placeholder="finance-group@prostech.vn\naccounting@prostech.vn",
+                height=80,
+            )
+            if email_input:
+                manual_emails = [
+                    e.strip() for e in email_input.strip().split('\n')
+                    if e.strip() and '@' in e
+                ]
+
+        submitted = st.form_submit_button("💾 Save Preset", type="primary", use_container_width=True)
+
+    if submitted:
+        if not preset_name:
+            st.error("Preset name is required."); return
+
+        try:
+            from utils.il_project.approval_notify import save_preset
+            result = save_preset(
+                preset_name=preset_name,
+                preset_type=preset_type_code,
+                email_list=manual_emails,
+                employee_ids=selected_emp_ids,
+                approval_type_code=scope_code,
+                created_by=user_id,
+            )
+            if result['success']:
+                st.success(f"✅ {result['message']}")
+                st.cache_data.clear(); st.rerun()
+            else:
+                st.error(result['message'])
+        except ImportError:
+            st.error("approval_notify module not available.")
+
+
+@st.dialog("✏️ Edit Preset", width="large")
+def _dialog_edit_preset(preset: dict):
+    emps = _load_employees()
+    types = _load_approval_types()
+
+    with st.form("edit_preset_form"):
+        preset_name = st.text_input("Preset Name *", value=preset.get('preset_name', ''))
+
+        type_opts_map = {
+            'MANUAL': "MANUAL — Pick employees + enter emails",
+            'AUTO_APPROVERS': "AUTO_APPROVERS — All active approvers (auto-resolved)",
+            'AUTO_PMS': "AUTO_PMS — All active project managers (auto-resolved)",
+        }
+        type_display = list(type_opts_map.values())
+        cur_type_idx = list(type_opts_map.keys()).index(preset.get('preset_type', 'MANUAL'))
+        preset_type = st.selectbox("Type", type_display, index=cur_type_idx)
+        preset_type_code = preset_type.split(" —")[0]
+
+        scope_opts = ["All Types"] + [t['code'] for t in types]
+        cur_scope = preset.get('approval_type_code') or 'All Types'
+        scope_idx = scope_opts.index(cur_scope) if cur_scope in scope_opts else 0
+        scope_sel = st.selectbox("Scope", scope_opts, index=scope_idx)
+        scope_code = None if scope_sel == "All Types" else scope_sel
+
+        selected_emp_ids = preset.get('employee_ids', []) or []
+        manual_emails = preset.get('email_list', []) or []
+
+        if 'MANUAL' in preset_type_code:
+            emp_opts = [f"{e['full_name']} ({e.get('email', '—')})" for e in emps]
+            pre_sel = [
+                emp_opts[i] for i, e in enumerate(emps) if e['id'] in selected_emp_ids
+            ]
+            emp_sel = st.multiselect("Select Employees", emp_opts, default=pre_sel)
+            selected_emp_ids = [emps[emp_opts.index(s)]['id'] for s in emp_sel]
+
+            email_input = st.text_area(
+                "Additional Emails (one per line)",
+                value='\n'.join(manual_emails),
+                height=80,
+            )
+            manual_emails = [
+                e.strip() for e in email_input.strip().split('\n')
+                if e.strip() and '@' in e
+            ] if email_input else []
+
+        col_save, col_del = st.columns(2)
+        save = col_save.form_submit_button("💾 Save", type="primary", use_container_width=True)
+        delete = col_del.form_submit_button("🗑 Delete", use_container_width=True)
+
+    if save:
+        if not preset_name:
+            st.error("Preset name is required."); return
+        try:
+            from utils.il_project.approval_notify import save_preset
+            result = save_preset(
+                preset_name=preset_name,
+                preset_type=preset_type_code,
+                email_list=manual_emails,
+                employee_ids=selected_emp_ids,
+                approval_type_code=scope_code,
+                created_by=user_id,
+                preset_id=preset['id'],
+            )
+            if result['success']:
+                st.success(f"✅ {result['message']}")
+                st.cache_data.clear(); st.rerun()
+            else:
+                st.error(result['message'])
+        except ImportError:
+            st.error("approval_notify module not available.")
+
+    if delete:
+        try:
+            from utils.il_project.approval_notify import delete_preset
+            delete_preset(preset['id'])
+            st.success("Deleted.")
+            st.cache_data.clear(); st.rerun()
+        except ImportError:
+            st.error("approval_notify module not available.")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -432,11 +814,12 @@ def _dialog_edit_authority(auth_data: dict):
 # ══════════════════════════════════════════════════════════════════════
 
 st.title("🔐 Approval Configuration")
-st.caption("Manage approval types, authorities, and view approval history. Admin only.")
+st.caption("Manage approval types, authorities, notifications, and view history. Admin only.")
 
-tab_authorities, tab_types, tab_history = st.tabs([
+tab_authorities, tab_types, tab_notifications, tab_history = st.tabs([
     "👥 Approval Authorities",
     "📋 Approval Types",
+    "📧 Notifications",
     "📜 Approval History",
 ])
 
@@ -446,6 +829,9 @@ tab_authorities, tab_types, tab_history = st.tabs([
 # ══════════════════════════════════════════════════════════════════════
 
 with tab_authorities:
+    # Phase 2: render pending notification prompt (if a change just happened)
+    _render_pending_notification()
+
     # Toolbar
     th1, th2, th3 = st.columns([3, 2, 1])
     types_for_filter = _load_approval_types()
@@ -477,7 +863,6 @@ with tab_authorities:
     if not authorities:
         st.info("No approval authorities configured. Click ➕ to create one.")
     else:
-        # Group by type for clarity
         auth_df = pd.DataFrame(authorities)
         auth_df['status'] = auth_df['is_active'].map(lambda v: '🟢' if v else '🔴')
         auth_df['max_amount_fmt'] = auth_df['max_amount'].apply(_fmt_amount)
@@ -501,7 +886,6 @@ with tab_authorities:
                 'company_name':    st.column_config.TextColumn('Company Scope'),
                 'valid_range':     st.column_config.TextColumn('Valid Period'),
                 'notes':           st.column_config.TextColumn('Notes'),
-                # Hide raw columns
                 'id': None, 'employee_id': None, 'approval_type_id': None,
                 'type_name': None, 'company_id': None, 'max_amount': None,
                 'is_active': None, 'valid_from': None, 'valid_to': None,
@@ -538,7 +922,6 @@ with tab_types:
     else:
         types_df = pd.DataFrame(types)
         types_df['status'] = types_df['is_active'].map(lambda v: '🟢' if v else '🔴')
-        # Count authorities per type
         all_auth = _load_authorities()
         type_auth_count = {}
         for a in all_auth:
@@ -573,7 +956,254 @@ with tab_types:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 3 — Approval History (read-only log)
+# TAB 3 — 📧 Notifications (Phase 1 + Phase 3)
+# ══════════════════════════════════════════════════════════════════════
+
+with tab_notifications:
+    st.markdown("#### 📧 Approval Config Notifications")
+    st.caption(
+        "Send approval authority configuration to Finance, approvers, and other stakeholders. "
+        "Especially important for Finance team to verify payment authorization."
+    )
+
+    # ── Section 1: Send Mode ──────────────────────────────────────
+    send_mode = st.radio(
+        "Send Mode", ["📊 Current Config Summary", "⚡ Config Change Alert"],
+        horizontal=True, key="notify_send_mode",
+        help="Summary = full config snapshot. Change Alert = notify about a specific change.",
+    )
+
+    st.divider()
+
+    # ── Section 2: Scope Filter ───────────────────────────────────
+    types_list = _load_approval_types()
+    scope_opts = ["All Types"] + [f"{t['code']} — {t['name']}" for t in types_list]
+    scope_sel = st.selectbox("Approval Type Scope", scope_opts, key="notify_scope")
+    scope_code = None
+    if scope_sel != "All Types":
+        scope_code = scope_sel.split(" — ")[0]
+
+    # ── Section 3: Recipients ─────────────────────────────────────
+    st.markdown("##### 📬 Recipients")
+
+    # Quick presets
+    try:
+        from utils.il_project.approval_notify import (
+            get_presets, resolve_preset_emails,
+            build_summary_html, send_config_summary,
+            get_notification_log,
+        )
+        _has_notify_module = True
+    except ImportError:
+        _has_notify_module = False
+        st.warning("⚠️ `approval_notify` module not found. Place `approval_notify.py` in `utils/il_project/`.")
+
+    preset_to_emails = []
+    preset_cc_emails = []
+
+    if _has_notify_module:
+        presets = get_presets(scope_code)
+
+        if presets:
+            st.markdown("**Quick Presets:**")
+            preset_cols = st.columns(min(len(presets) + 1, 5))
+            for i, p in enumerate(presets):
+                pname = p.get('preset_name', '—')
+                ptype_icon = {'MANUAL': '📋', 'AUTO_APPROVERS': '👥', 'AUTO_PMS': '📊'}.get(
+                    p.get('preset_type', ''), '📋'
+                )
+                col_idx = i % len(preset_cols)
+                if preset_cols[col_idx].button(
+                    f"{ptype_icon} {pname}", key=f"preset_btn_{p['id']}",
+                    use_container_width=True,
+                ):
+                    emails, labels = resolve_preset_emails(p)
+                    st.session_state['_preset_resolved_to'] = emails
+                    st.session_state['_preset_resolved_labels'] = labels
+                    st.rerun()
+
+            # Show resolved preset
+            if '_preset_resolved_to' in st.session_state:
+                resolved = st.session_state['_preset_resolved_to']
+                labels = st.session_state.get('_preset_resolved_labels', resolved)
+                if resolved:
+                    st.info(f"Preset resolved: **{len(resolved)}** recipient(s) — {', '.join(labels[:5])}"
+                            + (f" +{len(labels) - 5} more" if len(labels) > 5 else ""))
+                    preset_to_emails = resolved
+
+    # Employee multiselect for TO
+    emps = _load_employees()
+    emp_with_email = [e for e in emps if e.get('email')]
+    emp_opts_to = [f"{e['full_name']} — {e.get('position', '')} ({e['email']})" for e in emp_with_email]
+
+    to_sel = st.multiselect("TO: Select from employees", emp_opts_to, key="notify_to_emps",
+                             help="Primary recipients")
+    to_emp_emails = [emp_with_email[emp_opts_to.index(s)]['email'] for s in to_sel]
+
+    # CC multiselect
+    cc_sel = st.multiselect("CC: Select from employees", emp_opts_to, key="notify_cc_emps",
+                             help="CC recipients")
+    cc_emp_emails = [emp_with_email[emp_opts_to.index(s)]['email'] for s in cc_sel]
+
+    # Manual email input
+    manual_to = st.text_input(
+        "Additional TO emails (comma-separated)", key="notify_manual_to",
+        placeholder="finance@prostech.vn, accounting@prostech.vn",
+    )
+    manual_to_list = [
+        e.strip() for e in (manual_to or '').split(',')
+        if e.strip() and '@' in e
+    ]
+
+    manual_cc = st.text_input(
+        "Additional CC emails (comma-separated)", key="notify_manual_cc",
+        placeholder="ceo@prostech.vn",
+    )
+    manual_cc_list = [
+        e.strip() for e in (manual_cc or '').split(',')
+        if e.strip() and '@' in e
+    ]
+
+    # Merge all recipients
+    all_to = list(dict.fromkeys(preset_to_emails + to_emp_emails + manual_to_list))
+    all_cc = list(dict.fromkeys(cc_emp_emails + manual_cc_list))
+    # Remove TO from CC
+    all_cc = [e for e in all_cc if e not in all_to]
+
+    if all_to or all_cc:
+        st.caption(f"📧 TO: {len(all_to)} | CC: {len(all_cc)} | Total: {len(all_to) + len(all_cc)}")
+
+    # ── Section 4: Options ────────────────────────────────────────
+    st.markdown("##### ⚙️ Options")
+    oc1, oc2 = st.columns(2)
+    include_validity = oc1.checkbox("Include valid period (from/to)", value=True, key="notify_opt_validity")
+    include_history = oc2.checkbox("Include recent changes (30 days)", value=False, key="notify_opt_history")
+
+    admin_note = st.text_area(
+        "Note to recipients (optional)", key="notify_admin_note", height=80,
+        placeholder="e.g. Cập nhật quyền approve PR cho Q2 2026. Finance team vui lòng kiểm tra lại checklist thanh toán."
+    )
+
+    # ── Section 5: Preview & Send ─────────────────────────────────
+    st.divider()
+
+    pv_col, send_col, _ = st.columns([1, 1, 2])
+
+    if pv_col.button("👁 Preview Email", use_container_width=True, key="notify_preview"):
+        st.session_state['_show_preview'] = True
+
+    if send_col.button("📧 Send Notification", type="primary", use_container_width=True, key="notify_send"):
+        if not all_to:
+            st.error("No TO recipients. Select employees or enter emails.")
+        elif not _has_notify_module:
+            st.error("approval_notify module not available.")
+        else:
+            with st.spinner("Sending..."):
+                authorities = _load_authorities()
+                result = send_config_summary(
+                    to_emails=all_to,
+                    cc_emails=all_cc or None,
+                    authorities=authorities,
+                    type_filter=scope_code,
+                    admin_note=admin_note,
+                    include_validity=include_validity,
+                    include_history=include_history,
+                    sent_by=user_id,
+                    sent_by_employee_id=st.session_state.get('employee_id'),
+                )
+            if result.get('success'):
+                st.success(f"✅ {result['message']}")
+                # Clear preset state
+                st.session_state.pop('_preset_resolved_to', None)
+                st.session_state.pop('_preset_resolved_labels', None)
+            else:
+                st.error(f"❌ {result.get('message', 'Send failed')}")
+
+    # Preview panel
+    if st.session_state.get('_show_preview') and _has_notify_module:
+        st.session_state['_show_preview'] = False
+        authorities = _load_authorities()
+        preview_html = build_summary_html(
+            authorities=authorities,
+            type_filter=scope_code,
+            admin_note=admin_note,
+            include_validity=include_validity,
+            include_history=include_history,
+        )
+        with st.expander("📧 Email Preview", expanded=True):
+            st.caption(f"TO: {', '.join(all_to) if all_to else '(none)'} | "
+                       f"CC: {', '.join(all_cc) if all_cc else '(none)'}")
+            st.markdown(
+                f'<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">'
+                f'{preview_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Section 6: Preset Management (Phase 3) ───────────────────
+    st.divider()
+    with st.expander("🔧 Manage Notification Presets", expanded=False):
+        st.caption(
+            "Saved recipient groups for quick selection. "
+            "AUTO presets resolve dynamically at send time."
+        )
+
+        if _has_notify_module:
+            all_presets = get_presets()
+
+            if all_presets:
+                for p in all_presets:
+                    ptype_icon = {'MANUAL': '📋', 'AUTO_APPROVERS': '👥', 'AUTO_PMS': '📊'}.get(
+                        p.get('preset_type', ''), '📋'
+                    )
+                    pname = p.get('preset_name', '—')
+                    ptype = p.get('preset_type', '—')
+                    scope = p.get('approval_type_code') or 'All Types'
+
+                    # Resolve count
+                    emails, _ = resolve_preset_emails(p)
+
+                    pc1, pc2, pc3, pc4 = st.columns([3, 2, 1, 1])
+                    pc1.markdown(f"**{ptype_icon} {pname}**")
+                    pc2.caption(f"{ptype} | Scope: {scope} | {len(emails)} recipient(s)")
+                    if pc3.button("✏️", key=f"preset_edit_{p['id']}"):
+                        _dialog_edit_preset(p)
+                    if pc4.button("🗑", key=f"preset_del_{p['id']}"):
+                        from utils.il_project.approval_notify import delete_preset
+                        delete_preset(p['id'])
+                        st.cache_data.clear(); st.rerun()
+            else:
+                st.info("No presets configured yet.")
+
+            if st.button("➕ New Preset", key="preset_create_btn"):
+                _dialog_create_preset()
+
+    # ── Section 7: Notification Log (Phase 3) ─────────────────────
+    if _has_notify_module:
+        with st.expander("📜 Notification Send Log", expanded=False):
+            st.caption("Audit trail: who sent what, when, to whom.")
+            log = get_notification_log(30)
+            if log:
+                log_df = pd.DataFrame(log)
+                st.dataframe(
+                    log_df, width="stretch", hide_index=True,
+                    column_config={
+                        'entity_reference': st.column_config.TextColumn('Type', width=120),
+                        'comments':         st.column_config.TextColumn('Details'),
+                        'sent_by_name':     st.column_config.TextColumn('Sent by', width=140),
+                        'created_date':     st.column_config.DatetimeColumn('Date', width=140),
+                        'id': None, 'created_by': None,
+                    },
+                )
+            else:
+                st.info("No notifications sent yet.")
+                st.caption(
+                    "💡 Tip: Create an approval type `APPROVAL_CONFIG_NOTIFY` "
+                    "in the Approval Types tab to enable notification logging."
+                )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 4 — Approval History (read-only log)
 # ══════════════════════════════════════════════════════════════════════
 
 with tab_history:
@@ -587,7 +1217,7 @@ with tab_history:
         hist_df = pd.DataFrame(history)
         hist_df.insert(0, '●', hist_df['approval_status'].map({
             'APPROVED': '✅', 'REJECTED': '❌', 'SUBMITTED': '📤',
-            'REVISION_REQUESTED': '🔄', 'PENDING': '🔵',
+            'REVISION_REQUESTED': '🔄', 'PENDING': '🔵', 'SENT': '📧',
         }).fillna('⚪'))
 
         st.dataframe(
