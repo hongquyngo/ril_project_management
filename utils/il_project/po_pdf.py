@@ -1103,6 +1103,91 @@ def _build_po_pdf(data: Dict, language: str = 'en', orientation: str = 'portrait
 
 
 # ══════════════════════════════════════════════════════════════════════
+# FILENAME BUILDER
+# ══════════════════════════════════════════════════════════════════════
+
+# Language code → short suffix for filename
+_LANG_SUFFIX = {
+    'en': 'EN', 'vi': 'VI', 'ja': 'JA', 'zh': 'ZH',
+    'bilingual': 'EN-VI', 'ja_en': 'JA-EN', 'zh_en': 'ZH-EN',
+}
+
+# PO type → short label for filename
+_PO_TYPE_SUFFIX = {
+    'REGULAR_ORDER': 'Regular',
+    'SAMPLE_ORDER':  'Sample',
+    'MIXED_ORDER':   'Mixed',
+}
+
+
+def _build_filename(header: Dict, po_number: str, language: str) -> str:
+    """
+    Build a descriptive PDF filename from PO header data.
+
+    Format:
+        {PO_Number}_{VendorCode}_{BuyerCode}_{Date}_{Type}_{Lang}.pdf
+
+    Example:
+        PO20260318-123-5_ACME_PROSTECH_20260318_Regular_EN.pdf
+
+    Fallback (missing data):
+        PO20260318-123-5_EN.pdf
+    """
+    import re as _re
+
+    def _safe(val, fallback: str = '') -> str:
+        """Sanitize a value for use in filename."""
+        if val is None:
+            return fallback
+        s = str(val).strip()
+        if not s or s in ('—', 'None', 'nan'):
+            return fallback
+        # Remove/replace unsafe chars: keep alphanumeric, dash, underscore
+        s = _re.sub(r'[^\w\-]', '_', s)
+        # Collapse multiple underscores
+        s = _re.sub(r'_+', '_', s).strip('_')
+        return s[:30]  # cap length per segment
+
+    parts = []
+
+    # 1. PO Number (always present)
+    parts.append(_safe(po_number, f'PO-{header.get("id", "0")}'))
+
+    # 2. Vendor (prefer code, fallback to name)
+    vendor = _safe(header.get('seller_code')) or _safe(header.get('seller_name'))
+    if vendor:
+        parts.append(vendor)
+
+    # 3. Buyer (prefer code, fallback to name)
+    buyer = _safe(header.get('buyer_code')) or _safe(header.get('buyer_name'))
+    if buyer:
+        parts.append(buyer)
+
+    # 4. PO Date (YYYYMMDD)
+    po_date = header.get('po_date')
+    if po_date:
+        if hasattr(po_date, 'strftime'):
+            parts.append(po_date.strftime('%Y%m%d'))
+        else:
+            date_str = _safe(str(po_date)[:10]).replace('-', '')
+            if date_str:
+                parts.append(date_str)
+
+    # 5. PO Type (Regular/Sample/Mixed)
+    po_type = header.get('purchase_order_type', '')
+    type_label = _PO_TYPE_SUFFIX.get(po_type, '')
+    if type_label:
+        parts.append(type_label)
+
+    # 6. Language
+    lang_suffix = _LANG_SUFFIX.get(language, language.upper()[:5])
+    parts.append(lang_suffix)
+
+    filename = '_'.join(parts) + '.pdf'
+    return filename
+
+
+# ══════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1145,7 +1230,7 @@ def generate_po_pdf(
         }
 
     po_number = data['header'].get('po_number', f'PO-{po_id}')
-    safe_name = po_number.replace('/', '_').replace(' ', '_')
+    filename = _build_filename(data['header'], po_number, language)
 
     try:
         pdf_bytes = _build_po_pdf(data, language, orientation)
@@ -1153,7 +1238,7 @@ def generate_po_pdf(
         logger.error(f"generate_po_pdf: build failed for PO {po_id}: {e}")
         return {
             'success': False, 'pdf_bytes': None,
-            'po_number': po_number, 'filename': f'{safe_name}.pdf',
+            'po_number': po_number, 'filename': filename,
             'message': f'PDF generation failed: {e}',
         }
 
@@ -1162,6 +1247,6 @@ def generate_po_pdf(
         'success': True,
         'pdf_bytes': pdf_bytes,
         'po_number': po_number,
-        'filename': f'{safe_name}.pdf',
+        'filename': filename,
         'message': f'PDF generated for {po_number}',
     }
