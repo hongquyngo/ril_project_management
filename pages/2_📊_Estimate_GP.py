@@ -37,6 +37,13 @@ proj_df = _load_projects()
 proj_types = _load_types()
 type_map = {t['id']: t for t in proj_types}
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_estimates(project_id: int, _v: int = 0):
+    return get_estimates(project_id)
+
+def _invalidate_estimates():
+    st.session_state['_est_v'] = st.session_state.get('_est_v', 0) + 1
+
 @st.cache_resource
 def _get_s3():
     try:
@@ -62,7 +69,7 @@ with st.sidebar:
     st.caption(f"α={pt.get('default_alpha',0.06)} β={pt.get('default_beta',0.40)} γ={pt.get('default_gamma',0.04)}")
     st.caption(f"GO ≥{pt.get('gp_go_threshold',25)}% | COND ≥{pt.get('gp_conditional_threshold',18)}%")
 
-all_estimates = get_estimates(project_id)
+all_estimates = _cached_estimates(project_id, _v=st.session_state.get('_est_v', 0))
 active_est = next((e for e in all_estimates if e.get('is_active')), None)
 next_version = max((e['estimate_version'] for e in all_estimates), default=0) + 1
 def_alpha = float(pt.get('default_alpha', 0.06))
@@ -579,7 +586,7 @@ with tab_new:
                                 document_type='OTHER',
                                 created_by=user_id)
             st.success(f"✅ Rev {next_version} saved with {len(items)} line items!")
-            _clear_items(); st.cache_data.clear(); st.rerun()
+            _clear_items(); _invalidate_estimates(); _load_projects.clear(); st.rerun()
         except Exception as e:
             st.error(f"Save failed: {e}")
 
@@ -680,4 +687,4 @@ with tab_history:
         sel_est = all_estimates[rev_opts.index(st.selectbox("Activate version", rev_opts))]
         if st.button("Activate Selected"):
             if activate_estimate(project_id, sel_est['id'], user_id):
-                st.success(f"Rev {sel_est['estimate_version']} active."); st.cache_data.clear(); st.rerun()
+                st.success(f"Rev {sel_est['estimate_version']} active."); _invalidate_estimates(); _load_projects.clear(); st.rerun()

@@ -562,7 +562,7 @@ def _render_pr_action_bar(row, key_prefix: str, show_approve: bool = False,
                                 budget_data=_budget,
                                 app_url=_pr_link(pr_id, 'approve'),
                             )
-                    st.cache_data.clear()
+                    _load.clear()  # Targeted: only refresh lookups, not all app caches
                     st.rerun(scope="app")
                 else:
                     st.error(result['message'])
@@ -1582,7 +1582,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False, cc_emails
 
         # 5. Cleanup & navigate ────────────────────────────────
         _cleanup_pr_wizard()
-        st.cache_data.clear()
+        _load.clear()  # Targeted: only refresh lookups, not all app caches
         st.session_state['open_pr_view'] = new_id
         st.rerun()
 
@@ -1645,7 +1645,7 @@ def _wiz_do_create(project_id, project, est, submit_now: bool = False, cc_emails
                 st.warning(f"⚠️ PR created but estimate/vendor link skipped (FK constraint). "
                            f"Please update manually in Edit mode.")
                 _cleanup_pr_wizard()
-                st.cache_data.clear()
+                _load.clear()  # Targeted: only refresh lookups, not all app caches
                 st.session_state['open_pr_edit'] = new_id
                 st.rerun()
 
@@ -1895,7 +1895,7 @@ def _dialog_approval_action(pr_id: int):
             )
             if not result.get('final') and result.get('next_approver_name'):
                 st.info(f"📧 Next approver: {result['next_approver_name']}")
-            st.cache_data.clear()
+            _load.clear()  # Targeted: only refresh lookups, not all app caches
             st.rerun()
         else:
             st.error(result['message'])
@@ -1918,7 +1918,7 @@ def _dialog_approval_action(pr_id: int):
                     app_url=_pr_link(pr_id, 'edit'),
                 )
                 st.success(result['message'])
-                st.cache_data.clear()
+                _load.clear()  # Targeted: only refresh lookups, not all app caches
                 st.rerun()
             else:
                 st.error(result['message'])
@@ -1941,7 +1941,7 @@ def _dialog_approval_action(pr_id: int):
                     app_url=_pr_link(pr_id, 'edit'),
                 )
                 st.success(result['message'])
-                st.cache_data.clear()
+                _load.clear()  # Targeted: only refresh lookups, not all app caches
                 st.rerun()
             else:
                 st.error(result['message'])
@@ -2093,7 +2093,7 @@ def _dialog_pr_view(pr_id: int):
                         budget_data=_budget,
                         app_url=_pr_link(pr_id, 'approve'),
                     )
-                st.cache_data.clear()
+                _load.clear()  # Targeted: only refresh lookups, not all app caches
                 st.rerun()
             else:
                 st.error(result['message'])
@@ -2301,7 +2301,7 @@ def _dialog_pr_edit(pr_id: int):
                         budget_data=_budget,
                         app_url=_pr_link(pr_id, 'approve'),
                     )
-                st.cache_data.clear()
+                _load.clear()  # Targeted: only refresh lookups, not all app caches
                 st.rerun()
             else:
                 st.error(result['message'])
@@ -2461,7 +2461,7 @@ def _dialog_confirm_cancel(pr_id: int):
                 cc_emails=_cancel_cc,
                 app_url=_pr_link(pr_id, 'view'),
             )
-            st.cache_data.clear()
+            _load.clear()  # Targeted: only refresh lookups, not all app caches
             st.rerun()
         else:
             st.error("Cancel failed — PR may already be approved or cancelled.")

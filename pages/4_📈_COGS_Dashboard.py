@@ -414,9 +414,7 @@ def _render_portfolio():
 # ACTUAL COGS TAB — Per project
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_actual_cogs_tab(pid: int):
-    actual = get_cogs_actual(pid)
-    est    = get_active_estimate(pid)
+def _render_actual_cogs_tab(pid: int, actual: dict, est: dict):
 
     # ── Toolbar ──────────────────────────────────────────────────────────────
     ac1, ac2, ac3, ac4 = st.columns([2, 2, 2, 1])
@@ -506,9 +504,7 @@ def _render_actual_cogs_tab(pid: int):
 # VARIANCE TAB — Per project
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_variance_tab(pid: int):
-    actual = get_cogs_actual(pid)
-    est    = get_active_estimate(pid)
+def _render_variance_tab(pid: int, actual: dict, est: dict):
     cogs_rows = _build_cogs_rows(est, actual)
 
     # ── Toolbar ──────────────────────────────────────────────────────────────
@@ -602,7 +598,7 @@ def _render_variance_tab(pid: int):
 # BENCHMARKS TAB — Per project (or global)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_benchmark_tab(pid: int):
+def _render_benchmark_tab(pid: int, project_data: dict = None, actual_data: dict = None):
     bh1, bh2, bh3 = st.columns([3, 2, 1])
 
     bf_type     = bh1.selectbox("Filter by Type", ["All"] + [f"[{t['code']}] {t['name']}" for t in proj_types])
@@ -614,7 +610,7 @@ def _render_benchmark_tab(pid: int):
 
     if bh3.button("➕ Add", type="primary", use_container_width=True, key="btn_add_benchmark"):
         # Auto-populate from project data
-        auto_data = _compute_benchmark_data(pid)
+        auto_data = _compute_benchmark_data(pid, project_data=project_data, actual_data=actual_data)
         _dialog_benchmark(pid, auto_data=auto_data)
 
     bench_df = get_benchmarks_df(type_filter)
@@ -646,11 +642,11 @@ def _render_benchmark_tab(pid: int):
         st.info("No benchmarks yet.")
 
 
-def _compute_benchmark_data(pid: int) -> dict:
+def _compute_benchmark_data(pid: int, project_data: dict = None, actual_data: dict = None) -> dict:
     """Compute auto-fill data for benchmark dialog from project estimate + actual."""
     est    = get_active_estimate(pid)
-    actual = get_cogs_actual(pid)
-    proj   = get_project(pid)
+    actual = actual_data or get_cogs_actual(pid)
+    proj   = project_data or get_project(pid)
     data   = {}
 
     if proj:
@@ -692,15 +688,19 @@ else:
         st.error("Project not found.")
         st.stop()
 
+    # ── Fetch data once for all tabs (eliminates 3× duplicate queries) ──
+    _actual = get_cogs_actual(project_id)
+    _est    = get_active_estimate(project_id)
+
     tab_actual, tab_variance, tab_bench = st.tabs(
         ["📊 Actual COGS", "📉 Variance Analysis", "📚 Benchmarks"]
     )
 
     with tab_actual:
-        _render_actual_cogs_tab(project_id)
+        _render_actual_cogs_tab(project_id, _actual, _est)
 
     with tab_variance:
-        _render_variance_tab(project_id)
+        _render_variance_tab(project_id, _actual, _est)
 
     with tab_bench:
-        _render_benchmark_tab(project_id)
+        _render_benchmark_tab(project_id, project, _actual)

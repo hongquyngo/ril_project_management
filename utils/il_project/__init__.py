@@ -174,6 +174,10 @@ from .pr_queries import (
 
 # ── WBS Management (Phases, Tasks, Checklists, Comments, Media, Members) ────
 from .wbs_queries import (
+    # Bootstrap & Client-side helpers
+    bootstrap_wbs_data,
+    filter_tasks_client,
+    derive_my_tasks_client,
     # Phases
     get_phases_df,
     get_phase,
@@ -231,6 +235,12 @@ from .wbs_helpers import (
     fmt_completion,
     fmt_hours,
     comment_type_icon,
+    # Performance helpers
+    log_perf,
+    invalidate_wbs_cache,
+    invalidate_execution_cache,
+    invalidate_progress_cache,
+    render_attachments,
 )
 
 from .wbs_notify import (
@@ -246,6 +256,9 @@ from .wbs_notify import (
 
 # ── Execution Tracking (Issues, Risks, Change Orders, Progress, Quality) ────
 from .wbs_execution_queries import (
+    # Bootstrap
+    bootstrap_execution_data,
+    bootstrap_progress_data,
     # Issues
     get_issues_df, get_issue, generate_issue_code,
     create_issue, update_issue, soft_delete_issue,
@@ -339,6 +352,8 @@ __all__ = [
     'get_tasks_df', 'get_my_tasks_df', 'get_task',
     'create_task', 'update_task', 'quick_update_task', 'soft_delete_task',
     'generate_wbs_code',
+    # ── WBS Bootstrap & Helpers ──
+    'bootstrap_wbs_data', 'filter_tasks_client', 'derive_my_tasks_client',
     # ── Checklists ──
     'get_checklists', 'create_checklist_item', 'toggle_checklist_item', 'delete_checklist_item',
     # ── Comments ──
@@ -355,6 +370,8 @@ __all__ = [
     'PRIORITY_OPTIONS', 'PRIORITY_ICONS', 'MEMBER_ROLES', 'MEMBER_ROLE_LABELS',
     'DEPENDENCY_TYPES', 'DEPENDENCY_LABELS', 'DEFAULT_PHASE_TEMPLATES',
     'fmt_status', 'fmt_priority', 'fmt_completion', 'fmt_hours', 'comment_type_icon',
+    'log_perf', 'invalidate_wbs_cache', 'invalidate_execution_cache',
+    'invalidate_progress_cache', 'render_attachments',
     # ── WBS Email Notifications ──
     'notify_task_assigned', 'notify_member_added',
     'notify_task_blocked', 'notify_task_completed',
@@ -363,6 +380,8 @@ __all__ = [
     # ── Issues ──
     'get_issues_df', 'get_issue', 'generate_issue_code',
     'create_issue', 'update_issue', 'soft_delete_issue',
+    # ── Execution Bootstrap ──
+    'bootstrap_execution_data', 'bootstrap_progress_data',
     # ── Risks ──
     'get_risks_df', 'get_risk', 'generate_risk_code', 'calc_risk_score',
     'create_risk', 'update_risk', 'soft_delete_risk', 'get_risk_matrix_summary',

@@ -296,7 +296,7 @@ def render_po_created_success(pr_id: int) -> bool:
                   key=f"_po_done_{pr_id}"):
         st.session_state.pop(state_key, None)
         cleanup_pdf_state(pr_id)
-        st.cache_data.clear()
+        # Note: no st.cache_data.clear() needed — fragments re-fetch their own data on rerun
         st.rerun()
 
     return True

@@ -226,7 +226,7 @@ def _dialog_create_project():
         try:
             new_id = create_project(data, user_id)
             st.success(f"✅ Project created! ID: {new_id}")
-            st.cache_data.clear()
+            _load_lookups.clear()  # Targeted: only projects/employees/companies
             st.session_state["open_view_pid"] = new_id
             st.rerun()
         except Exception as e:
@@ -251,7 +251,7 @@ def _dialog_edit_project(project_id: int):
         try:
             update_project(project_id, data, user_id)
             st.success("✅ Project updated!")
-            st.cache_data.clear()
+            _load_lookups.clear()  # Targeted: refresh project list
             st.rerun()
         except Exception as e:
             st.error(f"Save failed: {e}")
@@ -492,7 +492,7 @@ if selected_pid:
             if ab3.button("🗑 Delete", use_container_width=True):
                 if soft_delete_project(selected_pid, user_id):
                     st.success("Project deleted.")
-                    st.cache_data.clear()
+                    _load_lookups.clear()  # Targeted: refresh project list
                     st.rerun()
         if ab4.button("✖ Deselect", use_container_width=True):
             st.session_state["_tbl_key"] = st.session_state.get("_tbl_key", 0) + 1
