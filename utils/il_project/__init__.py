@@ -235,6 +235,28 @@ from .wbs_notify import (
     build_team_deep_link,
 )
 
+# ── Execution Tracking (Issues, Risks, Change Orders, Progress, Quality) ────
+from .wbs_execution_queries import (
+    # Issues
+    get_issues_df, get_issue, generate_issue_code,
+    create_issue, update_issue, soft_delete_issue,
+    # Risks
+    get_risks_df, get_risk, generate_risk_code, calc_risk_score,
+    create_risk, update_risk, soft_delete_risk, get_risk_matrix_summary,
+    # Change Orders
+    get_change_orders_df, get_change_order, generate_co_number,
+    create_change_order, update_change_order, get_co_impact_summary,
+    # Progress Reports
+    get_progress_reports_df, get_progress_report, generate_report_number,
+    create_progress_report, update_progress_report,
+    # Quality Checklists
+    get_quality_checklists_df, get_quality_checklist,
+    create_quality_checklist, update_quality_checklist, soft_delete_quality_checklist,
+    # Attachments (Pattern A: junction → medias)
+    get_entity_medias, link_media, unlink_media,
+    upload_and_attach, get_attachment_url,
+)
+
 __all__ = [
     # ── Lookups ──
     'get_project_types', 'get_employees', 'get_companies', 'get_currencies', 'generate_project_code',
@@ -328,4 +350,22 @@ __all__ = [
     'notify_task_blocked', 'notify_task_completed',
     'notify_on_task_status_change', 'notify_on_task_assign',
     'build_wbs_deep_link', 'build_team_deep_link',
+    # ── Issues ──
+    'get_issues_df', 'get_issue', 'generate_issue_code',
+    'create_issue', 'update_issue', 'soft_delete_issue',
+    # ── Risks ──
+    'get_risks_df', 'get_risk', 'generate_risk_code', 'calc_risk_score',
+    'create_risk', 'update_risk', 'soft_delete_risk', 'get_risk_matrix_summary',
+    # ── Change Orders ──
+    'get_change_orders_df', 'get_change_order', 'generate_co_number',
+    'create_change_order', 'update_change_order', 'get_co_impact_summary',
+    # ── Progress Reports ──
+    'get_progress_reports_df', 'get_progress_report', 'generate_report_number',
+    'create_progress_report', 'update_progress_report',
+    # ── Quality Checklists ──
+    'get_quality_checklists_df', 'get_quality_checklist',
+    'create_quality_checklist', 'update_quality_checklist', 'soft_delete_quality_checklist',
+    # ── Attachments (Pattern A) ──
+    'get_entity_medias', 'link_media', 'unlink_media',
+    'upload_and_attach', 'get_attachment_url',
 ]
