@@ -34,8 +34,6 @@ from .queries import (
     update_expense,
     approve_expense,
     soft_delete_expense,
-    update_expense_attachment,
-    update_labor_attachment,
     # Pre-sales
     get_presales_costs_df,
     create_presales_cost,
@@ -66,11 +64,22 @@ from .queries import (
     delete_estimate_line_item,
     get_costbook_products_for_import,
     get_active_costbooks,
-    # Estimate attachments
-    update_line_item_attachment,
-    create_estimate_attachment,
-    get_estimate_attachments,
-    delete_estimate_attachment,
+    # Estimate attachments (Pattern A: junction → medias)
+    create_estimate_media,
+    get_estimate_medias,
+    delete_estimate_media,
+    # Estimate line item attachments (Pattern A)
+    create_line_item_media,
+    get_line_item_medias,
+    delete_line_item_media,
+    # Expense attachments (Pattern A — junction table existed in DDL)
+    create_expense_media,
+    get_expense_medias,
+    delete_expense_media,
+    # Labor log attachments (Pattern A — junction table existed in DDL)
+    create_labor_media,
+    get_labor_medias,
+    delete_labor_media,
 )
 
 from .helpers import (
@@ -268,7 +277,6 @@ __all__ = [
     'get_labor_logs_df', 'create_labor_log', 'update_labor_log', 'approve_labor_log', 'soft_delete_labor_log',
     # ── Expenses ──
     'get_expenses_df', 'create_expense', 'update_expense', 'approve_expense', 'soft_delete_expense',
-    'update_expense_attachment', 'update_labor_attachment',
     # ── Pre-sales ──
     'get_presales_costs_df', 'create_presales_cost', 'bulk_update_presales_allocation',
     # ── COGS Actual ──
@@ -284,9 +292,11 @@ __all__ = [
     # ── Estimate Line Items ──
     'get_estimate_line_items', 'create_estimate_line_item', 'delete_estimate_line_item',
     'get_costbook_products_for_import', 'get_active_costbooks',
-    # ── Estimate Attachments ──
-    'update_line_item_attachment', 'create_estimate_attachment',
-    'get_estimate_attachments', 'delete_estimate_attachment',
+    # ── Attachments (Pattern A: junction → medias) ──
+    'create_estimate_media', 'get_estimate_medias', 'delete_estimate_media',
+    'create_line_item_media', 'get_line_item_medias', 'delete_line_item_media',
+    'create_expense_media', 'get_expense_medias', 'delete_expense_media',
+    'create_labor_media', 'get_labor_medias', 'delete_labor_media',
     # ── Helpers ──
     'calculate_estimate', 'get_go_no_go', 'fmt_vnd', 'fmt_percent', 'pct_change',
     'COGS_LABELS', 'PHASE_LABELS', 'STATUS_COLORS',

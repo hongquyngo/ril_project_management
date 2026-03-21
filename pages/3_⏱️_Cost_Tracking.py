@@ -22,7 +22,8 @@ from utils.il_project import (
     get_expenses_df, create_expense, update_expense, approve_expense, soft_delete_expense,
     get_presales_costs_df, create_presales_cost, bulk_update_presales_allocation,
     get_employees, get_currencies,
-    update_expense_attachment, update_labor_attachment,
+    create_expense_media, get_expense_medias,
+    create_labor_media,
     fmt_vnd, PHASE_LABELS,
 )
 from utils.il_project.helpers import (
@@ -200,7 +201,7 @@ def _dialog_add_labor(pid: int):
                 if s3:
                     ok, s3_key = s3.upload_labor_attachment(uploaded_file.read(), uploaded_file.name, pid, log_id)
                     if ok:
-                        update_labor_attachment(log_id, s3_key, uploaded_file.name, user_id)
+                        create_labor_media(log_id, s3_key, uploaded_file.name, created_by=user_id)
                     else:
                         st.warning(f"Entry saved but file upload failed: {s3_key}")
             st.success("✅ Labor entry added!")
@@ -329,7 +330,7 @@ def _dialog_add_expense(pid: int):
                 if s3:
                     ok, s3_key = s3.upload_expense_attachment(uploaded_file.read(), uploaded_file.name, pid, expense_id)
                     if ok:
-                        update_expense_attachment(expense_id, s3_key, uploaded_file.name, user_id)
+                        create_expense_media(expense_id, s3_key, uploaded_file.name, created_by=user_id)
                     else:
                         st.warning(f"Expense saved but file upload failed: {s3_key}")
             st.success("✅ Expense added!")
@@ -389,10 +390,11 @@ def _dialog_edit_expense(exp: dict, pid: int):
         exp_desc    = st.text_input("Description", value=exp.get('description') or '')
 
         st.divider()
-        cur_attachment = exp.get('attachment_filename')
-        if cur_attachment:
-            st.info(f"📎 Current attachment: **{cur_attachment}**")
-        new_file = st.file_uploader("📎 Replace attachment (leave empty to keep current)",
+        cur_medias = get_expense_medias(exp_id)
+        if cur_medias:
+            st.info(f"📎 Current: **{cur_medias[0]['filename']}**" +
+                    (f" (+{len(cur_medias)-1} more)" if len(cur_medias) > 1 else ""))
+        new_file = st.file_uploader("📎 Add attachment (existing files kept)",
                                      type=["pdf", "jpg", "jpeg", "png", "xlsx"])
 
         col_save, col_del = st.columns(2)
@@ -412,7 +414,7 @@ def _dialog_edit_expense(exp: dict, pid: int):
                 if s3:
                     ok2, s3_key = s3.upload_expense_attachment(new_file.read(), new_file.name, pid, exp_id)
                     if ok2:
-                        update_expense_attachment(exp_id, s3_key, new_file.name, user_id)
+                        create_expense_media(exp_id, s3_key, new_file.name, created_by=user_id)
             st.success("Updated!")
             st.rerun()
         else:
