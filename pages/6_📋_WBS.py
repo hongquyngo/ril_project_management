@@ -330,7 +330,7 @@ with tab_team:
             },
         )
 
-    st.page_link("pages/IL_7_👥_Team.py", label="👥 Manage Team & Resources →", icon="👥")
+    st.page_link("pages/7_👥_WBS_Team.py", label="👥 Manage Team & Resources →", icon="👥")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
