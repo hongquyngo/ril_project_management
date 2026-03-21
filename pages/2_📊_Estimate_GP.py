@@ -75,6 +75,12 @@ cond_thr = float(pt.get('gp_conditional_threshold', 18))
 if "_est_items" not in st.session_state:
     st.session_state["_est_items"] = []
 
+# Track project_id — clear line items when user switches project
+if st.session_state.get("_est_project_id") != project_id:
+    st.session_state["_est_items"] = []
+    st.session_state["_est_project_id"] = project_id
+    st.session_state["_prefill_loaded"] = False
+
 def _sanitize_item(item: dict) -> dict:
     """Clean pandas NaN/NaT → None so MySQL doesn't choke.
     Called when loading items from DataFrame (active estimate prefill)
