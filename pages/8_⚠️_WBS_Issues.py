@@ -1,6 +1,12 @@
 # pages/IL_8_⚠️_Issues.py
 """
 Issues & Risks — Track project issues, risk register, change orders.
+
+v2.0 — Performance optimization:
+  - Bootstrap: 4 cached queries replace individual per-tab queries
+  - Targeted cache invalidation: invalidate_execution_cache()
+  - Shared render_attachments() from wbs_helpers (DRY)
+
 UX: @st.dialog cho CRUD | tabs cho Issues / Risks / Change Orders
 """
 
@@ -16,6 +22,8 @@ from utils.il_project import (
 )
 from utils.il_project.wbs_queries import get_tasks_df
 from utils.il_project.wbs_execution_queries import (
+    # Bootstrap
+    bootstrap_execution_data,
     # Issues
     get_issues_df, get_issue, generate_issue_code,
     create_issue, update_issue, soft_delete_issue,
@@ -26,8 +34,11 @@ from utils.il_project.wbs_execution_queries import (
     # Change Orders
     get_change_orders_df, get_change_order, generate_co_number,
     create_change_order, update_change_order, get_co_impact_summary,
-    # Attachments (Pattern A: junction → medias)
+    # Attachments
     get_entity_medias, upload_and_attach, unlink_media, get_attachment_url,
+)
+from utils.il_project.wbs_helpers import (
+    invalidate_execution_cache, render_attachments,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,7 +50,7 @@ user_id     = str(auth.get_user_id())
 employee_id = st.session_state.get('employee_id')
 is_admin    = auth.is_admin()
 
-# ── Lookups ───────────────────────────────────────────────────────────────────
+# ── Cached lookups ────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load_lookups():
     return get_employees(), get_currencies()
@@ -47,6 +58,15 @@ def _load_lookups():
 employees, currencies = _load_lookups()
 emp_map = {e['id']: e['full_name'] for e in employees}
 cur_map = {c['id']: c['code'] for c in currencies}
+
+# ── Bootstrap cache ───────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_exec_data(project_id: int, _v: int = 0):
+    return bootstrap_execution_data(project_id)
+
+def _get_exec(project_id: int) -> dict:
+    v = st.session_state.get(f'_exec_v_{project_id}', 0)
+    return _cached_exec_data(project_id, _v=v)
 
 ISSUE_CATEGORIES = ['TECHNICAL', 'COMMERCIAL', 'LOGISTICS', 'RESOURCE', 'CUSTOMER', 'VENDOR', 'OTHER']
 ISSUE_SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
@@ -76,45 +96,18 @@ with st.sidebar:
     selected_project_id = int(proj_df.iloc[proj_idx]['project_id'])
     proj_info = get_project(selected_project_id)
 
+# ── Load bootstrap data (4 queries, cached) ──
+exec_data = _get_exec(selected_project_id)
+if not exec_data['ok']:
+    st.error(f"⚠️ {exec_data['error']}")
+    st.stop()
+
 if proj_info:
     c1, c2, c3 = st.columns(3)
     c1.metric("Project", proj_info['project_code'])
     c2.metric("Status", proj_info['status'])
     c3.metric("PM", proj_info.get('pm_name', '—'))
     st.divider()
-
-# ── Attachment helper (Pattern A: multi-file via junction → medias) ────────────
-def _render_attachments(entity_type: str, entity_id: int):
-    """Render file list + upload. Call inside View dialog, OUTSIDE st.form."""
-    files = get_entity_medias(entity_type, entity_id)
-
-    if files:
-        st.markdown(f"**📎 Attachments ({len(files)})**")
-        for f in files:
-            fc1, fc2 = st.columns([5, 1])
-            url = get_attachment_url(f['s3_key'])
-            label = f['file_name'] or 'file'
-            if url:
-                fc1.markdown(f"📄 [{label}]({url})")
-            else:
-                fc1.caption(f"📄 {label}")
-            if fc2.button("🗑", key=f"_rm_{entity_type}_{f['junction_id']}"):
-                unlink_media(entity_type, f['junction_id'])
-                st.rerun()
-
-    uploaded = st.file_uploader("Attach file", type=['pdf', 'png', 'jpg', 'jpeg', 'xlsx', 'docx'],
-                                 key=f"_upload_{entity_type}_{entity_id}")
-    if uploaded:
-        desc = st.text_input("Description (optional)", key=f"_desc_{entity_type}_{entity_id}")
-        if st.button("📤 Upload", key=f"_do_upload_{entity_type}_{entity_id}"):
-            ok = upload_and_attach(entity_type, entity_id, selected_project_id,
-                                   uploaded.getvalue(), uploaded.name,
-                                   description=desc.strip() or None, created_by=user_id)
-            if ok:
-                st.success(f"✅ Attached: {uploaded.name}")
-                st.rerun()
-            else:
-                st.error("Upload failed.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -125,18 +118,17 @@ tab_issues, tab_risks, tab_co = st.tabs(["🔧 Issues", "⚠️ Risks", "📝 Ch
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1: ISSUES
+# TAB 1: ISSUES (from bootstrap cache)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_issues:
-    iss_df = get_issues_df(selected_project_id)
+    iss_df = exec_data['issues']
 
     ia1, _ = st.columns([1, 6])
     if ia1.button("➕ Report Issue", type="primary", key="btn_iss"):
         st.session_state["open_create_issue"] = True
 
     if not iss_df.empty:
-        # KPIs
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total", len(iss_df))
         k2.metric("Open", len(iss_df[iss_df['status'] == 'OPEN']))
@@ -176,18 +168,18 @@ with tab_issues:
                 st.rerun()
             if ab3.button("🗑 Delete", key="iss_del"):
                 soft_delete_issue(sel_iss_id, user_id)
-                st.cache_data.clear()
+                invalidate_execution_cache(selected_project_id)
                 st.rerun()
     else:
         st.info("No issues reported.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: RISKS
+# TAB 2: RISKS (from bootstrap cache)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_risks:
-    risk_df = get_risks_df(selected_project_id)
+    risk_df = exec_data['risks']
 
     ra1, _ = st.columns([1, 6])
     if ra1.button("➕ Add Risk", type="primary", key="btn_risk"):
@@ -241,19 +233,19 @@ with tab_risks:
                 st.rerun()
             if rb3.button("🗑 Delete", key="risk_del"):
                 soft_delete_risk(sel_risk_id, user_id)
-                st.cache_data.clear()
+                invalidate_execution_cache(selected_project_id)
                 st.rerun()
     else:
         st.info("No risks identified.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3: CHANGE ORDERS
+# TAB 3: CHANGE ORDERS (from bootstrap cache)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_co:
-    co_df = get_change_orders_df(selected_project_id)
-    co_summary = get_co_impact_summary(selected_project_id)
+    co_df = exec_data['change_orders']
+    co_summary = exec_data['co_summary']
 
     ca1, _ = st.columns([1, 6])
     if ca1.button("➕ New Change Order", type="primary", key="btn_co"):
@@ -324,7 +316,6 @@ def _dialog_create_issue():
         due = d2.date_input("Due Date", value=None)
         impact = st.text_input("Impact Description")
 
-        # Related task (optional)
         task_df = get_tasks_df(selected_project_id)
         task_opts = ["(None)"] + [f"[{r['wbs_code']}] {r['task_name']}" for _, r in task_df.iterrows()] if not task_df.empty else ["(None)"]
         task_sel = st.selectbox("Related Task", task_opts)
@@ -351,7 +342,7 @@ def _dialog_create_issue():
             'related_task_id': task_id,
         }, user_id)
         st.success(f"✅ Issue created: ISS-{new_id}")
-        st.cache_data.clear()
+        invalidate_execution_cache(selected_project_id)
         st.rerun()
 
 
@@ -384,7 +375,7 @@ def _dialog_view_issue(issue_id: int):
     if iss.get('resolution'):
         st.success(f"**Resolution:** {iss['resolution']}")
 
-    _render_attachments('issue', issue_id)
+    render_attachments('issue', issue_id, selected_project_id, user_id)
 
 
 @st.dialog("✏️ Edit Issue", width="large")
@@ -432,7 +423,7 @@ def _dialog_edit_issue(issue_id: int):
             'related_task_id': iss.get('related_task_id'),
         }, user_id)
         st.success("✅ Issue updated!")
-        st.cache_data.clear()
+        invalidate_execution_cache(selected_project_id)
         st.rerun()
 
 
@@ -479,7 +470,7 @@ def _dialog_create_risk():
             'owner_id': owner_id, 'identified_date': date.today(), 'review_date': review,
         }, user_id)
         st.success("✅ Risk added!")
-        st.cache_data.clear()
+        invalidate_execution_cache(selected_project_id)
         st.rerun()
 
 
@@ -503,7 +494,7 @@ def _dialog_view_risk(risk_id: int):
     if r.get('contingency_plan'):
         st.warning(f"**Contingency:** {r['contingency_plan']}")
 
-    _render_attachments('risk', risk_id)
+    render_attachments('risk', risk_id, selected_project_id, user_id)
 
 
 @st.dialog("✏️ Edit Risk", width="large")
@@ -544,7 +535,7 @@ def _dialog_edit_risk(risk_id: int):
             'owner_id': owner_id, 'review_date': review,
         }, user_id)
         st.success("✅ Risk updated!")
-        st.cache_data.clear()
+        invalidate_execution_cache(selected_project_id)
         st.rerun()
 
 
@@ -594,7 +585,7 @@ def _dialog_create_co():
             'customer_approval_ref': None,
         }, user_id)
         st.success("✅ Change Order created!")
-        st.cache_data.clear()
+        invalidate_execution_cache(selected_project_id)
         st.rerun()
 
 
@@ -626,7 +617,7 @@ def _dialog_view_co(co_id: int):
     if co.get('reason'):
         st.info(f"**Reason:** {co['reason']}")
 
-    _render_attachments('change_order', co_id)
+    render_attachments('change_order', co_id, selected_project_id, user_id)
 
 
 @st.dialog("✏️ Edit Change Order", width="large")
@@ -677,7 +668,7 @@ def _dialog_edit_co(co_id: int):
             'customer_approval_ref': cust_ref.strip() or None,
         }, user_id)
         st.success("✅ Change Order updated!")
-        st.cache_data.clear()
+        invalidate_execution_cache(selected_project_id)
         st.rerun()
 
 

@@ -1,6 +1,12 @@
 # pages/IL_9_📊_Progress.py
 """
 Progress Reports & Quality Checklists.
+
+v2.0 — Performance optimization:
+  - Bootstrap: 2 cached queries replace individual per-tab queries
+  - Targeted cache invalidation: invalidate_progress_cache()
+  - Shared render_attachments() from wbs_helpers (DRY)
+
 UX: @st.dialog cho CRUD | tabs cho Reports / Quality
 """
 
@@ -15,14 +21,19 @@ from utils.il_project import (
     fmt_vnd, STATUS_COLORS,
 )
 from utils.il_project.wbs_execution_queries import (
+    # Bootstrap
+    bootstrap_progress_data,
     # Progress Reports
     get_progress_reports_df, get_progress_report, generate_report_number,
     create_progress_report, update_progress_report,
     # Quality Checklists
     get_quality_checklists_df, get_quality_checklist,
     create_quality_checklist, update_quality_checklist, soft_delete_quality_checklist,
-    # Attachments (Pattern A: junction → medias)
+    # Attachments
     get_entity_medias, upload_and_attach, unlink_media, get_attachment_url,
+)
+from utils.il_project.wbs_helpers import (
+    invalidate_progress_cache, render_attachments,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,13 +45,22 @@ user_id     = str(auth.get_user_id())
 employee_id = st.session_state.get('employee_id')
 is_admin    = auth.is_admin()
 
-# ── Lookups ───────────────────────────────────────────────────────────────────
+# ── Cached lookups ────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load_employees():
     return get_employees()
 
 employees = _load_employees()
 emp_map = {e['id']: e['full_name'] for e in employees}
+
+# ── Bootstrap cache ───────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_progress_data(project_id: int, _v: int = 0):
+    return bootstrap_progress_data(project_id)
+
+def _get_prog(project_id: int) -> dict:
+    v = st.session_state.get(f'_prog_v_{project_id}', 0)
+    return _cached_progress_data(project_id, _v=v)
 
 REPORT_TYPES = ['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'MILESTONE', 'AD_HOC']
 RAG_STATUSES = ['ON_TRACK', 'AT_RISK', 'DELAYED', 'AHEAD', 'CRITICAL']
@@ -70,45 +90,18 @@ with st.sidebar:
     selected_project_id = int(proj_df.iloc[proj_idx]['project_id'])
     proj_info = get_project(selected_project_id)
 
+# ── Load bootstrap data (2 queries, cached) ──
+prog = _get_prog(selected_project_id)
+if not prog['ok']:
+    st.error(f"⚠️ {prog['error']}")
+    st.stop()
+
 if proj_info:
     c1, c2, c3 = st.columns(3)
     c1.metric("Project", proj_info['project_code'])
     c2.metric("Status", proj_info['status'])
     c3.metric("PM", proj_info.get('pm_name', '—'))
     st.divider()
-
-# ── Attachment helper (Pattern A: multi-file via junction → medias) ────────────
-def _render_attachments(entity_type: str, entity_id: int):
-    """Render file list + upload. Call inside View dialog, OUTSIDE st.form."""
-    files = get_entity_medias(entity_type, entity_id)
-
-    if files:
-        st.markdown(f"**📎 Attachments ({len(files)})**")
-        for f in files:
-            fc1, fc2 = st.columns([5, 1])
-            url = get_attachment_url(f['s3_key'])
-            label = f['file_name'] or 'file'
-            if url:
-                fc1.markdown(f"📄 [{label}]({url})")
-            else:
-                fc1.caption(f"📄 {label}")
-            if fc2.button("🗑", key=f"_rm_{entity_type}_{f['junction_id']}"):
-                unlink_media(entity_type, f['junction_id'])
-                st.rerun()
-
-    uploaded = st.file_uploader("Attach file", type=['pdf', 'png', 'jpg', 'jpeg', 'xlsx', 'docx'],
-                                 key=f"_upload_{entity_type}_{entity_id}")
-    if uploaded:
-        desc = st.text_input("Description (optional)", key=f"_desc_{entity_type}_{entity_id}")
-        if st.button("📤 Upload", key=f"_do_upload_{entity_type}_{entity_id}"):
-            ok = upload_and_attach(entity_type, entity_id, selected_project_id,
-                                   uploaded.getvalue(), uploaded.name,
-                                   description=desc.strip() or None, created_by=user_id)
-            if ok:
-                st.success(f"✅ Attached: {uploaded.name}")
-                st.rerun()
-            else:
-                st.error("Upload failed.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,11 +112,11 @@ tab_reports, tab_quality = st.tabs(["📊 Progress Reports", "✅ Quality Checkl
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1: PROGRESS REPORTS
+# TAB 1: PROGRESS REPORTS (from bootstrap cache)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_reports:
-    rpt_df = get_progress_reports_df(selected_project_id)
+    rpt_df = prog['reports']
 
     ra1, _ = st.columns([1, 6])
     if ra1.button("➕ New Report", type="primary", key="btn_rpt"):
@@ -170,18 +163,17 @@ with tab_reports:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: QUALITY CHECKLISTS
+# TAB 2: QUALITY CHECKLISTS (from bootstrap cache)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_quality:
-    qc_df = get_quality_checklists_df(selected_project_id)
+    qc_df = prog['quality']
 
     qa1, _ = st.columns([1, 6])
     if qa1.button("➕ New Checklist", type="primary", key="btn_qc"):
         st.session_state["open_create_qc"] = True
 
     if not qc_df.empty:
-        # KPIs
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total", len(qc_df))
         k2.metric("Passed", len(qc_df[qc_df['status'] == 'PASSED']))
@@ -227,7 +219,7 @@ with tab_quality:
                 st.rerun()
             if qb3.button("🗑 Delete", key="qc_del"):
                 soft_delete_quality_checklist(sel_qc_id, user_id)
-                st.cache_data.clear()
+                invalidate_progress_cache(selected_project_id)
                 st.rerun()
     else:
         st.info("No quality checklists yet.")
@@ -285,7 +277,7 @@ def _dialog_create_report():
             'prepared_by': employee_id,
         }, user_id)
         st.success(f"✅ Report created: RPT-{new_id}")
-        st.cache_data.clear()
+        invalidate_progress_cache(selected_project_id)
         st.rerun()
 
 
@@ -319,7 +311,7 @@ def _dialog_view_report(report_id: int):
     if rpt.get('blockers'):
         st.warning(f"**Blockers:**\n{rpt['blockers']}")
 
-    _render_attachments('progress_report', report_id)
+    render_attachments('progress_report', report_id, selected_project_id, user_id)
 
 
 @st.dialog("✏️ Edit Report", width="large")
@@ -353,7 +345,6 @@ def _dialog_edit_report(report_id: int):
         planned = st.text_area("Planned Next", value=rpt.get('planned_next_period') or '', height=80)
         blockers = st.text_area("Blockers", value=rpt.get('blockers') or '', height=60)
 
-        # Reviewer
         emp_opts = ["(None)"] + [e['full_name'] for e in employees]
         rev_idx = next((i + 1 for i, e in enumerate(employees) if e['id'] == rpt.get('reviewed_by')), 0)
         reviewer = st.selectbox("Reviewed By", emp_opts, index=rev_idx)
@@ -381,7 +372,7 @@ def _dialog_edit_report(report_id: int):
             'reviewed_by': reviewer_id, 'status': rpt_status,
         }, user_id)
         st.success("✅ Report updated!")
-        st.cache_data.clear()
+        invalidate_progress_cache(selected_project_id)
         st.rerun()
 
 
@@ -403,12 +394,10 @@ def _dialog_create_qc():
         location = d2.text_input("Location")
         customer_witness = d3.text_input("Customer Witness")
 
-        # Inspector
         emp_opts = ["(Unassigned)"] + [e['full_name'] for e in employees]
         inspector = st.selectbox("Inspector", emp_opts)
         inspector_id = employees[emp_opts.index(inspector) - 1]['id'] if inspector != "(Unassigned)" else None
 
-        # Milestone link
         ms_opts = ["(None)"]
         ms_ids = [None]
         if not ms_df.empty:
@@ -447,7 +436,7 @@ def _dialog_create_qc():
             'remarks': None, 'next_action': None, 'retest_date': None,
         }, user_id)
         st.success("✅ Quality checklist created!")
-        st.cache_data.clear()
+        invalidate_progress_cache(selected_project_id)
         st.rerun()
 
 
@@ -488,7 +477,7 @@ def _dialog_view_qc(qc_id: int):
     if qc.get('signed_off_by_name'):
         st.success(f"**Signed off by:** {qc['signed_off_by_name']} on {qc.get('signed_off_date', '—')}")
 
-    _render_attachments('quality_checklist', qc_id)
+    render_attachments('quality_checklist', qc_id, selected_project_id, user_id)
 
 
 @st.dialog("✏️ Edit Quality Checklist", width="large")
@@ -556,7 +545,7 @@ def _dialog_edit_qc(qc_id: int):
             'customer_signed_off': 1 if cust_signed else 0,
         }, user_id)
         st.success("✅ Quality checklist updated!")
-        st.cache_data.clear()
+        invalidate_progress_cache(selected_project_id)
         st.rerun()
 
 

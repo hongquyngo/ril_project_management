@@ -4,6 +4,11 @@ Database layer for IL Project Execution Tracking:
   - Issues, Risks, Change Orders, Progress Reports, Quality Checklists
   - Shared media CRUD via junction → medias (Pattern A)
 
+v2.0 — Performance optimization:
+  - Added bootstrap_execution_data() — Issues + Risks + CO + summary (4 queries, cached)
+  - Added bootstrap_progress_data() — Reports + QC (2 queries, cached)
+  - Added @log_perf decorator to all list queries
+
 Attachment pattern:
   1. Upload file to S3 → get s3_key
   2. INSERT into medias(name, path) → get media_id
@@ -15,7 +20,9 @@ import logging
 from typing import Dict, List, Optional
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, DatabaseError
 from ..db import execute_query, execute_query_df, execute_update, get_transaction
+from .wbs_helpers import log_perf
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +30,69 @@ logger = logging.getLogger(__name__)
 def _get_engine():
     from ..db import get_db_engine
     return get_db_engine()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP — Load all execution data for a project in minimal queries
+# ══════════════════════════════════════════════════════════════════════════════
+
+@log_perf
+def bootstrap_execution_data(project_id: int) -> Dict:
+    """
+    Load Issues + Risks + Change Orders + CO summary for a project.
+    Cache at call site with @st.cache_data(ttl=60).
+
+    Pipeline (4 queries, ~300-500ms total):
+      1. get_issues_df()           — all issues
+      2. get_risks_df()            — all risks
+      3. get_change_orders_df()    — all COs
+      4. get_co_impact_summary()   — aggregated CO impact
+
+    Replaces 4 individual queries per page 8 load.
+    """
+    try:
+        return {
+            'issues': get_issues_df(project_id),
+            'risks': get_risks_df(project_id),
+            'change_orders': get_change_orders_df(project_id),
+            'co_summary': get_co_impact_summary(project_id),
+            'ok': True,
+            'error': None,
+        }
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"bootstrap_execution_data connection error: {e}")
+        return {
+            'issues': pd.DataFrame(), 'risks': pd.DataFrame(),
+            'change_orders': pd.DataFrame(), 'co_summary': {},
+            'ok': False,
+            'error': 'Cannot connect to database. Please check your network/VPN connection.',
+        }
+
+
+@log_perf
+def bootstrap_progress_data(project_id: int) -> Dict:
+    """
+    Load Progress Reports + Quality Checklists for a project.
+    Cache at call site with @st.cache_data(ttl=60).
+
+    Pipeline (2 queries):
+      1. get_progress_reports_df()
+      2. get_quality_checklists_df()
+    """
+    try:
+        return {
+            'reports': get_progress_reports_df(project_id),
+            'quality': get_quality_checklists_df(project_id),
+            'ok': True,
+            'error': None,
+        }
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"bootstrap_progress_data connection error: {e}")
+        return {
+            'reports': pd.DataFrame(), 'quality': pd.DataFrame(),
+            'ok': False,
+            'error': 'Cannot connect to database. Please check your network/VPN connection.',
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -154,6 +224,7 @@ def get_attachment_url(s3_key: str) -> Optional[str]:
 # ISSUES
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_issues_df(
     project_id: int,
     status: Optional[str] = None,
@@ -274,6 +345,7 @@ def calc_risk_score(probability: str, impact: str) -> int:
     return PROBABILITY_VALUES.get(probability, 3) * IMPACT_VALUES.get(impact, 3)
 
 
+@log_perf
 def get_risks_df(project_id: int, status: Optional[str] = None) -> pd.DataFrame:
     sql = """
         SELECT
@@ -373,6 +445,7 @@ def get_risk_matrix_summary(project_id: int) -> List[Dict]:
 # CHANGE ORDERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_change_orders_df(project_id: int, status: Optional[str] = None) -> pd.DataFrame:
     sql = """
         SELECT
@@ -483,6 +556,7 @@ def get_co_impact_summary(project_id: int) -> Dict:
 # PROGRESS REPORTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_progress_reports_df(project_id: int) -> pd.DataFrame:
     return execute_query_df("""
         SELECT
@@ -581,6 +655,7 @@ def update_progress_report(report_id: int, data: Dict, modified_by: str) -> bool
 # QUALITY CHECKLISTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_quality_checklists_df(project_id: int, checklist_type: Optional[str] = None) -> pd.DataFrame:
     sql = """
         SELECT

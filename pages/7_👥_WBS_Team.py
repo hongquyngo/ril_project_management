@@ -1,13 +1,12 @@
 # pages/IL_7_👥_Team.py
 """
 Team & Resource Management — Project members, allocation, workload.
-UX: @st.dialog cho CRUD | tabs cho Team Roster / Workload | session state cho dialog chaining
 
-Supplements the basic Team tab in IL_6_WBS with:
-  - Full member edit/remove (not just add)
-  - Workload view across ALL projects for any employee
-  - Allocation summary metrics (total %, budget estimate)
-  - Daily rate management
+v2.0 — Performance optimization:
+  - Bootstrap: members from shared WBS cache (0 extra queries when navigating from page 6)
+  - Targeted cache invalidation: invalidate_wbs_cache() replaces st.cache_data.clear()
+
+UX: @st.dialog cho CRUD | tabs cho Team Roster / Workload | session state cho dialog chaining
 """
 
 import streamlit as st
@@ -20,12 +19,14 @@ from utils.il_project import (
     get_projects_df, get_project, get_employees, fmt_vnd, STATUS_COLORS,
 )
 from utils.il_project.wbs_queries import (
+    bootstrap_wbs_data,
     get_project_members_df, get_member,
     create_member, update_member, remove_member,
     get_member_workload,
 )
 from utils.il_project.wbs_helpers import (
     MEMBER_ROLES, MEMBER_ROLE_LABELS,
+    invalidate_wbs_cache,
 )
 from utils.il_project.helpers import DEFAULT_RATES_BY_LEVEL
 from utils.il_project.wbs_notify import notify_member_added
@@ -40,7 +41,7 @@ employee_id = st.session_state.get('employee_id')
 is_admin    = auth.is_admin()
 
 
-# ── Lookups (cached) ──────────────────────────────────────────────────────────
+# ── Cached lookups ────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load_employees():
     return get_employees()
@@ -49,12 +50,20 @@ def _load_employees():
 def _load_projects():
     return get_projects_df(status=None)
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_wbs_data(project_id: int, _v: int = 0):
+    return bootstrap_wbs_data(project_id)
+
+def _get_wbs(project_id: int) -> dict:
+    v = st.session_state.get(f'_wbs_v_{project_id}', 0)
+    return _cached_wbs_data(project_id, _v=v)
+
 employees = _load_employees()
 emp_map   = {e['id']: e['full_name'] for e in employees}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — Project selector
+# SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.title("👥 Team & Resources")
@@ -84,7 +93,9 @@ with st.sidebar:
         else:
             st.warning("Employee ID not found.")
 
-# Project header
+# ── Load data (from shared bootstrap cache) ──
+wbs = _get_wbs(selected_project_id)
+
 if proj_info:
     c1, c2, c3 = st.columns(3)
     c1.metric("Project", f"{proj_info['project_code']} — {proj_info['project_name']}")
@@ -101,13 +112,12 @@ tab_roster, tab_workload = st.tabs(["📋 Team Roster", "📊 Workload Overview"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1: TEAM ROSTER
+# TAB 1: TEAM ROSTER (from bootstrap cache)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_roster:
-    mem_df = get_project_members_df(selected_project_id)
+    mem_df = wbs['members']  # From bootstrap — no extra query
 
-    # ── Summary metrics ───────────────────────────────────────────────────────
     if not mem_df.empty:
         active_df = mem_df[mem_df['is_active'] == 1] if 'is_active' in mem_df.columns else mem_df
         m1, m2, m3, m4 = st.columns(4)
@@ -121,7 +131,6 @@ with tab_roster:
         m4.metric("Roles", roles_count)
         st.divider()
 
-    # ── Action bar ────────────────────────────────────────────────────────────
     ba1, _ = st.columns([1, 6])
     if ba1.button("➕ Add Member", type="primary", key="roster_add"):
         st.session_state["open_create_member_7"] = True
@@ -129,7 +138,6 @@ with tab_roster:
     if mem_df.empty:
         st.info("No team members assigned to this project yet.")
     else:
-        # Format display columns
         display = mem_df.copy()
         display['role_label'] = display['role'].map(lambda r: MEMBER_ROLE_LABELS.get(r, r))
         display['alloc_fmt'] = display['allocation_percent'].apply(
@@ -155,7 +163,6 @@ with tab_roster:
                 'start_date':        st.column_config.DateColumn('Start'),
                 'end_date':          st.column_config.DateColumn('End'),
                 'notes':             st.column_config.TextColumn('Notes'),
-                # Hide
                 'id': None, 'employee_id': None, 'role': None,
                 'allocation_percent': None, 'daily_rate': None,
                 'is_active': None,
@@ -180,7 +187,7 @@ with tab_roster:
             if ab3.button("🗑 Remove", use_container_width=True, key="mem_remove"):
                 if remove_member(selected_mem_id, user_id):
                     st.success(f"Removed {selected_mem['member_name']} from project.")
-                    st.cache_data.clear()
+                    invalidate_wbs_cache(selected_project_id)
                     st.rerun()
             if ab4.button("✖ Deselect", use_container_width=True, key="mem_desel"):
                 st.session_state["_mem_tbl_key"] = st.session_state.get("_mem_tbl_key", 0) + 1
@@ -233,7 +240,6 @@ with tab_workload:
                 },
             )
 
-            # Visual bar
             st.progress(
                 min(total_alloc / 100, 1.0),
                 text=f"Total allocation: {total_alloc:.0f}% {'⚠️ Over-allocated!' if total_alloc > 100 else ''}"
@@ -312,8 +318,8 @@ def _dialog_create_member():
         st.rerun()
     if submitted:
         try:
-            # Check for duplicate
-            existing = get_project_members_df(selected_project_id)
+            # Check for duplicate using bootstrap cache
+            existing = wbs['members']
             if not existing.empty:
                 dup = existing[
                     (existing['employee_id'] == data['employee_id']) &
@@ -335,7 +341,7 @@ def _dialog_create_member():
                 pm_name=proj_info.get('pm_name'),
             )
             st.success(f"✅ Member added! (ID: {new_id})")
-            st.cache_data.clear()
+            invalidate_wbs_cache(selected_project_id)
             st.rerun()
         except Exception as e:
             st.error(f"Failed: {e}")
@@ -356,7 +362,7 @@ def _dialog_edit_member(member_id: int):
         try:
             update_member(member_id, data, user_id)
             st.success("✅ Member updated!")
-            st.cache_data.clear()
+            invalidate_wbs_cache(selected_project_id)
             st.rerun()
         except Exception as e:
             st.error(f"Failed: {e}")
@@ -405,7 +411,7 @@ def _dialog_workload(emp_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DIALOG TRIGGERS (at end of page — same pattern as IL_1)
+# DIALOG TRIGGERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 if st.session_state.pop("open_create_member_7", False):

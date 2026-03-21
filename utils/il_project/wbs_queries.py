@@ -3,6 +3,12 @@
 Database layer for WBS (Work Breakdown Structure) management.
 Covers: Phases, Tasks, Checklists, Comments, Task Media, Project Members.
 
+v2.0 — Performance optimization:
+  - Added bootstrap_wbs_data() — loads phases + tasks + members in 3 queries
+  - Added filter_tasks_client() / derive_my_tasks_client() — client-side filter on cached data
+  - Added @log_perf decorator to all DB functions
+  - Connection error handling with graceful fallback
+
 Follows same conventions as queries.py:
   - *_df()  → returns pd.DataFrame  (for st.dataframe)
   - others  → return dict / list / id
@@ -15,7 +21,9 @@ import logging
 from typing import Dict, List, Optional
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, DatabaseError
 from ..db import execute_query, execute_query_df, execute_update, get_transaction
+from .wbs_helpers import log_perf
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +34,105 @@ def _get_engine():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP — Load all WBS data for a project in minimal queries
+# ══════════════════════════════════════════════════════════════════════════════
+
+@log_perf
+def bootstrap_wbs_data(project_id: int) -> Dict:
+    """
+    Load phases + tasks + members for a project.
+    Cache at call site with @st.cache_data(ttl=60).
+
+    Pipeline (3 queries, ~200-400ms total):
+      1. get_phases_df()           — phases with task counts
+      2. get_tasks_df()            — ALL tasks (no filters, filter client-side)
+      3. get_project_members_df()  — team roster
+
+    Replaces 7-8 individual queries per page load.
+    """
+    try:
+        phases = get_phases_df(project_id)
+        tasks = get_tasks_df(project_id)   # No filters — load all for this project
+        members = get_project_members_df(project_id)
+        return {
+            'phases': phases,
+            'tasks': tasks,
+            'members': members,
+            'ok': True,
+            'error': None,
+        }
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"bootstrap_wbs_data connection error: {e}")
+        return {
+            'phases': pd.DataFrame(),
+            'tasks': pd.DataFrame(),
+            'members': pd.DataFrame(),
+            'ok': False,
+            'error': 'Cannot connect to database. Please check your network/VPN connection.',
+        }
+    except Exception as e:
+        logger.error(f"bootstrap_wbs_data error: {e}")
+        return {
+            'phases': pd.DataFrame(),
+            'tasks': pd.DataFrame(),
+            'members': pd.DataFrame(),
+            'ok': False,
+            'error': f'Database error: {e}',
+        }
+
+
+def filter_tasks_client(
+    df: pd.DataFrame,
+    phase_id: Optional[int] = None,
+    assignee_id: Optional[int] = None,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Client-side filter on cached tasks DataFrame.
+    Replaces get_tasks_df() with per-filter DB queries.
+    Cost: ~0ms (pandas operation on cached data).
+    """
+    if df.empty:
+        return df
+    mask = pd.Series(True, index=df.index)
+    if phase_id is not None:
+        mask &= df['phase_id'] == phase_id
+    if assignee_id is not None:
+        mask &= df['assignee_id'] == assignee_id
+    if status:
+        mask &= df['status'] == status
+    if priority:
+        mask &= df['priority'] == priority
+    return df[mask].reset_index(drop=True)
+
+
+def derive_my_tasks_client(df: pd.DataFrame, employee_id: int) -> pd.DataFrame:
+    """
+    Derive 'My Tasks' from cached tasks for THIS project only.
+    For cross-project My Tasks, still use get_my_tasks_df().
+    Cost: ~0ms.
+    """
+    if df.empty or employee_id is None:
+        return pd.DataFrame()
+    mask = (
+        (df['assignee_id'] == employee_id) &
+        (~df['status'].isin(['COMPLETED', 'CANCELLED']))
+    )
+    result = df[mask].copy()
+    if result.empty:
+        return result
+    priority_order = {'CRITICAL': 0, 'HIGH': 1, 'NORMAL': 2, 'LOW': 3}
+    result['_prio_sort'] = result['priority'].map(priority_order).fillna(2)
+    result = result.sort_values(['_prio_sort', 'planned_end']).drop(columns=['_prio_sort'])
+    return result.reset_index(drop=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PHASES
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_phases_df(project_id: int) -> pd.DataFrame:
     """All phases for a project, ordered by sequence."""
     return execute_query_df("""
@@ -120,6 +224,7 @@ def soft_delete_phase(phase_id: int, modified_by: str) -> bool:
 # TASKS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_tasks_df(
     project_id: int,
     phase_id: Optional[int] = None,
@@ -169,6 +274,7 @@ def get_tasks_df(
     return execute_query_df(sql, params)
 
 
+@log_perf
 def get_my_tasks_df(employee_id: int) -> pd.DataFrame:
     """All active tasks assigned to an employee across all projects."""
     return execute_query_df("""
@@ -266,7 +372,6 @@ def quick_update_task(
     Engineer fast-update: only status, %, hours.
     Also auto-logs status change via log_status_change().
     """
-    # Read old values for audit log
     old = get_task(task_id)
     if not old:
         return False
@@ -294,7 +399,6 @@ def quick_update_task(
     })
 
     if rows > 0:
-        # Auto-log status change
         if old['status'] != status:
             log_status_change(task_id, old['status'], status, modified_by)
         if float(old.get('completion_percent') or 0) != completion_percent:
@@ -430,7 +534,7 @@ def _log_comment(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TASK MEDIA (attachments)
+# TASK MEDIA (legacy — Pattern B inline, kept for backward compat)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_task_media(task_id: int) -> List[Dict]:
@@ -478,6 +582,7 @@ def detach_media(tm_id: int) -> bool:
 # PROJECT MEMBERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_project_members_df(project_id: int) -> pd.DataFrame:
     return execute_query_df("""
         SELECT
