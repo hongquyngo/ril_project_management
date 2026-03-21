@@ -163,6 +163,67 @@ from .pr_queries import (
     get_budget_vs_pr,
 )
 
+# ── WBS Management (Phases, Tasks, Checklists, Comments, Media, Members) ────
+from .wbs_queries import (
+    # Phases
+    get_phases_df,
+    get_phase,
+    create_phase,
+    update_phase,
+    soft_delete_phase,
+    # Tasks
+    get_tasks_df,
+    get_my_tasks_df,
+    get_task,
+    create_task,
+    update_task,
+    quick_update_task,
+    soft_delete_task,
+    generate_wbs_code,
+    # Checklists
+    get_checklists,
+    create_checklist_item,
+    toggle_checklist_item,
+    delete_checklist_item,
+    # Comments
+    get_task_comments,
+    create_comment,
+    log_status_change,
+    # Task Media
+    get_task_media,
+    attach_media_to_task,
+    detach_media,
+    # Project Members
+    get_project_members_df,
+    get_member,
+    create_member,
+    update_member,
+    remove_member,
+    get_member_workload,
+    # Completion aggregation
+    sync_phase_completion,
+    sync_project_completion,
+    sync_completion_up,
+)
+
+from .wbs_helpers import (
+    TASK_STATUS_OPTIONS,
+    TASK_STATUS_ICONS,
+    PHASE_STATUS_OPTIONS,
+    PRIORITY_OPTIONS,
+    PRIORITY_ICONS,
+    MEMBER_ROLES,
+    MEMBER_ROLE_LABELS,
+    DEPENDENCY_TYPES,
+    DEPENDENCY_LABELS,
+    DEFAULT_PHASE_TEMPLATES,
+    fmt_status,
+    fmt_priority,
+    fmt_completion,
+    fmt_hours,
+    comment_type_icon,
+)
+
 __all__ = [
     # ── Lookups ──
     'get_project_types', 'get_employees', 'get_companies', 'get_currencies', 'generate_project_code',
@@ -229,4 +290,26 @@ __all__ = [
     'is_project_pm', 'is_approver_for_pr',
     'get_project_pm_email',
     'get_budget_vs_pr',
+    # ── WBS Phases ──
+    'get_phases_df', 'get_phase', 'create_phase', 'update_phase', 'soft_delete_phase',
+    # ── WBS Tasks ──
+    'get_tasks_df', 'get_my_tasks_df', 'get_task',
+    'create_task', 'update_task', 'quick_update_task', 'soft_delete_task',
+    'generate_wbs_code',
+    # ── Checklists ──
+    'get_checklists', 'create_checklist_item', 'toggle_checklist_item', 'delete_checklist_item',
+    # ── Comments ──
+    'get_task_comments', 'create_comment', 'log_status_change',
+    # ── Task Media ──
+    'get_task_media', 'attach_media_to_task', 'detach_media',
+    # ── Project Members ──
+    'get_project_members_df', 'get_member', 'create_member', 'update_member',
+    'remove_member', 'get_member_workload',
+    # ── Completion ──
+    'sync_phase_completion', 'sync_project_completion', 'sync_completion_up',
+    # ── WBS Helpers ──
+    'TASK_STATUS_OPTIONS', 'TASK_STATUS_ICONS', 'PHASE_STATUS_OPTIONS',
+    'PRIORITY_OPTIONS', 'PRIORITY_ICONS', 'MEMBER_ROLES', 'MEMBER_ROLE_LABELS',
+    'DEPENDENCY_TYPES', 'DEPENDENCY_LABELS', 'DEFAULT_PHASE_TEMPLATES',
+    'fmt_status', 'fmt_priority', 'fmt_completion', 'fmt_hours', 'comment_type_icon',
 ]
