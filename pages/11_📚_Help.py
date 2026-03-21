@@ -1585,22 +1585,66 @@ with tab_quickref:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — SOP (grouped by module)
+# TAB 2 — SOP (grouped by module, 2-tier navigation)
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_sop:
-    # Build module → SOPs for grouped display
-    sop_labels = [s["label"] for s in SOP_REGISTRY]
-    sop_choice = st.radio("Chọn nghiệp vụ:", sop_labels, horizontal=True, label_visibility="collapsed")
+    # ── Tier 1: Module selector (pill-style buttons) ──────────────────────
+    # Only modules that have SOPs
+    _sop_module_ids = [mid for mid in MODULES if mid in SOP_BY_MODULE]
 
-    sop = SOP_BY_LABEL[sop_choice]
-    module = MODULES.get(sop["module"], {})
-    module_badge = f'{module.get("icon", "")} {sop["module"]} — {module.get("name", "")}' if module else ""
+    if "sop_module" not in st.session_state:
+        st.session_state.sop_module = _sop_module_ids[0]
+    # Guard against stale session state
+    if st.session_state.sop_module not in _sop_module_ids:
+        st.session_state.sop_module = _sop_module_ids[0]
 
-    st.markdown(f"### {sop_choice}")
-    if module_badge:
-        st.caption(f"Module: {module_badge}")
+    # Render module pills as a row of buttons
+    _mod_cols = st.columns(len(_sop_module_ids))
+    for _i, _mid in enumerate(_sop_module_ids):
+        _mod = MODULES[_mid]
+        _is_active = (st.session_state.sop_module == _mid)
+        _sop_count = len(SOP_BY_MODULE[_mid])
+        with _mod_cols[_i]:
+            if st.button(
+                f"{_mod['icon']} {_mod['name']}",
+                key=f"sop_mod_{_mid}",
+                use_container_width=True,
+                type="primary" if _is_active else "secondary",
+                help=f"{_mid}: {_mod['desc']}  ({_sop_count} SOP{'s' if _sop_count > 1 else ''})",
+            ):
+                st.session_state.sop_module = _mid
+                st.rerun()
 
-    render_sop(sop)
+    # Module description bar
+    _sel_mod = MODULES[st.session_state.sop_module]
+    st.markdown(
+        f'<div style="background:#EEF4FB;border-left:4px solid #2E75B6;'
+        f'padding:6px 14px;margin:4px 0 8px 0;border-radius:4px;font-size:13px">'
+        f'<b>{_sel_mod["icon"]} {st.session_state.sop_module} — {_sel_mod["name"]}</b>'
+        f'<span style="color:#555;margin-left:12px">{_sel_mod["desc"]}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Tier 2: SOP selector within module ────────────────────────────────
+    _sops_in_mod = SOP_BY_MODULE[st.session_state.sop_module]
+
+    if len(_sops_in_mod) == 1:
+        _sop = _sops_in_mod[0]
+    else:
+        _sop_labels = [s["label"] for s in _sops_in_mod]
+        _sop_choice = st.radio(
+            "Chọn nghiệp vụ:",
+            _sop_labels,
+            horizontal=True,
+            label_visibility="collapsed",
+            key=f"sop_choice_{st.session_state.sop_module}",
+        )
+        _sop = next(s for s in _sops_in_mod if s["label"] == _sop_choice)
+
+    # ── SOP Content ───────────────────────────────────────────────────────
+    st.divider()
+    st.markdown(f"### {_sop['label']}")
+    render_sop(_sop)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
