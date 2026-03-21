@@ -66,6 +66,47 @@ QUICK_REF = {
         ("PR Cancelled",          "⬛", "Gửi đến requester",                  "Auto-CC PM + pending approver (nếu đang PENDING)"),
         ("Reminder",              "📧", "Gửi đến approver hiện tại",          "Auto-CC requester. Nhấn 📧 Remind trong My PRs hoặc View dialog"),
     ],
+    # ── WBS Module ──────────────────────────────────────────────────────
+    "📋 Task Status (WBS)": [
+        ("NOT_STARTED", "⚪", "Task mới tạo, chưa bắt đầu",            "Chờ assignee bắt đầu làm"),
+        ("IN_PROGRESS", "🔵", "Đang thực hiện",                         "Cập nhật % và hours thường xuyên"),
+        ("COMPLETED",   "✅", "Đã hoàn thành",                          "PM nhận email. Phase % tự cập nhật"),
+        ("ON_HOLD",     "⏸️", "Tạm dừng",                               "Ghi lý do trong comment"),
+        ("BLOCKED",     "🔴", "Bị chặn, cần PM xử lý",                 "PM nhận email 🔴. Ghi blocker reason"),
+        ("CANCELLED",   "❌", "Đã hủy",                                 "Không tính vào completion %"),
+    ],
+    "📋 Phase Status (WBS)": [
+        ("NOT_STARTED", "⚪", "Chưa bắt đầu",                          "PM tạo tasks cho phase này"),
+        ("IN_PROGRESS", "🔵", "Đang triển khai (có task đang làm)",     "Completion % tự tính từ tasks"),
+        ("COMPLETED",   "✅", "Tất cả tasks xong",                      "Chuyển sang phase tiếp theo"),
+        ("ON_HOLD",     "⏸️", "Tạm dừng phase",                         "Ảnh hưởng timeline dự án"),
+        ("CANCELLED",   "❌", "Hủy phase",                              "Tasks con cũng bị soft-delete"),
+    ],
+    "🔧 Issue Severity": [
+        ("LOW",      "🟢", "Ảnh hưởng nhỏ, không ảnh hưởng tiến độ",    "Giải quyết khi có thời gian"),
+        ("MEDIUM",   "🟡", "Ảnh hưởng vừa, cần xử lý trong tuần",      "Assign người chịu trách nhiệm"),
+        ("HIGH",     "🟠", "Ảnh hưởng lớn, có thể delay schedule",      "Escalate lên PM ngay"),
+        ("CRITICAL", "🔴", "Ảnh hưởng nghiêm trọng, block tiến độ",     "PM + stakeholder xử lý khẩn cấp"),
+    ],
+    "⚠️ Risk Score Matrix": [
+        ("1–4",   "🟢", "Low Risk — chấp nhận được",                    "Monitor, không cần action ngay"),
+        ("5–9",   "🟡", "Medium Risk — cần theo dõi",                   "Lập mitigation plan"),
+        ("10–15", "🟠", "High Risk — cần xử lý sớm",                   "Owner thực hiện mitigation ngay"),
+        ("16–25", "🔴", "Critical Risk — nguy cơ cao",                  "Escalate, contingency plan ready"),
+    ],
+    "📝 Change Order Status": [
+        ("DRAFT",     "⚪", "Đang soạn CO",                             "Điền đầy đủ → Submit"),
+        ("SUBMITTED", "🔵", "Đã submit, chờ duyệt nội bộ",             "Management review"),
+        ("APPROVED",  "✅", "Nội bộ đã duyệt",                          "Chờ customer confirm"),
+        ("REJECTED",  "🔴", "Bị từ chối",                               "Xem lại scope/cost"),
+        ("CANCELLED", "⬛", "Đã hủy",                                   "Lưu hồ sơ"),
+    ],
+    "📧 Email Notification — WBS Workflow": [
+        ("Task Assigned",    "📋", "Gửi đến assignee (engineer)",       "Auto-CC PM. Khi tạo mới hoặc reassign"),
+        ("Member Added",     "👥", "Gửi đến member mới",                "Khi add vào project team"),
+        ("Task BLOCKED",     "🔴", "Gửi đến PM",                        "Kèm blocker reason. PM cần action"),
+        ("Task COMPLETED",   "✅", "Gửi đến PM",                        "Kèm phase % và project % completion"),
+    ],
 }
 
 SOP_STEPS = {
@@ -158,6 +199,77 @@ SOP_STEPS = {
         ("2", "Dialog confirm: kiểm tra vendor, total amount", "📧 CC thêm: chọn finance team hoặc người liên quan"),
         ("3", "Nhấn 🛒 Yes, Create PO", "PO tự sinh: PO{YYYYMMDD}-{id}{vendor_id}"),
         ("4", "PO link ngược vào PR → status chuyển PO_CREATED", "Email thông báo gửi requester + CC PM + CC thêm"),
+    ],
+    # ── WBS Module SOPs ──────────────────────────────────────────────────
+    "📋 Setup WBS (Phases & Tasks)": [
+        ("1", "Vào IL_6 WBS → Sidebar chọn Project", "Project phải ở status CONTRACTED hoặc IN_PROGRESS"),
+        ("2", "Tab Phases → nhấn 📦 Load Template", "Tạo 7 phases chuẩn (Pre-Sales → Warranty) với weight % sẵn"),
+        ("3", "Hoặc ➕ Add Phase thủ công: nhập Code, Name, Planned Start/End, Weight %", "Tổng Weight % nên = 100% để completion % chính xác"),
+        ("4", "Tab Tasks → nhấn ➕ Add Task: chọn Phase, đặt tên, assign engineer", "WBS code tự sinh: 3.1, 3.2, 3.2.1 (theo phase + parent task)"),
+        ("5", "Set Priority (LOW → CRITICAL), Planned Start/End, Estimated Hours", "Engineer sẽ thấy task trong 'My Tasks' ngay sau khi assign"),
+        ("6", "📧 Email tự động gửi đến engineer khi assign", "Có deep link 'Open in ERP' trong email"),
+        ("7", "Thêm Checklist items cho task (VD: commissioning có 20 items cần tick)", "Tab Checklist trong Task Detail dialog"),
+        ("8", "Đính kèm file: tab Files trong Task Detail → upload drawings, specs", "Multi-file, lưu S3 qua medias table"),
+    ],
+    "⚡ Cập nhật tiến độ (Engineer)": [
+        ("1", "Login → vào IL_6 WBS → tab 🙋 My Tasks", "Hiện tất cả task across projects, sort theo priority + deadline"),
+        ("2", "Chọn task → nhấn ⚡ Quick Update", "Dialog nhỏ gọn: chỉ Status, %, Hours"),
+        ("3", "Kéo slider Completion % (bước 5%)", "Hệ thống auto-log progress vào activity feed"),
+        ("4", "Nếu bị BLOCKED: chọn status BLOCKED + nhập Blocker Reason", "PM nhận email 🔴 ngay lập tức. Blocker ghi vào comment"),
+        ("5", "Khi xong: chọn COMPLETED (100%)", "PM nhận email ✅ kèm phase % và project % completion"),
+        ("6", "Completion % tự động cascade: task → phase → project", "PM mở dashboard thấy overall % cập nhật"),
+        ("7", "Tick checklist items khi hoàn thành từng bước nhỏ", "Trong Task Detail → tab ✅ Checklist"),
+        ("8", "Ghi comment nếu cần trao đổi với PM", "Task Detail → tab 💬 Comments"),
+    ],
+    "👥 Quản lý Team (IL_7)": [
+        ("1", "Vào IL_7 Team → Sidebar chọn Project", ""),
+        ("2", "Tab Team Roster → nhấn ➕ Add Member", "Chọn Employee, Role, Allocation %, Daily Rate"),
+        ("3", "📧 Member nhận email thông báo khi được add vào project", "Kèm: project name, role, PM name"),
+        ("4", "Edit member: chọn dòng → ✏️ Edit (đổi role, allocation, rate)", ""),
+        ("5", "Tab Workload: chọn bất kỳ employee → xem allocation across projects", "🔴 Over 100% = over-allocated. 🟡 >80% = gần full"),
+        ("6", "Daily Rate dùng cho budget calculation kết hợp labor logs", "Rate tự gợi ý theo Role (từ DEFAULT_RATES_BY_LEVEL)"),
+    ],
+    "🔧 Log Issue (IL_8)": [
+        ("1", "Vào IL_8 Issues → Tab 🔧 Issues → nhấn ➕ Report Issue", "Bất kỳ ai trong team đều có thể report"),
+        ("2", "Điền Title, Category (TECHNICAL/COMMERCIAL/...), Severity", "CRITICAL → PM cần xử lý khẩn cấp"),
+        ("3", "Assign người chịu trách nhiệm resolve + Due Date", ""),
+        ("4", "Link tới task liên quan (optional)", "Giúp trace issue ảnh hưởng task nào"),
+        ("5", "Sau khi tạo → View dialog → đính kèm ảnh / tài liệu", "Multi-file, lưu qua medias table"),
+        ("6", "Workflow: OPEN → IN_PROGRESS → RESOLVED (ghi Resolution) → CLOSED", ""),
+    ],
+    "⚠️ Risk Register (IL_8)": [
+        ("1", "Tab ⚠️ Risks → nhấn ➕ Add Risk", "PM tạo khi planning hoặc phát hiện rủi ro mới"),
+        ("2", "Chọn Probability (RARE → ALMOST_CERTAIN) × Impact (NEGLIGIBLE → SEVERE)", "Risk Score tự tính: 1–25"),
+        ("3", "Nhập Mitigation Plan (giảm xác suất/ảnh hưởng) + Contingency Plan (plan B)", ""),
+        ("4", "Assign Risk Owner + set Review Date", "Owner chịu trách nhiệm thực hiện mitigation"),
+        ("5", "Đính kèm risk analysis document nếu có", ""),
+        ("6", "Review định kỳ: cập nhật probability/impact/status", "Status OCCURRED → tạo Issue tương ứng"),
+    ],
+    "📝 Change Order (IL_8)": [
+        ("1", "Tab 📝 Change Orders → nhấn ➕ New Change Order", "Khi scope/cost/schedule thay đổi"),
+        ("2", "Chọn Type: SCOPE / SCHEDULE / COST / SCOPE_AND_COST", ""),
+        ("3", "Nhập Original Value, Revised Value → Cost Impact tự tính", "Schedule Impact: +/- days"),
+        ("4", "Workflow: DRAFT → SUBMITTED → APPROVED (nội bộ) → Customer Confirm", ""),
+        ("5", "Khi APPROVED + Customer Confirm → cập nhật amended_contract_value trên project", "KPIs CO Impact hiện ở đầu tab"),
+        ("6", "Đính kèm customer approval email / signed CO", ""),
+    ],
+    "📊 Progress Report (IL_9)": [
+        ("1", "Vào IL_9 Progress → Tab 📊 Progress Reports → nhấn ➕ New Report", "PM viết hàng tuần/tháng"),
+        ("2", "Chọn Type (WEEKLY/MONTHLY), Date, Reporting Period", ""),
+        ("3", "Set RAG status: ON_TRACK 🟢 / AT_RISK 🟡 / DELAYED 🔴", "Có thể set riêng cho Schedule, Cost, Quality"),
+        ("4", "Nhập Completion % — có thể lấy từ project overall %", "Hệ thống pre-fill từ il_projects.overall_completion_percent"),
+        ("5", "Viết narrative: Summary, Accomplishments, Planned Next, Blockers", ""),
+        ("6", "Đính kèm report PDF/presentation nếu cần", ""),
+        ("7", "Status: DRAFT → SUBMITTED → REVIEWED (by leadership)", ""),
+    ],
+    "✅ Quality Checklist (IL_9)": [
+        ("1", "Tab ✅ Quality Checklists → nhấn ➕ New Checklist", "Loại: FAT / SAT / INSPECTION / COMMISSIONING / HANDOVER"),
+        ("2", "Link tới Milestone (optional) → tracking payment release", ""),
+        ("3", "Set Inspector (nội bộ), Customer Witness (nhập tên)", ""),
+        ("4", "Sau khi inspection: điền Total Items, Passed, Failed → Pass Rate tự tính", ""),
+        ("5", "Status: PLANNED → IN_PROGRESS → PASSED/FAILED/CONDITIONAL", "FAILED: set Retest Date + Next Action"),
+        ("6", "Sign-off: chọn Signed Off By + tick Customer Signed Off", "Chỉ PASSED + Customer Signed → milestone có thể chuyển PAID"),
+        ("7", "Đính kèm test report, sign-off sheet, photos", "Multi-file"),
     ],
 }
 
@@ -646,6 +758,164 @@ QA_DATA = [
         "note": "Deep link format: ...?pr_id=123&action=approve. Actions: view, approve, edit.",
         "warning": "",
     },
+    # ── WBS Module Q&A ──────────────────────────────────────────────────
+    {
+        "id": "Q34",
+        "tags": ["WBS", "phase", "template", "setup"],
+        "question": "Dự án mới ký xong, bắt đầu setup WBS thế nào cho nhanh?",
+        "situation": "Dự án AMR vừa CONTRACTED, PM cần setup phase + tasks cho team bắt đầu làm.",
+        "sop": [
+            "**Vào IL_6 WBS** → chọn project → tab Phases → nhấn **📦 Load Template**.",
+            "Hệ thống tạo 7 phases chuẩn: Pre-Sales (5%), Design (15%), Procurement (10%), Implementation (35%), Commissioning (20%), Training (10%), Warranty (5%).",
+            "**Sửa Planned Start/End** cho từng phase theo timeline dự án.",
+            "**Tab Tasks → ➕ Add Task**: tạo tasks cho phase Implementation trước (thường lớn nhất).",
+            "Assign engineer cho mỗi task → engineer nhận email + thấy trong My Tasks.",
+        ],
+        "note": "Weight % của phases ảnh hưởng project completion calculation. Tổng nên = 100%.",
+        "warning": "",
+    },
+    {
+        "id": "Q35",
+        "tags": ["WBS", "task", "engineer", "update"],
+        "question": "Engineer update tiến độ task hàng ngày, cách nào nhanh nhất?",
+        "situation": "Kỹ sư đang lắp đặt thiết bị, cuối ngày cần cập nhật progress.",
+        "sop": [
+            "**Cách nhanh nhất**: IL_6 → tab 🙋 My Tasks → chọn task → nhấn **⚡ Quick Update**.",
+            "Kéo slider **%** (bước 5%) + chọn **Status** + nhập **Actual Hours**.",
+            "Nhấn 💾 Update — xong. Completion cascade tự chạy (task → phase → project).",
+            "**Nếu cần ghi chi tiết**: vào 👁️ View → tab 💬 Comments → ghi note.",
+            "**Nếu bị chặn**: chọn BLOCKED + nhập Blocker Reason → PM nhận email tự động.",
+        ],
+        "note": "Quick Update auto-log: mỗi lần đổi status hoặc % → ghi activity log (ai, lúc nào, từ → thành).",
+        "warning": "",
+    },
+    {
+        "id": "Q36",
+        "tags": ["WBS", "blocked", "PM", "escalate"],
+        "question": "Task bị BLOCKED, PM cần làm gì?",
+        "situation": "Engineer báo BLOCKED: 'Chờ cable tray từ nhà thầu phụ, chưa giao theo cam kết'.",
+        "sop": [
+            "PM nhận email 🔴 BLOCKED kèm blocker reason.",
+            "**Vào IL_6 → tab Tasks** → tìm task BLOCKED (icon 🔴, filter status=BLOCKED).",
+            "**View task → tab Comments**: đọc context engineer ghi. Ghi thêm comment nếu cần trao đổi.",
+            "**Tạo Issue**: vào IL_8 → Report Issue → link tới task bị block. Category = LOGISTICS/VENDOR.",
+            "**Resolve**: khi unblock → engineer đổi status IN_PROGRESS. Issue đổi RESOLVED → CLOSED.",
+        ],
+        "note": "Task BLOCKED không tự unblock — engineer phải chủ động đổi status khi hết chặn.",
+        "warning": "",
+    },
+    {
+        "id": "Q37",
+        "tags": ["WBS", "completion", "cascade", "dashboard"],
+        "question": "Project overall % tính thế nào? Có chính xác không?",
+        "situation": "PM muốn hiểu cách tính completion % để báo cáo leadership.",
+        "sop": [
+            "**Task level**: engineer nhập trực tiếp (slider 0–100%).",
+            "**Phase level**: weighted average tasks. Weight = estimated_hours. Nếu không set hours → simple average.",
+            "**Project level**: weighted average phases. Weight = weight_percent. Nếu không set weight → simple average.",
+            "**Cascade tự động**: mỗi khi task update → phase % tính lại → project % tính lại → lưu vào il_projects.",
+            "**Muốn chính xác**: set estimated_hours cho mỗi task + weight_percent cho mỗi phase.",
+        ],
+        "note": "Project overall % hiện trên project header trong IL_6. Cũng hiện trong Progress Reports (IL_9).",
+        "warning": "Nếu không set weights/hours, tất cả tasks/phases có trọng số bằng nhau — kết quả kém chính xác.",
+    },
+    {
+        "id": "Q38",
+        "tags": ["WBS", "team", "allocation", "workload"],
+        "question": "Muốn biết engineer nào đang quá tải (assign quá nhiều dự án), xem ở đâu?",
+        "situation": "PM cần assign thêm người cho dự án mới nhưng muốn check ai còn capacity.",
+        "sop": [
+            "**Vào IL_7 Team** → tab **📊 Workload Overview**.",
+            "Chọn employee từ dropdown → nhấn 🔍 Load Workload.",
+            "Hệ thống hiện: tất cả projects đang IN_PROGRESS + allocation % mỗi project.",
+            "**Total Allocation**: 🟢 < 80% (available) | 🟡 80–100% (near full) | 🔴 > 100% (over-allocated).",
+            "**Hoặc**: từ Team Roster → chọn member → nhấn 📊 Workload (shortcut).",
+        ],
+        "note": "Allocation % do PM nhập khi add member. Không tự tính từ labor logs — PM cần update thủ công khi scope thay đổi.",
+        "warning": "",
+    },
+    {
+        "id": "Q39",
+        "tags": ["WBS", "issue", "risk", "trace"],
+        "question": "Dự án có nhiều issues phát sinh, làm sao theo dõi tổng thể?",
+        "situation": "Dự án IN_PROGRESS 3 tháng, đã có 8 issues với severity khác nhau.",
+        "sop": [
+            "**Vào IL_8 → Tab Issues**: KPIs hiện Total, Open, Critical, Resolved.",
+            "Bảng sort theo severity (CRITICAL đầu tiên) → dễ thấy vấn đề nào cần xử lý trước.",
+            "**Filter** sidebar: Status, Severity, Category, Assigned To.",
+            "**View issue**: xem mô tả, impact, resolution, attachments.",
+            "**Link đến Risk**: nếu issue từ risk đã xảy ra (OCCURRED), trace ngược từ Risk Register.",
+        ],
+        "note": "Issue count hiện trong bảng (cột 📎 file_count). View dialog hiện danh sách files đính kèm.",
+        "warning": "",
+    },
+    {
+        "id": "Q40",
+        "tags": ["WBS", "change order", "scope", "contract"],
+        "question": "Khách hàng yêu cầu thêm scope, cần làm Change Order. Quy trình?",
+        "situation": "KH yêu cầu thêm 2 robot vào dự án AMR. Cần điều chỉnh giá và timeline.",
+        "sop": [
+            "**IL_8 → Tab Change Orders → ➕ New Change Order**.",
+            "Type = SCOPE_AND_COST. Nhập Original Value (HĐ hiện tại), Revised Value (+ thêm robot).",
+            "Schedule Impact: +30 days (thêm time để procurement + install).",
+            "**DRAFT → SUBMITTED**: gửi management duyệt nội bộ.",
+            "**APPROVED**: gửi KH confirm. Đính kèm email approval / signed amendment.",
+            "**Customer Confirm**: tick Customer Approved + nhập Customer Ref (PO/email ref).",
+            "**Cập nhật project**: edit project → Amended Contract Value += cost_impact.",
+            "**Tạo Estimate V2**: thêm robot vào line items, recalculate GP%.",
+        ],
+        "note": "CO Impact Summary hiện tổng approved + pending ở đầu tab. Useful cho negotiation.",
+        "warning": "",
+    },
+    {
+        "id": "Q41",
+        "tags": ["WBS", "quality", "FAT", "SAT", "customer"],
+        "question": "Dự án đến giai đoạn nghiệm thu FAT, ghi nhận kết quả ở đâu?",
+        "situation": "Chạy FAT conveyor line 1: 50 test items, 47 pass, 3 fail. KH witness: Mr. Tanaka.",
+        "sop": [
+            "**IL_9 → Tab Quality → ➕ New Checklist**: Type = FAT, Name = 'FAT — Conveyor Line 1'.",
+            "Link Milestone (nếu có): chọn milestone 'FAT Completion'.",
+            "Inspector = engineer chạy test, Customer Witness = 'Mr. Tanaka'.",
+            "**Sau test**: Edit checklist → Total = 50, Passed = 47, Failed = 3 → Pass Rate = 94%.",
+            "**Status = CONDITIONAL** (vì có 3 failed items).",
+            "**Next Action**: 'Fix encoder alignment + retest by 15/4'. Set Retest Date.",
+            "**Đính kèm**: test report PDF + photos.",
+            "**Sau retest**: update Passed = 50, Status = PASSED, Customer Signed Off = ✅.",
+        ],
+        "note": "Milestone ACCEPTANCE chỉ nên chuyển COMPLETED sau khi Quality Checklist PASSED + Customer Signed.",
+        "warning": "",
+    },
+    {
+        "id": "Q42",
+        "tags": ["WBS", "progress", "report", "leadership"],
+        "question": "Leadership yêu cầu weekly report cho tất cả dự án đang chạy. Tạo ở đâu?",
+        "situation": "PM cần submit progress report mỗi thứ 6 cho director.",
+        "sop": [
+            "**IL_9 → Tab Progress Reports → ➕ New Report**: Type = WEEKLY.",
+            "**RAG status**: chọn ON_TRACK / AT_RISK / DELAYED — hiện icon 🟢🟡🔴 trên dashboard.",
+            "**Completion %**: pre-fill từ project overall_completion_percent. Adjust nếu cần.",
+            "**Narrative**: điền Summary, Accomplishments (tuần này), Planned (tuần sau), Blockers.",
+            "**Status**: DRAFT → SUBMITTED (PM hoàn thành) → REVIEWED (Director đọc xong).",
+            "**Đính kèm**: export slide/PDF nếu có presentation riêng.",
+        ],
+        "note": "Schedule/Cost/Quality status set riêng → trên bảng hiện 3 cột RAG cho quick scan.",
+        "warning": "",
+    },
+    {
+        "id": "Q43",
+        "tags": ["WBS", "attachment", "file", "multi"],
+        "question": "Muốn đính kèm nhiều file cho 1 issue/task/checklist, có được không?",
+        "situation": "Issue cần attach 3 files: ảnh hiện trường, email vendor, bản vẽ sửa đổi.",
+        "sop": [
+            "**Có** — tất cả entity (task, issue, risk, CO, report, quality) hỗ trợ **multi-file**.",
+            "Mở View dialog → phần 📎 Attachments (cuối dialog, ngoài form).",
+            "Upload từng file: chọn file → nhập description (optional) → nhấn 📤 Upload.",
+            "Mỗi file lưu riêng: S3 + medias table + junction link. Download qua presigned URL.",
+            "**Xóa file**: nhấn 🗑 bên cạnh file → soft-delete junction (file vẫn còn trên S3).",
+        ],
+        "note": "File types: PDF, PNG, JPG, XLSX, DOCX. Max per file phụ thuộc S3 config.",
+        "warning": "",
+    },
 ]
 
 # Tags list for filter
@@ -777,6 +1047,62 @@ with tab_quickref:
     ui2.success("**Action bar**\n\n👁️ View / ✏️ Edit / ✅ Approve / ✖ Deselect — tùy context")
     ui3.warning("**Bỏ chọn**\n\nNhấn **✖ Deselect** hoặc tick dòng khác")
 
+    # ── WBS Module Quick Ref ──────────────────────────────────────────────
+    st.divider()
+    st.subheader("📋 WBS Module — Trạng thái Task & Phase")
+    st.caption("Module WBS (IL_6 → IL_9) quản lý tiến độ triển khai: Phases → Tasks → Issues → Risks → Change Orders → Progress Reports → Quality.")
+
+    task_rows = QUICK_REF["📋 Task Status (WBS)"]
+    df_task = pd.DataFrame(task_rows, columns=["Trạng thái", "Icon", "Ý nghĩa", "Hành động"])
+    st.dataframe(df_task, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Trạng thái": st.column_config.TextColumn(width=120),
+                     "Icon": st.column_config.TextColumn(width=50),
+                     "Ý nghĩa": st.column_config.TextColumn(width=260),
+                     "Hành động": st.column_config.TextColumn(width=300),
+                 })
+
+    st.divider()
+    st.subheader("🔧 Issue Severity & ⚠️ Risk Score")
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        sev_rows = QUICK_REF["🔧 Issue Severity"]
+        df_sev = pd.DataFrame(sev_rows, columns=["Mức", "Icon", "Ý nghĩa", "Action"])
+        st.dataframe(df_sev, use_container_width=True, hide_index=True)
+    with sc2:
+        risk_rows = QUICK_REF["⚠️ Risk Score Matrix"]
+        df_risk = pd.DataFrame(risk_rows, columns=["Score", "Icon", "Mức rủi ro", "Action"])
+        st.dataframe(df_risk, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("📝 Change Order & 📧 WBS Email")
+    co_rows = QUICK_REF["📝 Change Order Status"]
+    df_co = pd.DataFrame(co_rows, columns=["Trạng thái", "Icon", "Ý nghĩa", "Hành động"])
+    st.dataframe(df_co, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Trạng thái": st.column_config.TextColumn(width=120),
+                     "Icon": st.column_config.TextColumn(width=50),
+                 })
+
+    st.caption("Email tự động gửi khi có sự kiện quan trọng trong WBS workflow.")
+    wbs_email_rows = QUICK_REF["📧 Email Notification — WBS Workflow"]
+    df_wbs_email = pd.DataFrame(wbs_email_rows, columns=["Trigger", "Icon", "Gửi đến", "Chi tiết"])
+    st.dataframe(df_wbs_email, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Trigger": st.column_config.TextColumn(width=150),
+                     "Icon": st.column_config.TextColumn(width=50),
+                     "Gửi đến": st.column_config.TextColumn(width=220),
+                     "Chi tiết": st.column_config.TextColumn(width=400),
+                 })
+
+    st.divider()
+    st.subheader("🔄 Completion Cascade")
+    st.caption("Khi engineer update task % → hệ thống tự tính lại phase % → project % (weighted average).")
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.info("**Task %**\n\nEngineer nhập trực tiếp\n(slider 0–100%)")
+    cc2.success("**Phase %**\n\nWeighted AVG(tasks)\nWeight = estimated_hours")
+    cc3.warning("**Project %**\n\nWeighted AVG(phases)\nWeight = weight_percent")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — SOP
@@ -877,6 +1203,124 @@ with tab_sop:
         st.divider()
         st.info("**PO tự động tạo** trong bảng purchase_orders + product_purchase_orders. PO number format: PO{YYYYMMDD}-{id}{vendor_id}. Link ngược vào il_project_documents.")
         st.success("**Sau khi tạo PO**: PR status → PO_CREATED. Email gửi requester + CC PM. Tiếp theo: gửi PO cho vendor qua kênh bên ngoài (email/portal).")
+
+    # ── WBS SOP Special Blocks ──────────────────────────────────────────
+    elif sop_choice == "📋 Setup WBS (Phases & Tasks)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**Phase Template (7 phases chuẩn):**\n"
+                   "1. Pre-Sales (5%)\n2. Design (15%)\n3. Procurement (10%)\n"
+                   "4. Implementation (35%)\n5. Commissioning (20%)\n"
+                   "6. Training (10%)\n7. Warranty (5%)\n\n"
+                   "Weight % = mức đóng góp vào overall completion.")
+        col_b.success("**WBS Code tự sinh:**\n"
+                      "Phase seq 3 → tasks: 3.1, 3.2\n"
+                      "Sub-task: 3.2.1, 3.2.2\n\n"
+                      "**Assign → email:**\n"
+                      "Engineer nhận email ngay khi được assign task.\n"
+                      "Email có deep link 'Open in ERP'.")
+        st.divider()
+        st.warning("**Dependency:** Task có thể link 'Finish-to-Start' với task khác (field dependency_task_id). "
+                   "Hiện tại chỉ lưu thông tin — chưa có Gantt chart enforce. PM tự kiểm tra thứ tự.")
+
+    elif sop_choice == "⚡ Cập nhật tiến độ (Engineer)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**My Tasks sort theo:**\n"
+                   "1. Priority: CRITICAL → HIGH → NORMAL → LOW\n"
+                   "2. Deadline: gần nhất lên trước\n\n"
+                   "Chỉ hiện tasks NOT_STARTED, IN_PROGRESS, ON_HOLD, BLOCKED.")
+        col_b.success("**Completion Cascade:**\n"
+                      "Task 80% → Phase auto-recalc → Project auto-recalc\n\n"
+                      "**Auto-log:**\n"
+                      "• Status change → 🔄 logged\n"
+                      "• Progress update → 📊 logged\n"
+                      "• BLOCKED + reason → 🚧 logged as BLOCKER comment")
+        st.divider()
+        b1, b2 = st.columns(2)
+        b1.error("🔴 **BLOCKED**\nPM nhận email ngay\nKèm blocker reason\nTask hiện icon 🔴 trong bảng")
+        b2.success("✅ **COMPLETED**\nPM nhận email kèm:\n• Phase completion %\n• Project overall %\nactual_end tự set = today")
+
+    elif sop_choice == "👥 Quản lý Team (IL_7)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**Roles:**\n"
+                   "PROJECT_MANAGER, SOLUTION_ARCHITECT,\n"
+                   "SENIOR_ENGINEER, ENGINEER, SITE_ENGINEER,\n"
+                   "FAE, SALES, SUBCONTRACTOR, OTHER\n\n"
+                   "1 employee có thể có nhiều roles khác nhau trên cùng project.")
+        col_b.success("**Daily Rate mặc định theo level:**\n"
+                      "• Junior Engineer: 1,000,000 ₫\n"
+                      "• Engineer: 1,200,000 ₫\n"
+                      "• Senior Engineer: 1,500,000 ₫\n"
+                      "• PM: 2,100,000 ₫\n"
+                      "• Solution Architect: 2,500,000 ₫\n\n"
+                      "Tự gợi ý khi chọn Role, có thể override.")
+
+    elif sop_choice == "🔧 Log Issue (IL_8)":
+        st.divider()
+        st.info("**Issue workflow:** OPEN → IN_PROGRESS → RESOLVED → CLOSED\n\n"
+                "Có thể ESCALATED nếu không giải quyết được ở cấp engineer.")
+        st.warning("**Severity ảnh hưởng thứ tự hiển thị:** CRITICAL → HIGH → MEDIUM → LOW. "
+                   "Issues CRITICAL luôn hiện đầu tiên trong bảng.")
+
+    elif sop_choice == "⚠️ Risk Register (IL_8)":
+        st.divider()
+        st.info("**Risk Score = Probability × Impact (1–25)**\n\n"
+                "| | Negligible (1) | Minor (2) | Moderate (3) | Major (4) | Severe (5) |\n"
+                "|---|---|---|---|---|---|\n"
+                "| Rare (1) | 1 | 2 | 3 | 4 | 5 |\n"
+                "| Unlikely (2) | 2 | 4 | 6 | 8 | 10 |\n"
+                "| Possible (3) | 3 | 6 | **9** | **12** | **15** |\n"
+                "| Likely (4) | 4 | 8 | **12** | **16** | **20** |\n"
+                "| Almost Certain (5) | 5 | 10 | **15** | **20** | **25** |")
+        st.warning("**Status OCCURRED** = risk đã xảy ra → nên tạo Issue tương ứng để track resolution.")
+
+    elif sop_choice == "📝 Change Order (IL_8)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**Cost Impact** = Revised − Original\n\n"
+                   "Positive (+) = scope tăng → giá tăng\n"
+                   "Negative (−) = scope giảm → giá giảm\n\n"
+                   "KPI hiện tổng Approved + Pending impact.")
+        col_b.success("**Sau khi CO APPROVED + Customer Confirm:**\n"
+                      "1. Edit project → Amended Contract Value\n"
+                      "2. Tạo Estimate revision mới\n"
+                      "3. Cập nhật tasks/phases nếu scope thay đổi\n"
+                      "4. COGS Dashboard → Sync lại")
+
+    elif sop_choice == "📊 Progress Report (IL_9)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**RAG Status (3 cấp):**\n\n"
+                   "🟢 ON_TRACK — mọi thứ đúng kế hoạch\n"
+                   "🟡 AT_RISK — có nguy cơ delay\n"
+                   "🔴 DELAYED — đã chậm so với plan\n"
+                   "🔵 AHEAD — đi trước kế hoạch\n"
+                   "🔴 CRITICAL — nghiêm trọng, cần escalate")
+        col_b.success("**Narrative sections:**\n\n"
+                      "• **Summary**: tóm tắt 1–2 câu\n"
+                      "• **Accomplishments**: tuần/tháng này làm được gì\n"
+                      "• **Planned Next**: kế hoạch kỳ tới\n"
+                      "• **Blockers**: vấn đề đang chặn\n\n"
+                      "Completion % pre-fill từ project data.")
+
+    elif sop_choice == "✅ Quality Checklist (IL_9)":
+        st.divider()
+        col_a, col_b = st.columns(2)
+        col_a.info("**Checklist Types:**\n\n"
+                   "• **FAT** — Factory Acceptance Test\n"
+                   "• **SAT** — Site Acceptance Test\n"
+                   "• **INSPECTION** — Quality inspection\n"
+                   "• **COMMISSIONING** — System commissioning\n"
+                   "• **HANDOVER** — Project handover\n"
+                   "• **SAFETY** — Safety inspection")
+        col_b.success("**Pass → Payment flow:**\n\n"
+                      "Quality PASSED + Customer Signed Off\n"
+                      "→ Milestone status = COMPLETED\n"
+                      "→ Invoice → Milestone PAID\n\n"
+                      "FAILED → set Retest Date + Next Action\n"
+                      "→ Fix → Retest → PASSED")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
