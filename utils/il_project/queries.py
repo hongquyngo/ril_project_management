@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 from sqlalchemy import text
 from ..db import execute_query, execute_query_df, execute_update, get_transaction
+from .wbs_helpers import log_perf
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ def generate_project_code(user_id: int) -> str:
 # PROJECTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_projects_df(
     status: Optional[str] = None,
     type_id: Optional[int] = None,
@@ -237,6 +239,7 @@ def soft_delete_project(project_id: int, modified_by: str) -> bool:
 # ESTIMATES
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_estimates(project_id: int) -> List[Dict]:
     return execute_query("""
         SELECT id, estimate_version, estimate_label, estimate_type, is_active,
@@ -359,6 +362,7 @@ def update_estimate(estimate_id: int, data: Dict, modified_by: str) -> bool:
 # LABOR LOGS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_labor_logs_df(
     project_id: Optional[int] = None,
     phase: Optional[str] = None,
@@ -459,6 +463,7 @@ def soft_delete_labor_log(log_id: int, modified_by: str) -> bool:
 # EXPENSES
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_expenses_df(
     project_id: Optional[int] = None,
     phase: Optional[str] = None,
@@ -560,6 +565,7 @@ def update_expense(expense_id: int, data: Dict, modified_by: str) -> bool:
 # PRE-SALES COSTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_presales_costs_df(project_id: int) -> pd.DataFrame:
     return execute_query_df("""
         SELECT
@@ -667,6 +673,7 @@ def get_cogs_actual(project_id: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
+@log_perf
 def get_all_cogs_summary_df() -> pd.DataFrame:
     """Cross-project COGS summary: estimate vs actual with GP% for portfolio view."""
     return execute_query_df("""
@@ -878,6 +885,7 @@ def finalize_cogs_actual(project_id: int, finalized_by: str) -> bool:
 # VARIANCE
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_variance_df(project_id: int) -> pd.DataFrame:
     return execute_query_df("""
         SELECT cogs_category, estimated_amount, actual_amount,
@@ -939,6 +947,7 @@ def upsert_variance_row(
 # BENCHMARKS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_benchmarks_df(type_id: Optional[int] = None) -> pd.DataFrame:
     sql = """
         SELECT b.id, pt.name AS project_type, pt.code AS type_code,
@@ -1091,6 +1100,7 @@ def get_quotation_for_product(product_id: int, customer_id: Optional[int] = None
 # ESTIMATE LINE ITEMS — CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_estimate_line_items(estimate_id: int) -> pd.DataFrame:
     return execute_query_df("""
         SELECT

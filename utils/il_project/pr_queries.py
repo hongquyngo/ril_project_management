@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from datetime import date, datetime
 import pandas as pd
 from sqlalchemy import text
+from .wbs_helpers import log_perf
 
 import re
 
@@ -124,6 +125,7 @@ def generate_pr_number() -> str:
 # PR CRUD
 # ══════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_pr_list_df(
     project_id: Optional[int] = None,
     status: Optional[str] = None,
@@ -146,6 +148,7 @@ def get_pr_list_df(
     return _execute_query_df(sql, params)
 
 
+@log_perf
 def get_pending_for_approver(approver_employee_id: int) -> pd.DataFrame:
     """Get PRs pending approval for a specific approver."""
     return _execute_query_df("""
@@ -179,6 +182,7 @@ def get_pr(pr_id: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
+@log_perf
 def get_pr_items_df(pr_id: int) -> pd.DataFrame:
     """Get line items for a PR, including PO tracking and costbook status."""
     return _execute_query_df("""
@@ -201,6 +205,7 @@ def get_pr_items_df(pr_id: int) -> pd.DataFrame:
     """, {'prid': pr_id})
 
 
+@log_perf
 def get_pr_costbook_status(pr_id: int) -> Dict:
     """
     Summary of costbook and PO status for PR items.
@@ -260,6 +265,7 @@ def get_pr_costbook_status(pr_id: int) -> Dict:
     }
 
 
+@log_perf
 def get_costbook_warnings_batch(pr_ids: List[int]) -> Dict[int, Dict]:
     """
     Batch query: costbook status for multiple PRs at once.
@@ -987,6 +993,7 @@ def request_revision(pr_id: int, approver_employee_id: int, notes: str) -> Dict:
 # APPROVAL HISTORY
 # ══════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_pr_approval_history(pr_id: int) -> List[Dict]:
     """Get approval history for a PR."""
     return _execute_query("""
@@ -1030,6 +1037,7 @@ _COGS_LABELS = {
 }
 
 
+@log_perf
 def get_budget_vs_pr(project_id: int) -> Dict:
     """
     Compare Estimate budget (A→F) vs PR committed amounts by COGS category.
@@ -1212,6 +1220,7 @@ def get_budget_vs_pr(project_id: int) -> Dict:
 # IMPORT FROM ESTIMATE
 # ══════════════════════════════════════════════════════════════════════
 
+@log_perf
 def get_importable_estimate_items(estimate_id: int) -> List[Dict]:
     """
     Get estimate line items that can be imported into a PR.
@@ -2271,6 +2280,7 @@ def create_po_note(note_text: str, creator: str) -> Optional[int]:
         return None
 
 
+@log_perf
 def get_po_enrichment_data(pr_id: int) -> Dict:
     """
     Fetch enrichment data for the PO creation dialog UI.
