@@ -17,8 +17,8 @@ from utils.il_project import (
     get_estimate_line_items, create_estimate_line_item, delete_estimate_line_item,
     get_costbook_products_for_import, get_active_costbooks,
     get_rate_to_vnd,
-    update_line_item_attachment, create_estimate_attachment,
-    get_estimate_attachments, delete_estimate_attachment,
+    create_estimate_media, get_estimate_medias, delete_estimate_media,
+    create_line_item_media, get_line_item_medias,
 )
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -560,15 +560,18 @@ with tab_new:
                         if ok:
                             li_saved = get_estimate_line_items(new_id)
                             if not li_saved.empty and i < len(li_saved):
-                                update_line_item_attachment(int(li_saved.iloc[i]['id']), s3_key, att['name'])
+                                create_line_item_media(
+                                    int(li_saved.iloc[i]['id']),
+                                    s3_key, att['name'], created_by=user_id)
                 # Upload estimate-level attachments
                 if est_files:
                     for f in est_files:
                         ok, s3_key = s3.upload_project_file(f.read(), f.name, project_id)
                         if ok:
-                            create_estimate_attachment(new_id, s3_key, f.name,
-                                file_size_kb=f.size // 1024 if hasattr(f, 'size') else None,
-                                uploaded_by=user_id)
+                            create_estimate_media(
+                                new_id, s3_key, f.name,
+                                document_type='OTHER',
+                                created_by=user_id)
             st.success(f"✅ Rev {next_version} saved with {len(items)} line items!")
             _clear_items(); st.cache_data.clear(); st.rerun()
         except Exception as e:
@@ -621,8 +624,8 @@ with tab_active:
     rows.append({'Item': '**TOTAL**', 'Amount': f"{tc:,.0f}", '%': ''})
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     if active_est.get('assessment_notes'): st.info(f"📝 {active_est['assessment_notes']}")
-    # Attachments
-    est_atts = get_estimate_attachments(active_est['id'])
+    # Attachments (Pattern A: medias junction)
+    est_atts = get_estimate_medias(active_est['id'])
     if est_atts:
         st.divider()
         st.subheader(f"📎 Attachments ({len(est_atts)})")
@@ -634,14 +637,20 @@ with tab_active:
             cols[0].markdown(f"📄 **{att['filename']}**{desc_text}")
             if url:
                 cols[1].markdown(f"[⬇️ Download]({url})")
-    # Line item attachments
-    if not li_df.empty and 'attachment_filename' in li_df.columns:
-        att_items = li_df[li_df['attachment_filename'].notna() & (li_df['attachment_filename'] != '')]
-        if not att_items.empty:
-            if not est_atts: st.divider(); st.subheader("📎 Line Item Attachments")
-            else: st.caption("**Line item attachments:**")
-            for _, row in att_items.iterrows():
-                st.caption(f"📎 {row.get('item_description','')}: **{row['attachment_filename']}**")
+    # Line item attachments (Pattern A: medias junction)
+    li_atts = get_line_item_medias(active_est['id'])
+    if li_atts:
+        if not est_atts:
+            st.divider(); st.subheader("📎 Line Item Attachments")
+        else:
+            st.caption("**Line item attachments:**")
+        # Build lookup: line_item_id → item_description
+        li_desc_map = {}
+        if not li_df.empty:
+            li_desc_map = dict(zip(li_df['id'].astype(int), li_df['item_description']))
+        for att in li_atts:
+            desc = li_desc_map.get(att.get('line_item_id', 0), '')
+            st.caption(f"📎 {desc}: **{att['filename']}**")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — History

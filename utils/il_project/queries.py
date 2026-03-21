@@ -555,67 +555,6 @@ def update_expense(expense_id: int, data: Dict, modified_by: str) -> bool:
     return rows > 0
 
 
-def update_expense_attachment(expense_id: int, s3_key: str, filename: str, modified_by: str) -> bool:
-    """
-    Store S3 key + filename after uploading expense attachment.
-
-    NOTE: DDL may not have attachment columns on il_project_expenses.
-    If columns are missing, run migration:
-        ALTER TABLE il_project_expenses
-            ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL,
-            ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;
-    """
-    try:
-        rows = execute_update("""
-            UPDATE il_project_expenses
-            SET attachment_s3_key = :key, attachment_filename = :name,
-                version = version + 1
-            WHERE id = :id AND delete_flag = 0
-        """, {'id': expense_id, 'key': s3_key, 'name': filename})
-        return rows > 0
-    except Exception as e:
-        if 'Unknown column' in str(e):
-            logger.error(
-                f"il_project_expenses missing attachment columns. "
-                f"Run: ALTER TABLE il_project_expenses "
-                f"ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL, "
-                f"ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;"
-            )
-        else:
-            logger.error(f"update_expense_attachment failed: {e}")
-        return False
-
-
-def update_labor_attachment(log_id: int, s3_key: str, filename: str, modified_by: str) -> bool:
-    """
-    Store S3 key + filename after uploading labor log attachment.
-
-    NOTE: DDL may not have attachment columns on il_project_labor_logs.
-    If columns are missing, run migration:
-        ALTER TABLE il_project_labor_logs
-            ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL,
-            ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;
-    """
-    try:
-        rows = execute_update("""
-            UPDATE il_project_labor_logs
-            SET attachment_s3_key = :key, attachment_filename = :name,
-                version = version + 1
-            WHERE id = :id AND delete_flag = 0
-        """, {'id': log_id, 'key': s3_key, 'name': filename})
-        return rows > 0
-    except Exception as e:
-        if 'Unknown column' in str(e):
-            logger.error(
-                f"il_project_labor_logs missing attachment columns. "
-                f"Run: ALTER TABLE il_project_labor_logs "
-                f"ADD COLUMN attachment_s3_key varchar(500) DEFAULT NULL, "
-                f"ADD COLUMN attachment_filename varchar(255) DEFAULT NULL;"
-            )
-        else:
-            logger.error(f"update_labor_attachment failed: {e}")
-        return False
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PRE-SALES COSTS
@@ -1163,7 +1102,6 @@ def get_estimate_line_items(estimate_id: int) -> pd.DataFrame:
             li.unit_sell, sc.code AS sell_currency, li.sell_exchange_rate,
             li.quantity, li.uom,
             li.amount_cost_vnd, li.amount_sell_vnd,
-            li.attachment_s3_key, li.attachment_filename,
             li.notes, li.view_order
         FROM il_estimate_line_items li
         LEFT JOIN currencies cc ON li.cost_currency_id = cc.id
@@ -1254,51 +1192,205 @@ def get_active_costbooks() -> List[Dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ESTIMATE ATTACHMENTS
+# MEDIA HELPERS — Pattern A (shared across all IL entities)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def update_line_item_attachment(item_id: int, s3_key: str, filename: str) -> bool:
-    """Attach a file to a specific line item (vendor quote per item)."""
-    rows = execute_update("""
-        UPDATE il_estimate_line_items
-        SET attachment_s3_key = :key, attachment_filename = :name
-        WHERE id = :id AND delete_flag = 0
-    """, {'id': item_id, 'key': s3_key, 'name': filename})
-    return rows > 0
-
-
-def create_estimate_attachment(estimate_id: int, s3_key: str, filename: str,
-                                description: str = None, file_size_kb: int = None,
-                                uploaded_by: str = None) -> int:
-    """Upload estimate-level attachment (scope, BOQ, proposal)."""
-    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+def _create_media(s3_key: str, filename: str, created_by: str) -> int:
+    """
+    Insert into medias table. Returns media_id.
+    medias.path = S3 key, medias.name = original filename.
+    """
     engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(text("""
-            INSERT INTO il_estimate_attachments
-                (estimate_id, s3_key, filename, file_type, file_size_kb, description, uploaded_by)
-            VALUES
-                (:eid, :key, :name, :ftype, :size, :desc, :by)
-        """), {'eid': estimate_id, 'key': s3_key, 'name': filename,
-               'ftype': ext, 'size': file_size_kb, 'desc': description, 'by': uploaded_by})
+            INSERT INTO medias (name, path, created_by, created_date, version)
+            VALUES (:name, :path, :created_by, NOW(), 0)
+        """), {'name': filename, 'path': s3_key, 'created_by': created_by})
         conn.commit()
         return result.lastrowid
 
 
-def get_estimate_attachments(estimate_id: int) -> List[Dict]:
+# ══════════════════════════════════════════════════════════════════════════════
+# ESTIMATE MEDIAS — Pattern A (replaces il_estimate_attachments)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_estimate_media(
+    estimate_id: int, s3_key: str, filename: str,
+    document_type: str = 'OTHER', description: Optional[str] = None,
+    created_by: str = None,
+) -> int:
+    """Attach file to estimate via medias + il_estimate_medias junction."""
+    media_id = _create_media(s3_key, filename, created_by)
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            INSERT INTO il_estimate_medias
+                (estimate_id, media_id, document_type, description,
+                 delete_flag, created_by, created_date)
+            VALUES (:eid, :mid, :dtype, :desc, 0, :by, NOW())
+        """), {
+            'eid': estimate_id, 'mid': media_id,
+            'dtype': document_type, 'desc': description, 'by': created_by,
+        })
+        conn.commit()
+        return result.lastrowid
+
+
+def get_estimate_medias(estimate_id: int) -> List[Dict]:
     """List all attachments for an estimate."""
     return execute_query("""
-        SELECT id, s3_key, filename, file_type, file_size_kb,
-               description, uploaded_by, upload_date
-        FROM il_estimate_attachments
-        WHERE estimate_id = :eid AND delete_flag = 0
-        ORDER BY upload_date DESC
+        SELECT
+            em.id AS junction_id, em.media_id,
+            m.path AS s3_key, m.name AS filename,
+            em.document_type, em.description,
+            em.created_by, em.created_date
+        FROM il_estimate_medias em
+        JOIN medias m ON em.media_id = m.id
+        WHERE em.estimate_id = :eid AND em.delete_flag = 0
+        ORDER BY em.created_date DESC
     """, {'eid': estimate_id})
 
 
-def delete_estimate_attachment(attachment_id: int) -> bool:
+def delete_estimate_media(junction_id: int) -> bool:
+    """Soft-delete estimate attachment."""
     rows = execute_update(
-        "UPDATE il_estimate_attachments SET delete_flag=1 WHERE id=:id",
-        {'id': attachment_id}
+        "UPDATE il_estimate_medias SET delete_flag=1 WHERE id=:id",
+        {'id': junction_id}
+    )
+    return rows > 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ESTIMATE LINE ITEM MEDIAS — Pattern A (replaces inline columns)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_line_item_media(
+    line_item_id: int, s3_key: str, filename: str,
+    created_by: str = None,
+) -> int:
+    """Attach file to estimate line item. Supports multi-file per item."""
+    media_id = _create_media(s3_key, filename, created_by)
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            INSERT INTO il_estimate_line_item_medias
+                (line_item_id, media_id, delete_flag, created_by, created_date)
+            VALUES (:lid, :mid, 0, :by, NOW())
+        """), {'lid': line_item_id, 'mid': media_id, 'by': created_by})
+        conn.commit()
+        return result.lastrowid
+
+
+def get_line_item_medias(estimate_id: int) -> List[Dict]:
+    """Get all attachments for all line items of an estimate."""
+    return execute_query("""
+        SELECT
+            lm.id AS junction_id, lm.line_item_id,
+            m.path AS s3_key, m.name AS filename,
+            lm.created_by, lm.created_date
+        FROM il_estimate_line_item_medias lm
+        JOIN medias m ON lm.media_id = m.id
+        WHERE lm.line_item_id IN (
+            SELECT id FROM il_estimate_line_items
+            WHERE estimate_id = :eid AND delete_flag = 0
+        )
+        AND lm.delete_flag = 0
+        ORDER BY lm.line_item_id, lm.created_date
+    """, {'eid': estimate_id})
+
+
+def delete_line_item_media(junction_id: int) -> bool:
+    """Soft-delete line item attachment."""
+    rows = execute_update(
+        "UPDATE il_estimate_line_item_medias SET delete_flag=1 WHERE id=:id",
+        {'id': junction_id}
+    )
+    return rows > 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXPENSE MEDIAS — Pattern A (junction table already existed in DDL)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_expense_media(
+    expense_id: int, s3_key: str, filename: str,
+    created_by: str = None,
+) -> int:
+    """Attach file to expense via il_project_expense_medias."""
+    media_id = _create_media(s3_key, filename, created_by)
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            INSERT INTO il_project_expense_medias
+                (expense_id, media_id, delete_flag, created_by, created_date)
+            VALUES (:eid, :mid, 0, :by, NOW())
+        """), {'eid': expense_id, 'mid': media_id, 'by': created_by})
+        conn.commit()
+        return result.lastrowid
+
+
+def get_expense_medias(expense_id: int) -> List[Dict]:
+    """Get all attachments for an expense."""
+    return execute_query("""
+        SELECT
+            em.id AS junction_id, em.media_id,
+            m.path AS s3_key, m.name AS filename,
+            em.created_by, em.created_date
+        FROM il_project_expense_medias em
+        JOIN medias m ON em.media_id = m.id
+        WHERE em.expense_id = :eid AND em.delete_flag = 0
+        ORDER BY em.created_date
+    """, {'eid': expense_id})
+
+
+def delete_expense_media(junction_id: int) -> bool:
+    """Soft-delete expense attachment."""
+    rows = execute_update(
+        "UPDATE il_project_expense_medias SET delete_flag=1 WHERE id=:id",
+        {'id': junction_id}
+    )
+    return rows > 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LABOR LOG MEDIAS — Pattern A (junction table already existed in DDL)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_labor_media(
+    labor_log_id: int, s3_key: str, filename: str,
+    created_by: str = None,
+) -> int:
+    """Attach file to labor log via il_project_labor_log_medias."""
+    media_id = _create_media(s3_key, filename, created_by)
+    engine = _get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            INSERT INTO il_project_labor_log_medias
+                (labor_log_id, media_id, delete_flag, created_by, created_date)
+            VALUES (:lid, :mid, 0, :by, NOW())
+        """), {'lid': labor_log_id, 'mid': media_id, 'by': created_by})
+        conn.commit()
+        return result.lastrowid
+
+
+def get_labor_medias(labor_log_id: int) -> List[Dict]:
+    """Get all attachments for a labor log."""
+    return execute_query("""
+        SELECT
+            lm.id AS junction_id, lm.media_id,
+            m.path AS s3_key, m.name AS filename,
+            lm.created_by, lm.created_date
+        FROM il_project_labor_log_medias lm
+        JOIN medias m ON lm.media_id = m.id
+        WHERE lm.labor_log_id = :lid AND lm.delete_flag = 0
+        ORDER BY lm.created_date
+    """, {'lid': labor_log_id})
+
+
+def delete_labor_media(junction_id: int) -> bool:
+    """Soft-delete labor log attachment."""
+    rows = execute_update(
+        "UPDATE il_project_labor_log_medias SET delete_flag=1 WHERE id=:id",
+        {'id': junction_id}
     )
     return rows > 0

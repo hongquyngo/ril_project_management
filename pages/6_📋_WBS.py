@@ -23,12 +23,13 @@ from utils.il_project.wbs_queries import (
     get_checklists, create_checklist_item, toggle_checklist_item, delete_checklist_item,
     # Comments
     get_task_comments, create_comment,
-    # Media
-    get_task_media,
     # Members (read-only)
     get_project_members_df,
     # Completion sync
     sync_completion_up,
+)
+from utils.il_project.wbs_execution_queries import (
+    get_entity_medias, upload_and_attach, unlink_media, get_attachment_url,
 )
 from utils.il_project.wbs_helpers import (
     TASK_STATUS_OPTIONS, TASK_STATUS_ICONS, PHASE_STATUS_OPTIONS,
@@ -329,7 +330,7 @@ with tab_team:
             },
         )
 
-    st.page_link("pages/7_👥_WBS_Team.py", label="👥 Manage Team & Resources →", icon="👥")
+    st.page_link("pages/IL_7_👥_Team.py", label="👥 Manage Team & Resources →", icon="👥")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -627,7 +628,7 @@ def _dialog_view_task(task_id: int):
     k4.metric("Assignee", task.get('assignee_name') or '—')
 
     # Tabs inside dialog (no nested dialog — follows milestone panel pattern)
-    dt_info, dt_checklist, dt_comments = st.tabs(["📋 Info", "✅ Checklist", "💬 Comments"])
+    dt_info, dt_checklist, dt_comments, dt_files = st.tabs(["📋 Info", "✅ Checklist", "💬 Comments", "📎 Files"])
 
     # ── Info tab ──────────────────────────────────────────────────────────────
     with dt_info:
@@ -703,6 +704,45 @@ def _dialog_view_task(task_id: int):
                         st.rerun()
                     else:
                         st.error("Comment text required.")
+
+    # ── Files tab ─────────────────────────────────────────────────────────────
+    with dt_files:
+        files = get_entity_medias('task', task_id)
+        if files:
+            st.markdown(f"**{len(files)} file(s)**")
+            for f in files:
+                fc1, fc2 = st.columns([5, 1])
+                url = get_attachment_url(f['s3_key'])
+                label = f['file_name'] or 'file'
+                desc = f" — {f['description']}" if f.get('description') else ''
+                if url:
+                    fc1.markdown(f"📄 [{label}]({url}){desc}")
+                else:
+                    fc1.caption(f"📄 {label}{desc}")
+                if fc2.button("🗑", key=f"tf_rm_{f['junction_id']}"):
+                    unlink_media('task', f['junction_id'])
+                    st.rerun()
+        else:
+            st.caption("No files attached.")
+
+        with st.expander("➕ Attach File"):
+            uploaded = st.file_uploader(
+                "Choose file", type=['pdf', 'png', 'jpg', 'jpeg', 'xlsx', 'docx'],
+                key=f"tf_upload_{task_id}",
+            )
+            tf_desc = st.text_input("Description (optional)", key=f"tf_desc_{task_id}")
+            if uploaded:
+                if st.button("📤 Upload", key=f"tf_do_{task_id}"):
+                    ok = upload_and_attach(
+                        'task', task_id, task['project_id'],
+                        uploaded.getvalue(), uploaded.name,
+                        description=tf_desc.strip() or None, created_by=user_id,
+                    )
+                    if ok:
+                        st.success(f"✅ Attached: {uploaded.name}")
+                        st.rerun()
+                    else:
+                        st.error("Upload failed.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

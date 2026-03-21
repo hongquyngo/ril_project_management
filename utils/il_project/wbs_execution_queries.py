@@ -44,6 +44,7 @@ def _create_media_record(name: str, path: str, created_by: str) -> int:
 # ── Config per entity type ────────────────────────────────────────────────────
 
 _MEDIA_CONFIG = {
+    'task':              {'table': 'il_task_media',               'fk': 'task_id'},
     'issue':             {'table': 'il_issue_medias',             'fk': 'issue_id'},
     'risk':              {'table': 'il_risk_medias',              'fk': 'risk_id'},
     'change_order':      {'table': 'il_change_order_medias',      'fk': 'change_order_id'},
@@ -115,7 +116,8 @@ def upload_and_attach(
         ts = int(datetime.now().timestamp() * 1000)
         safe = filename.replace(" ", "_")
         subfolder = {
-            'issue': 'issues', 'risk': 'risks', 'change_order': 'change_orders',
+            'task': 'tasks', 'issue': 'issues', 'risk': 'risks',
+            'change_order': 'change_orders',
             'progress_report': 'progress_reports', 'quality_checklist': 'quality_checklists',
         }.get(entity_type, entity_type)
         s3_key = f"il-project-file/{project_id}/{subfolder}/{entity_id}/{ts}_{safe}"
