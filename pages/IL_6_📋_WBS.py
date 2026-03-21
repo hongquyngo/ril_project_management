@@ -36,6 +36,10 @@ from utils.il_project.wbs_helpers import (
     DEPENDENCY_TYPES, DEPENDENCY_LABELS, DEFAULT_PHASE_TEMPLATES,
     fmt_status, fmt_priority, fmt_completion, fmt_hours, comment_type_icon,
 )
+from utils.il_project.wbs_notify import (
+    notify_on_task_status_change,
+    notify_on_task_assign,
+)
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -521,6 +525,7 @@ def _dialog_create_task():
             return
         try:
             new_id = create_task(data, user_id)
+            notify_on_task_assign(new_id, None, data.get('assignee_id'), int(user_id))
             st.success(f"✅ Task created! (ID: {new_id})")
             st.cache_data.clear()
             st.rerun()
@@ -552,8 +557,12 @@ def _dialog_edit_task(task_id: int):
             st.error("Task Name is required.")
             return
         try:
+            old_assignee = task.get('assignee_id')
+            old_status   = task.get('status')
             update_task(task_id, data, user_id)
             sync_completion_up(task_id, user_id)
+            notify_on_task_assign(task_id, old_assignee, data.get('assignee_id'), int(user_id))
+            notify_on_task_status_change(task_id, old_status, data.get('status', old_status), int(user_id))
             st.success("✅ Task updated!")
             st.cache_data.clear()
             st.rerun()
@@ -572,12 +581,19 @@ def _dialog_quick_update(task_id: int):
                               index=TASK_STATUS_OPTIONS.index(task['status']) if task.get('status') in TASK_STATUS_OPTIONS else 0)
         pct = st.slider("Completion %", 0, 100, int(task.get('completion_percent') or 0), step=5)
         hours = st.number_input("Actual Hours", value=float(task.get('actual_hours') or 0), min_value=0.0)
+        blocker_note = st.text_input("Blocker reason (if blocked)", help="Required when status = BLOCKED")
         submitted = st.form_submit_button("💾 Update", type="primary", width="stretch")
 
     if submitted:
         try:
+            old_status = task.get('status', '')
             quick_update_task(task_id, status, float(pct), hours or None, user_id)
             sync_completion_up(task_id, user_id)
+            # Post blocker comment if provided
+            if blocker_note.strip() and status == 'BLOCKED':
+                create_comment(task_id, int(user_id), f"🚧 {blocker_note.strip()}", 'BLOCKER')
+            notify_on_task_status_change(task_id, old_status, status, int(user_id),
+                                         blocker_reason=blocker_note.strip() or None)
             st.success("✅ Updated!")
             st.cache_data.clear()
             st.rerun()

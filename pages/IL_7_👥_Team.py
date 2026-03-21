@@ -28,6 +28,7 @@ from utils.il_project.wbs_helpers import (
     MEMBER_ROLES, MEMBER_ROLE_LABELS,
 )
 from utils.il_project.helpers import DEFAULT_RATES_BY_LEVEL
+from utils.il_project.wbs_notify import notify_member_added
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -323,6 +324,16 @@ def _dialog_create_member():
                     return
 
             new_id = create_member(data, user_id)
+            notify_member_added(
+                project_code=proj_info.get('project_code', ''),
+                project_name=proj_info.get('project_name', ''),
+                project_id=selected_project_id,
+                employee_id=data['employee_id'],
+                role=data['role'],
+                allocation_percent=data.get('allocation_percent', 100),
+                added_by_name=auth.get_user_display_name(),
+                pm_name=proj_info.get('pm_name'),
+            )
             st.success(f"✅ Member added! (ID: {new_id})")
             st.cache_data.clear()
             st.rerun()

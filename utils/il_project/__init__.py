@@ -224,6 +224,17 @@ from .wbs_helpers import (
     comment_type_icon,
 )
 
+from .wbs_notify import (
+    notify_task_assigned,
+    notify_member_added,
+    notify_task_blocked,
+    notify_task_completed,
+    notify_on_task_status_change,
+    notify_on_task_assign,
+    build_wbs_deep_link,
+    build_team_deep_link,
+)
+
 __all__ = [
     # ── Lookups ──
     'get_project_types', 'get_employees', 'get_companies', 'get_currencies', 'generate_project_code',
@@ -312,4 +323,9 @@ __all__ = [
     'PRIORITY_OPTIONS', 'PRIORITY_ICONS', 'MEMBER_ROLES', 'MEMBER_ROLE_LABELS',
     'DEPENDENCY_TYPES', 'DEPENDENCY_LABELS', 'DEFAULT_PHASE_TEMPLATES',
     'fmt_status', 'fmt_priority', 'fmt_completion', 'fmt_hours', 'comment_type_icon',
+    # ── WBS Email Notifications ──
+    'notify_task_assigned', 'notify_member_added',
+    'notify_task_blocked', 'notify_task_completed',
+    'notify_on_task_status_change', 'notify_on_task_assign',
+    'build_wbs_deep_link', 'build_team_deep_link',
 ]
