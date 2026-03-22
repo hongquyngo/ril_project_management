@@ -711,7 +711,7 @@ _FAQ: List[Dict] = [
 
 2. **Role has insufficient permissions.** If your role is **Sales** or **Other**, you can only view — no Quick Update or checklist editing, even on your own tasks.
    → **Fix:** Ask PM to change your role to Engineer/Site Engineer/FAE.""",
-        'roles': ['engineer', 'viewer', 'restricted'],
+        'roles': ['pm', 'engineer', 'viewer', 'restricted'],
         'tags': ['checklist', 'quick-update', 'permission', 'cannot', 'quyền', 'không được', 'thêm', 'cập nhật', 'member', 'team'],
     },
     {
