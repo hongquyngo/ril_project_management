@@ -33,7 +33,7 @@ Triggers:
 All sends are non-blocking: failures are logged but never crash the app.
 """
 
-_WBS_NOTIFY_VERSION = '3.1'  # ← Check this in logs to verify deployment
+_WBS_NOTIFY_VERSION = '3.2'  # ← removed employee_code column reference
 
 import logging
 from typing import List, Optional, Dict
@@ -164,7 +164,7 @@ def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
     try:
         from ..db import execute_query
         rows = execute_query("""
-            SELECT e.id, e.employee_code,
+            SELECT e.id,
                    NULLIF(TRIM(CONCAT_WS(' ', e.first_name, e.last_name)), '') AS full_name,
                    COALESCE(NULLIF(TRIM(e.email), ''), u.email) AS email,
                    u.username
@@ -182,7 +182,7 @@ def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
                 'id': r['id'],
                 'name': r['full_name'] or r.get('username') or f"Employee #{employee_id}",
                 'email': r.get('email'),
-                'code': r.get('employee_code', ''),
+                'code': '',
             }
             logger.info(f"📧 _resolve_person({employee_id}) → name='{result['name']}', email='{result['email']}'")
             return result
