@@ -14,6 +14,7 @@ import time
 import functools
 import logging
 from typing import Dict, List, Optional, Tuple
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +516,187 @@ def compute_action_items(
     sev_order = {'critical': 0, 'high': 1, 'medium': 2}
     items.sort(key=lambda x: sev_order.get(x['severity'], 9))
     return items
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEAM ENRICHMENT & ALERTS (Phase 2-4 for Page 7 v3.0)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def enrich_members_with_tasks(members_df, tasks_df) -> 'pd.DataFrame':
+    """
+    Add task stats per member from cached bootstrap data.
+    Columns added: task_count, overdue_count, avg_completion, total_est_hours, total_actual_hours
+    Cost: ~0ms (pandas groupby on cached DataFrames).
+    """
+    import pandas as pd
+    from datetime import date
+
+    if members_df.empty:
+        return members_df
+
+    result = members_df.copy()
+    # Init default columns
+    for col in ['task_count', 'overdue_count', 'avg_completion', 'total_est_hours', 'total_actual_hours']:
+        result[col] = 0
+    result['avg_completion'] = result['avg_completion'].astype(float)
+
+    if tasks_df.empty or 'assignee_id' not in tasks_df.columns:
+        return result
+
+    active = tasks_df[~tasks_df['status'].isin(['COMPLETED', 'CANCELLED'])].copy()
+    if active.empty:
+        return result
+
+    today = date.today()
+
+    # Task count per assignee
+    counts = active.groupby('assignee_id')['id'].count().rename('task_count')
+
+    # Overdue count
+    if 'planned_end' in active.columns:
+        has_due = active[active['planned_end'].notna()].copy()
+        if not has_due.empty:
+            has_due['_overdue'] = pd.to_datetime(has_due['planned_end']).dt.date < today
+            overdue = has_due.groupby('assignee_id')['_overdue'].sum().rename('overdue_count')
+        else:
+            overdue = pd.Series(dtype=float, name='overdue_count')
+    else:
+        overdue = pd.Series(dtype=float, name='overdue_count')
+
+    # Avg completion
+    avg_comp = active.groupby('assignee_id')['completion_percent'].mean().rename('avg_completion')
+
+    # Hours
+    est_h = active.groupby('assignee_id')['estimated_hours'].sum().rename('total_est_hours')
+    act_h = active.groupby('assignee_id')['actual_hours'].sum().rename('total_actual_hours')
+
+    # Merge all stats
+    stats = pd.concat([counts, overdue, avg_comp, est_h, act_h], axis=1).reset_index()
+    stats.columns = ['assignee_id', 'task_count', 'overdue_count', 'avg_completion', 'total_est_hours', 'total_actual_hours']
+    stats = stats.fillna(0)
+
+    # Also count completed tasks
+    completed = tasks_df[tasks_df['status'] == 'COMPLETED']
+    if not completed.empty:
+        done_counts = completed.groupby('assignee_id')['id'].count().rename('done_count').reset_index()
+        stats = stats.merge(done_counts, on='assignee_id', how='left')
+        stats['done_count'] = stats['done_count'].fillna(0)
+    else:
+        stats['done_count'] = 0
+
+    # Drop default columns and merge enriched ones
+    result = result.drop(columns=['task_count', 'overdue_count', 'avg_completion',
+                                   'total_est_hours', 'total_actual_hours'], errors='ignore')
+    result = result.merge(stats, left_on='employee_id', right_on='assignee_id', how='left')
+    result = result.drop(columns=['assignee_id'], errors='ignore')
+
+    # Fill NaN for members with no tasks
+    for col in ['task_count', 'overdue_count', 'avg_completion', 'total_est_hours', 'total_actual_hours', 'done_count']:
+        if col in result.columns:
+            result[col] = result[col].fillna(0)
+
+    return result
+
+
+def compute_team_alerts(enriched_df) -> List[Dict]:
+    """
+    Generate actionable alerts about team health for PM.
+    Input: enriched members DataFrame (from enrich_members_with_tasks).
+    """
+    alerts: List[Dict] = []
+
+    if enriched_df.empty:
+        return alerts
+
+    active_members = enriched_df
+    if 'is_active' in enriched_df.columns:
+        active_members = enriched_df[enriched_df['is_active'] == 1]
+
+    # Members with overdue tasks
+    if 'overdue_count' in active_members.columns:
+        overdue = active_members[active_members['overdue_count'] > 0]
+        for _, m in overdue.iterrows():
+            alerts.append({
+                'type': 'overdue', 'severity': 'high', 'icon': '⏰',
+                'member': m.get('member_name', '—'),
+                'role': MEMBER_ROLE_LABELS.get(m.get('role', ''), m.get('role', '')),
+                'message': f"has {int(m['overdue_count'])} overdue task(s) — follow up",
+            })
+
+    # Active members with 0 tasks (idle)
+    if 'task_count' in active_members.columns:
+        idle = active_members[active_members['task_count'] == 0]
+        for _, m in idle.iterrows():
+            alerts.append({
+                'type': 'idle', 'severity': 'medium', 'icon': '💤',
+                'member': m.get('member_name', '—'),
+                'role': MEMBER_ROLE_LABELS.get(m.get('role', ''), m.get('role', '')),
+                'message': "has 0 active tasks — consider assigning work",
+            })
+
+    # Inactive members still on roster
+    if 'is_active' in enriched_df.columns:
+        inactive = enriched_df[enriched_df['is_active'] == 0]
+        for _, m in inactive.iterrows():
+            alerts.append({
+                'type': 'inactive', 'severity': 'low', 'icon': '⚪',
+                'member': m.get('member_name', '—'),
+                'role': MEMBER_ROLE_LABELS.get(m.get('role', ''), m.get('role', '')),
+                'message': "is inactive — consider removing from project",
+            })
+
+    # Check if PM role exists
+    if 'role' in enriched_df.columns:
+        has_pm = (enriched_df['role'] == 'PROJECT_MANAGER').any()
+        if not has_pm:
+            alerts.insert(0, {
+                'type': 'no_pm', 'severity': 'high', 'icon': '🔴',
+                'member': '—', 'role': '—',
+                'message': "No PM assigned to this project!",
+            })
+
+    sev_order = {'high': 0, 'medium': 1, 'low': 2}
+    alerts.sort(key=lambda x: sev_order.get(x['severity'], 9))
+    return alerts
+
+
+def compute_cost_summary(members_df, working_days: int = 22) -> List[Dict]:
+    """
+    Compute cost summary grouped by role.
+    Est. monthly cost = daily_rate × allocation% / 100 × working_days.
+    """
+    import pandas as pd
+
+    if members_df.empty:
+        return []
+
+    active = members_df
+    if 'is_active' in members_df.columns:
+        active = members_df[members_df['is_active'] == 1]
+
+    if active.empty or 'role' not in active.columns:
+        return []
+
+    rows = []
+    for role, grp in active.groupby('role'):
+        count = len(grp)
+        avg_rate = grp['daily_rate'].mean() if grp['daily_rate'].notna().any() else 0
+        total_alloc = grp['allocation_percent'].sum() if 'allocation_percent' in grp.columns else 0
+        est_monthly = avg_rate * (total_alloc / 100) * working_days
+
+        rows.append({
+            'role': role,
+            'role_label': MEMBER_ROLE_LABELS.get(role, role),
+            'count': count,
+            'avg_rate': avg_rate,
+            'total_alloc': total_alloc,
+            'est_monthly': est_monthly,
+        })
+
+    # Sort by role hierarchy
+    role_order = {r: i for i, r in enumerate(MEMBER_ROLES)}
+    rows.sort(key=lambda x: role_order.get(x['role'], 99))
+    return rows
 
 
 DEPENDENCY_TYPES: List[str] = ['FS', 'FF', 'SS', 'SF']

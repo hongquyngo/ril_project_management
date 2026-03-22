@@ -671,6 +671,41 @@ def get_member_workload(employee_id: int) -> List[Dict]:
     """, {'eid': employee_id})
 
 
+@log_perf
+def get_team_workload_matrix(project_id: int) -> pd.DataFrame:
+    """
+    Batch query: for all members of a project, get their allocations across ALL projects.
+    Returns DataFrame with columns: employee_id, member_name, role, project_code, project_name, allocation_percent, is_current_project.
+    Much more efficient than N individual get_member_workload() calls.
+    """
+    return execute_query_df("""
+        SELECT
+            pm_cur.employee_id,
+            CONCAT(e.first_name, ' ', e.last_name) AS member_name,
+            pm_cur.role AS current_role,
+            p_all.project_code,
+            p_all.project_name,
+            pm_all.allocation_percent,
+            pm_all.role AS project_role,
+            CASE WHEN pm_all.project_id = :pid THEN 1 ELSE 0 END AS is_current_project
+        FROM il_project_members pm_cur
+        JOIN employees e ON pm_cur.employee_id = e.id
+        JOIN il_project_members pm_all ON pm_all.employee_id = pm_cur.employee_id
+            AND pm_all.is_active = 1 AND pm_all.delete_flag = 0
+        JOIN il_projects p_all ON pm_all.project_id = p_all.id
+            AND p_all.delete_flag = 0
+            AND p_all.status IN ('IN_PROGRESS', 'COMMISSIONING', 'CONTRACTED')
+        WHERE pm_cur.project_id = :pid
+          AND pm_cur.delete_flag = 0
+          AND pm_cur.is_active = 1
+        ORDER BY
+            FIELD(pm_cur.role, 'PROJECT_MANAGER','SOLUTION_ARCHITECT',
+                  'SENIOR_ENGINEER','ENGINEER','SITE_ENGINEER',
+                  'FAE','SALES','SUBCONTRACTOR','OTHER'),
+            e.first_name, p_all.project_code
+    """, {'pid': project_id})
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # COMPLETION AGGREGATION
 # ══════════════════════════════════════════════════════════════════════════════
