@@ -156,8 +156,9 @@ def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
         from ..db import execute_query
         rows = execute_query("""
             SELECT e.id, e.employee_code,
-                   CONCAT(e.first_name, ' ', e.last_name) AS full_name,
-                   COALESCE(NULLIF(TRIM(e.email), ''), u.email) AS email
+                   NULLIF(TRIM(CONCAT_WS(' ', e.first_name, e.last_name)), '') AS full_name,
+                   COALESCE(NULLIF(TRIM(e.email), ''), u.email) AS email,
+                   u.username
             FROM employees e
             LEFT JOIN users u
                 ON u.employee_id = e.id
@@ -170,7 +171,7 @@ def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
             r = rows[0]
             return {
                 'id': r['id'],
-                'name': r['full_name'] or f"Employee #{employee_id}",
+                'name': r['full_name'] or r.get('username') or f"Employee #{employee_id}",
                 'email': r.get('email'),
                 'code': r.get('employee_code', ''),
             }
@@ -198,7 +199,7 @@ def _get_project_context(project_id: int) -> Dict:
         from ..db import execute_query
         rows = execute_query("""
             SELECT p.project_code, p.project_name, p.pm_employee_id,
-                   CONCAT(e.first_name, ' ', e.last_name) AS pm_name,
+                   NULLIF(TRIM(CONCAT_WS(' ', e.first_name, e.last_name)), '') AS pm_name,
                    COALESCE(NULLIF(TRIM(e.email), ''), u.email) AS pm_email
             FROM il_projects p
             LEFT JOIN employees e ON p.pm_employee_id = e.id
@@ -402,7 +403,7 @@ def notify_task_assigned(
     # If fallback to PM, adjust email content
     if _assignee_no_email:
         assignee_display = assignee['name'] if assignee else f"Employee #{assignee_id}"
-        action = f"assigned to **{assignee_display}** (⚠️ no email on file)"
+        action = f"assigned to <strong>{assignee_display}</strong> (⚠️ no email on file)"
         subject_prefix = "[New Task — Assignee No Email]" if not is_reassign else "[Task Reassigned — Assignee No Email]"
 
     desc_block = ''
