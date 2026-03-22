@@ -567,6 +567,17 @@ Phase % = (10×100 + 20×50 + 10×0) / (10+20+10) = 2000/40 = **50%**
 | Upload file | ✅ | ✅ | ✅ | — | ✅ |
 
 **Admin** có quyền PM trên tất cả dự án.
+
+> ⚠️ **Quan trọng: Phải là member của dự án mới có quyền!**
+>
+> Quyền trên bảng này chỉ áp dụng khi bạn **đã được thêm vào Team** của dự án
+> (trang 👥 Team → ➕ Add Member). Nếu chưa được thêm, dù được assign task,
+> bạn vẫn chỉ là **Guest (read-only)** — không thể Quick Update, thêm checklist,
+> hay sửa task.
+>
+> **PM lưu ý:** Khi assign task cho ai, đảm bảo họ đã có trong Team với role
+> phù hợp (Engineer, Site Engineer, FAE...). Nếu không, họ sẽ không thao tác
+> được trên task.
 """,
             'content_en': """
 | Capability | PM | SA/Senior | Engineer/FAE | Sales | Subcontractor |
@@ -581,6 +592,17 @@ Phase % = (10×100 + 20×50 + 10×0) / (10+20+10) = 2000/40 = **50%**
 | Comments | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 **Admin** gets PM-level access on all projects.
+
+> ⚠️ **Important: You must be a project Team member to have permissions!**
+>
+> The permissions above only apply if you have been **added to the project Team**
+> (👥 Team page → ➕ Add Member). If you are not a Team member — even if you are
+> assigned a task — you are treated as a **Guest (read-only)** and cannot
+> Quick Update, add checklist items, or edit tasks.
+>
+> **PM note:** When assigning tasks, ensure the person is already in the Team
+> with an appropriate role (Engineer, Site Engineer, FAE...). Otherwise they
+> won't be able to interact with their tasks.
 """,
         },
     ],
@@ -671,6 +693,46 @@ _FAQ: List[Dict] = [
         'a_en': "No. Subcontractors only see My Tasks (assigned to them). No full list, phases, team, or dashboard. Security restriction.",
         'roles': ['pm'],
         'tags': ['subcontractor', 'restricted', 'access', 'bảo mật'],
+    },
+    {
+        'q_vi': "Tại sao tôi không thêm được checklist item / không Quick Update được?",
+        'a_vi': """Có 2 nguyên nhân phổ biến:
+
+1. **Chưa được thêm vào Team dự án.** Dù bạn được assign task, quyền thao tác phụ thuộc vào việc bạn có trong danh sách Team (👥 Team) hay không. Nếu chưa → bạn là Guest (read-only).
+   → **Giải pháp:** Nhờ PM thêm bạn vào Team với role phù hợp (ví dụ: Site Engineer, Engineer, FAE).
+
+2. **Role không đủ quyền.** Nếu role là **Sales** hoặc **Other**, bạn chỉ có quyền xem, không Quick Update hay thêm checklist — kể cả trên task gán cho mình.
+   → **Giải pháp:** Nhờ PM đổi role sang Engineer/Site Engineer/FAE.""",
+        'q_en': "Why can't I add checklist items or Quick Update my task?",
+        'a_en': """Two common causes:
+
+1. **Not added to the project Team.** Even if assigned a task, your permissions depend on being in the Team roster (👥 Team page). If not → you're a Guest (read-only).
+   → **Fix:** Ask PM to add you as a Team member with an appropriate role (e.g., Site Engineer, Engineer, FAE).
+
+2. **Role has insufficient permissions.** If your role is **Sales** or **Other**, you can only view — no Quick Update or checklist editing, even on your own tasks.
+   → **Fix:** Ask PM to change your role to Engineer/Site Engineer/FAE.""",
+        'roles': ['engineer', 'viewer', 'restricted'],
+        'tags': ['checklist', 'quick-update', 'permission', 'cannot', 'quyền', 'không được', 'thêm', 'cập nhật', 'member', 'team'],
+    },
+    {
+        'q_vi': "Assign task cho người chưa trong Team thì sao?",
+        'a_vi': """Hệ thống cho phép assign task cho bất kỳ employee nào, **nhưng** nếu người đó chưa được thêm vào Team dự án, họ sẽ:
+- Không Quick Update được task
+- Không thêm/toggle checklist item được
+- Không sửa task được
+- Chỉ xem được (Guest, read-only)
+
+**Quy trình đúng:** Luôn **thêm vào Team trước** (👥 Team → ➕ Add Member → chọn role), **rồi mới assign task**. Như vậy hệ thống phân quyền sẽ hoạt động đúng và người đó nhận đầy đủ quyền.""",
+        'q_en': "What happens if I assign a task to someone not in the Team?",
+        'a_en': """The system allows assigning tasks to any employee, **but** if they are not in the project Team, they will:
+- Not be able to Quick Update the task
+- Not be able to add/toggle checklist items
+- Not be able to edit the task
+- Only have read-only (Guest) access
+
+**Correct workflow:** Always **add to Team first** (👥 Team → ➕ Add Member → select role), **then assign tasks**. This ensures proper permissions.""",
+        'roles': ['pm'],
+        'tags': ['assign', 'team', 'member', 'permission', 'gán', 'quyền', 'thêm member'],
     },
 ]
 
@@ -901,4 +963,3 @@ def get_workflows_for_role(tier: str, lang: str = 'vi') -> List[Dict]:
         for w in _WORKFLOWS
         if w.get('role') == role_key
     ]
-
