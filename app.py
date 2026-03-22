@@ -144,6 +144,7 @@ def show_login_page():
                     
                     if success:
                         auth.login(result)
+                        auth.redirect_after_login()
                         st.success("✅ Login successful!")
                         st.balloons()
                         st.rerun()
