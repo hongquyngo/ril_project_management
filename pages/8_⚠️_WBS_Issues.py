@@ -39,6 +39,10 @@ from utils.il_project.wbs_execution_queries import (
 )
 from utils.il_project.wbs_helpers import (
     invalidate_execution_cache, render_attachments,
+    render_cc_selector,
+)
+from utils.il_project.wbs_notify import (
+    notify_issue_created, notify_co_status_change,
 )
 
 logger = logging.getLogger(__name__)
@@ -325,15 +329,19 @@ def _dialog_create_issue():
         submitted = col_s.form_submit_button("💾 Create", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
+    # CC selector OUTSIDE form
+    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="issue_create")
+
     if cancelled:
         st.rerun()
     if submitted:
         if not title.strip():
             st.error("Title is required.")
             return
+        issue_code = generate_issue_code(selected_project_id)
         new_id = create_issue({
             'project_id': selected_project_id,
-            'issue_code': generate_issue_code(selected_project_id),
+            'issue_code': issue_code,
             'title': title.strip(), 'description': desc.strip() or None,
             'category': category, 'severity': severity, 'status': 'OPEN',
             'reported_by': employee_id, 'assigned_to': assigned_id,
@@ -341,7 +349,16 @@ def _dialog_create_issue():
             'impact_description': impact.strip() or None,
             'related_task_id': task_id,
         }, user_id)
-        st.success(f"✅ Issue created: ISS-{new_id}")
+        notify_issue_created(
+            issue_id=new_id, issue_code=issue_code, title=title.strip(),
+            project_id=selected_project_id, severity=severity, category=category,
+            assigned_to_id=assigned_id, reporter_id=employee_id,
+            performer_id=employee_id, description=desc.strip() or None,
+            due_date=due,
+            related_task_name=task_sel if task_sel != "(None)" else None,
+            extra_cc_ids=cc_ids, extra_cc_emails=cc_emails,
+        )
+        st.success(f"✅ Issue created: {issue_code}")
         invalidate_execution_cache(selected_project_id)
         st.rerun()
 
@@ -650,10 +667,14 @@ def _dialog_edit_co(co_id: int):
         submitted = col_s.form_submit_button("💾 Save", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
+    # CC selector OUTSIDE form
+    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="co_edit")
+
     if cancelled:
         st.rerun()
     if submitted:
         cost_impact = revised - orig if revised > 0 else co.get('cost_impact')
+        old_co_status = co.get('status', '')
         update_change_order(co_id, {
             'title': title.strip(), 'description': desc.strip() or None,
             'change_type': co_type, 'reason': reason.strip() or None,
@@ -667,6 +688,17 @@ def _dialog_edit_co(co_id: int):
             'customer_approval': 1 if cust_approval else 0,
             'customer_approval_ref': cust_ref.strip() or None,
         }, user_id)
+        # Notify if status changed
+        if old_co_status != status:
+            notify_co_status_change(
+                co_id=co_id, co_number=co.get('co_number', ''), title=title.strip(),
+                project_id=selected_project_id,
+                old_status=old_co_status, new_status=status,
+                requested_by_id=co.get('requested_by'), approved_by_id=approver_id,
+                performer_id=employee_id,
+                cost_impact=cost_impact, schedule_impact_days=days,
+                extra_cc_ids=cc_ids, extra_cc_emails=cc_emails,
+            )
         st.success("✅ Change Order updated!")
         invalidate_execution_cache(selected_project_id)
         st.rerun()

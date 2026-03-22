@@ -47,6 +47,7 @@ from utils.il_project.wbs_helpers import (
     DEPENDENCY_TYPES, DEPENDENCY_LABELS, DEFAULT_PHASE_TEMPLATES,
     fmt_status, fmt_priority, fmt_completion, fmt_hours, comment_type_icon,
     invalidate_wbs_cache, render_attachments,
+    render_cc_selector,
 )
 from utils.il_project.wbs_notify import (
     notify_on_task_status_change,
@@ -547,6 +548,9 @@ def _dialog_create_task():
         submitted = col_s.form_submit_button("💾 Create", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
+    # CC selector OUTSIDE form
+    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_create")
+
     if cancelled:
         st.rerun()
     if submitted:
@@ -558,7 +562,9 @@ def _dialog_create_task():
             return
         try:
             new_id = create_task(data, user_id)
-            notify_on_task_assign(new_id, None, data.get('assignee_id'), int(user_id))
+            notify_on_task_assign(new_id, None, data.get('assignee_id'),
+                                  performer_id=employee_id,
+                                  extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
             st.success(f"✅ Task created! (ID: {new_id})")
             invalidate_wbs_cache(selected_project_id)
             st.rerun()
@@ -582,6 +588,9 @@ def _dialog_edit_task(task_id: int):
         submitted = col_s.form_submit_button("💾 Save", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
+    # CC selector OUTSIDE form
+    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_edit")
+
     if cancelled:
         st.rerun()
     if submitted:
@@ -593,8 +602,12 @@ def _dialog_edit_task(task_id: int):
             old_status   = task.get('status')
             update_task(task_id, data, user_id)
             sync_completion_up(task_id, user_id)
-            notify_on_task_assign(task_id, old_assignee, data.get('assignee_id'), int(user_id))
-            notify_on_task_status_change(task_id, old_status, data.get('status', old_status), int(user_id))
+            notify_on_task_assign(task_id, old_assignee, data.get('assignee_id'),
+                                  performer_id=employee_id,
+                                  extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
+            notify_on_task_status_change(task_id, old_status, data.get('status', old_status),
+                                         performer_id=employee_id,
+                                         extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
             st.success("✅ Task updated!")
             invalidate_wbs_cache(selected_project_id)
             st.rerun()
@@ -616,6 +629,9 @@ def _dialog_quick_update(task_id: int):
         blocker_note = st.text_input("Blocker reason (if blocked)", help="Required when status = BLOCKED")
         submitted = st.form_submit_button("💾 Update", type="primary", width="stretch")
 
+    # CC selector OUTSIDE form
+    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_quick")
+
     if submitted:
         try:
             old_status = task.get('status', '')
@@ -623,8 +639,10 @@ def _dialog_quick_update(task_id: int):
             sync_completion_up(task_id, user_id)
             if blocker_note.strip() and status == 'BLOCKED':
                 create_comment(task_id, int(user_id), f"🚧 {blocker_note.strip()}", 'BLOCKER')
-            notify_on_task_status_change(task_id, old_status, status, int(user_id),
-                                         blocker_reason=blocker_note.strip() or None)
+            notify_on_task_status_change(task_id, old_status, status,
+                                         performer_id=employee_id,
+                                         blocker_reason=blocker_note.strip() or None,
+                                         extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
             st.success("✅ Updated!")
             invalidate_wbs_cache(selected_project_id)
             st.rerun()

@@ -324,7 +324,7 @@ def build_pr_deep_link(pr_id: int, action: str = 'view') -> Optional[str]:
     if not base:
         return None
     # Ensure we point to the PR page
-    page_path = 'IL_5_%F0%9F%9B%92_Purchase_Request'
+    page_path = '5_%F0%9F%9B%92_Purchase_Request'
     # Handle base URL that may or may not include the page
     if page_path in base:
         url = base

@@ -3,16 +3,17 @@
 Constants, display helpers, shared UI components, and performance utilities
 for WBS module.
 
-v2.0 — Performance optimization:
-  - Added log_perf() decorator for query timing
-  - Added render_attachments() shared UI component (DRY across pages 8/9)
-  - Added cache invalidation helpers (targeted, not global clear)
+v3.0 — Enhanced:
+  - Added render_cc_selector() — shared UI to pick extra CC recipients for notifications
+  - log_perf() decorator for query timing
+  - render_attachments() shared UI component (DRY across pages 8/9)
+  - Cache invalidation helpers (targeted, not global clear)
 """
 
 import time
 import functools
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,75 @@ def comment_type_icon(ctype: str) -> str:
         'PROGRESS_UPDATE': '📊',
         'BLOCKER':         '🚧',
     }.get(ctype, '💬')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHARED UI COMPONENT — Email CC/TO Selector
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_cc_selector(
+    employees: List[Dict],
+    key_prefix: str,
+    label: str = "📧 Notification CC",
+    help_text: str = "Select additional people to notify about this action.",
+    show_manual_email: bool = True,
+) -> Tuple[List[int], List[str]]:
+    """
+    Shared CC selector widget for CRUD dialogs.
+    Place OUTSIDE st.form (multiselect needs to be interactive).
+
+    Returns:
+        (cc_employee_ids, cc_manual_emails)
+        Pass directly to notify_* functions as extra_cc_ids / extra_cc_emails.
+
+    Usage in dialog:
+        # OUTSIDE the form, before or after submit logic:
+        cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_create")
+        # Then pass to notify function:
+        notify_on_task_assign(..., extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
+    """
+    import streamlit as st
+
+    with st.expander(label, expanded=False):
+        st.caption(help_text)
+
+        # Employee multiselect
+        emp_options = [e['full_name'] for e in employees]
+        selected_names = st.multiselect(
+            "CC team members",
+            options=emp_options,
+            default=[],
+            key=f"_cc_emp_{key_prefix}",
+            placeholder="Search by name...",
+        )
+
+        cc_ids = []
+        for name in selected_names:
+            match = next((e for e in employees if e['full_name'] == name), None)
+            if match:
+                cc_ids.append(match['id'])
+
+        cc_emails = []
+        if show_manual_email:
+            manual = st.text_input(
+                "CC external emails (comma-separated)",
+                key=f"_cc_manual_{key_prefix}",
+                placeholder="email1@company.com, email2@company.com",
+                help="For people not in the employee list.",
+            )
+            if manual.strip():
+                cc_emails = [
+                    e.strip()
+                    for e in manual.split(',')
+                    if e.strip() and '@' in e.strip()
+                ]
+
+        total_cc = len(cc_ids) + len(cc_emails)
+        if total_cc > 0:
+            names = selected_names + cc_emails
+            st.caption(f"📤 Will CC {total_cc} additional recipient(s): {', '.join(names)}")
+
+    return cc_ids, cc_emails
 
 
 # ══════════════════════════════════════════════════════════════════════════════

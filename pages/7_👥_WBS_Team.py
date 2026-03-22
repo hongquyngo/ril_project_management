@@ -27,6 +27,7 @@ from utils.il_project.wbs_queries import (
 from utils.il_project.wbs_helpers import (
     MEMBER_ROLES, MEMBER_ROLE_LABELS,
     invalidate_wbs_cache,
+    render_cc_selector,
 )
 from utils.il_project.helpers import DEFAULT_RATES_BY_LEVEL
 from utils.il_project.wbs_notify import notify_member_added
@@ -314,6 +315,9 @@ def _dialog_create_member():
         submitted = col_s.form_submit_button("💾 Add", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
+    # CC selector OUTSIDE form
+    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="member_create")
+
     if cancelled:
         st.rerun()
     if submitted:
@@ -337,8 +341,10 @@ def _dialog_create_member():
                 employee_id=data['employee_id'],
                 role=data['role'],
                 allocation_percent=data.get('allocation_percent', 100),
-                added_by_name=auth.get_user_display_name(),
+                performer_id=employee_id,
                 pm_name=proj_info.get('pm_name'),
+                extra_cc_ids=cc_ids,
+                extra_cc_emails=cc_emails,
             )
             st.success(f"✅ Member added! (ID: {new_id})")
             invalidate_wbs_cache(selected_project_id)

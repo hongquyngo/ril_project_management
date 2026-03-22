@@ -2,30 +2,41 @@
 """
 Email Notification for WBS / Task Management workflow.
 
+v3.0 — Enhanced notifications:
+  - Fixed deep links: configurable page slugs + proper URL encoding
+  - Always CC the performer (person who triggered the action)
+  - Extra CC/TO support (from UI cc_selector widget)
+  - User-friendly content: full names everywhere (fix "Employee #51" bug)
+  - Action Required section per trigger type
+  - performer_id uses employee_id (NOT user_id) to resolve names correctly
+  - 2 new triggers: Issue Created, CO Status Changed
+
 Uses same infrastructure as email_notify.py:
   - SMTP via Gmail (smtp.gmail.com:587)
   - App password from .env (OUTBOUND_EMAIL_SENDER / OUTBOUND_EMAIL_PASSWORD)
   - Feature flag: ENABLE_EMAIL_NOTIFICATIONS
 
 Triggers:
-  1. Task Assigned     → email to assignee (new task or reassign)
-  2. Member Added      → email to new team member
-  3. Task BLOCKED      → email to PM
-  4. Task COMPLETED    → email to PM
+  1. Task Assigned     → TO: assignee | CC: PM + performer + watchers
+  2. Member Added      → TO: member   | CC: PM + performer
+  3. Task BLOCKED      → TO: PM       | CC: assignee + performer
+  4. Task COMPLETED    → TO: PM       | CC: assignee + performer
+  5. Issue Created     → TO: assigned  | CC: PM + performer + reporter  (NEW)
+  6. CO Status Changed → TO: requester | CC: PM + performer + approver  (NEW)
 
 All sends are non-blocking: failures are logged but never crash the app.
 """
 
 import logging
 from typing import List, Optional, Dict
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# REUSE _send_email and _base_template from email_notify.py
+# REUSE core email plumbing from email_notify.py
 # ══════════════════════════════════════════════════════════════════════
-# Import core email plumbing — avoids duplicating SMTP logic.
 
 from .email_notify import (
     _send_email,
@@ -37,8 +48,23 @@ from .email_notify import (
 
 
 # ══════════════════════════════════════════════════════════════════════
-# DEEP LINK BUILDER
+# DEEP LINK BUILDER — Configurable page slugs
 # ══════════════════════════════════════════════════════════════════════
+# Streamlit multipage routing: {base_url}/{page_slug}?params
+#
+# Page slugs are derived from filenames in pages/ directory.
+# If Streamlit URL routing changes or filenames are renamed,
+# update ONLY this dict — all deep links auto-update.
+#
+# Pattern follows email_notify.py: build_pr_deep_link() → IL_5_🛒_Purchase_Request
+
+_PAGE_SLUGS = {
+    'wbs':      'IL_6_📋_WBS',
+    'team':     'IL_7_👥_Team',
+    'issues':   'IL_8_⚠️_Issues',
+    'progress': 'IL_9_📊_Progress',
+}
+
 
 def _get_base_url() -> str:
     try:
@@ -48,132 +74,292 @@ def _get_base_url() -> str:
         return ''
 
 
-def build_wbs_deep_link(project_id: int, task_id: Optional[int] = None) -> Optional[str]:
+def _build_deep_link(page_key: str, **params) -> Optional[str]:
     """
-    Build deep link to WBS page, optionally opening a specific task.
-    Example: https://app.example.com/IL_6_%F0%9F%93%8B_WBS?project_id=42&task_id=123
-    Returns None if base URL not configured.
+    Build deep link URL for any WBS page.
+
+    Uses urllib.parse.quote() to properly encode the emoji in page slugs.
+    This matches how browsers encode URLs — Streamlit receives the decoded
+    UTF-8 path and routes correctly.
+
+    Args:
+        page_key: Key in _PAGE_SLUGS (e.g. 'wbs', 'team', 'issues')
+        **params: Query parameters (project_id=4, task_id=2, etc.)
+
+    Returns:
+        Full URL string, or None if base URL not configured.
+
+    Example:
+        _build_deep_link('wbs', project_id=4, task_id=2)
+        → https://ril-projects.streamlit.app/IL_6_%F0%9F%93%8B_WBS?project_id=4&task_id=2
     """
     base = _get_base_url()
     if not base:
         return None
-    page_path = 'IL_6_%F0%9F%93%8B_WBS'
-    url = f"{base}/{page_path}?project_id={project_id}"
-    if task_id:
-        url += f"&task_id={task_id}"
+
+    slug = _PAGE_SLUGS.get(page_key)
+    if not slug:
+        logger.warning(f"Unknown page_key: {page_key}")
+        return None
+
+    # URL-encode the slug (handles emoji → %F0%9F%93%8B etc.)
+    # safe='_' keeps underscores unencoded for readability
+    encoded_slug = quote(slug, safe='_')
+
+    # Build query string
+    query_parts = [f"{k}={v}" for k, v in params.items() if v is not None]
+    query = '&'.join(query_parts)
+
+    url = f"{base}/{encoded_slug}"
+    if query:
+        url += f"?{query}"
     return url
 
 
+def build_wbs_deep_link(project_id: int, task_id: Optional[int] = None) -> Optional[str]:
+    """Build deep link to WBS page, optionally opening a specific task."""
+    return _build_deep_link('wbs', project_id=project_id, task_id=task_id)
+
+
 def build_team_deep_link(project_id: int) -> Optional[str]:
-    """Build deep link to Team page for a project."""
-    base = _get_base_url()
-    if not base:
-        return None
-    page_path = 'IL_7_%F0%9F%91%A5_Team'
-    return f"{base}/{page_path}?project_id={project_id}"
+    """Build deep link to Team page."""
+    return _build_deep_link('team', project_id=project_id)
+
+
+def build_issues_deep_link(project_id: int) -> Optional[str]:
+    """Build deep link to Issues page."""
+    return _build_deep_link('issues', project_id=project_id)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# LOOKUP HELPERS (lightweight — only fetch what we need for email)
+# PERSON RESOLVER — Single source of truth for name + email
 # ══════════════════════════════════════════════════════════════════════
+# Why this exists: the old code used _get_employee_name(user_id) which
+# resolved the auth user ID, not the employee ID — producing
+# "Employee #51" in emails. This resolver uses employee_id exclusively.
 
-def _get_employee_email(employee_id: int) -> Optional[str]:
-    """Get employee email by ID."""
-    try:
-        from ..db import execute_query
-        rows = execute_query(
-            "SELECT email FROM employees WHERE id = :id AND delete_flag = 0",
-            {'id': employee_id},
-        )
-        return rows[0]['email'] if rows else None
-    except Exception as e:
-        logger.warning(f"Could not get email for employee {employee_id}: {e}")
+def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
+    """
+    Resolve employee to {id, name, email, code}.
+    Returns None if not found or employee_id is None.
+
+    IMPORTANT: pass employee_id (from session_state), NOT user_id (from auth).
+    """
+    if not employee_id:
         return None
-
-
-def _get_employee_name(employee_id: int) -> str:
-    """Get employee full name by ID."""
-    try:
-        from ..db import execute_query
-        rows = execute_query(
-            "SELECT CONCAT(first_name, ' ', last_name) AS name FROM employees WHERE id = :id",
-            {'id': employee_id},
-        )
-        return rows[0]['name'] if rows else f"Employee #{employee_id}"
-    except Exception:
-        return f"Employee #{employee_id}"
-
-
-def _get_pm_for_project(project_id: int) -> Optional[Dict]:
-    """Get PM employee_id, name, email for a project."""
     try:
         from ..db import execute_query
         rows = execute_query("""
-            SELECT p.pm_employee_id,
-                   CONCAT(e.first_name, ' ', e.last_name) AS pm_name,
-                   e.email AS pm_email
-            FROM il_projects p
-            JOIN employees e ON p.pm_employee_id = e.id
-            WHERE p.id = :pid AND p.delete_flag = 0
-        """, {'pid': project_id})
-        return rows[0] if rows else None
+            SELECT id, employee_code,
+                   CONCAT(first_name, ' ', last_name) AS full_name,
+                   email
+            FROM employees
+            WHERE id = :id AND delete_flag = 0
+        """, {'id': employee_id})
+        if rows:
+            r = rows[0]
+            return {
+                'id': r['id'],
+                'name': r['full_name'] or f"Employee #{employee_id}",
+                'email': r.get('email'),
+                'code': r.get('employee_code', ''),
+            }
+        return None
     except Exception as e:
-        logger.warning(f"Could not get PM for project {project_id}: {e}")
+        logger.warning(f"_resolve_person({employee_id}) failed: {e}")
         return None
 
 
+def _resolve_persons(employee_ids: List[int]) -> List[Dict]:
+    """Resolve multiple employees. Skips None/invalid IDs."""
+    return [p for eid in (employee_ids or []) if (p := _resolve_person(eid))]
+
+
 # ══════════════════════════════════════════════════════════════════════
-# 1. TASK ASSIGNED → email to assignee
+# PROJECT CONTEXT — Rich project info for emails
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_project_context(project_id: int) -> Dict:
+    """
+    Get project details + PM info in one query.
+    Replaces old _get_pm_for_project() with richer data.
+    """
+    try:
+        from ..db import execute_query
+        rows = execute_query("""
+            SELECT p.project_code, p.project_name, p.pm_employee_id,
+                   CONCAT(e.first_name, ' ', e.last_name) AS pm_name,
+                   e.email AS pm_email
+            FROM il_projects p
+            LEFT JOIN employees e ON p.pm_employee_id = e.id
+            WHERE p.id = :pid AND p.delete_flag = 0
+        """, {'pid': project_id})
+        if rows:
+            r = rows[0]
+            return {
+                'project_code': r.get('project_code', ''),
+                'project_name': r.get('project_name', ''),
+                'pm_id': r.get('pm_employee_id'),
+                'pm_name': r.get('pm_name', '—'),
+                'pm_email': r.get('pm_email'),
+            }
+        return {}
+    except Exception as e:
+        logger.warning(f"_get_project_context({project_id}) failed: {e}")
+        return {}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CC LIST BUILDER — Always include performer + dedup
+# ══════════════════════════════════════════════════════════════════════
+
+def _build_cc_list(
+    performer_id: Optional[int] = None,
+    pm_email: Optional[str] = None,
+    extra_person_ids: Optional[List[int]] = None,
+    extra_emails: Optional[List[str]] = None,
+    exclude_emails: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Build deduplicated CC list. Always includes:
+    1. Performer (person who did the action) ← KEY FIX: was missing before
+    2. PM
+    3. Extra CCs from UI selector (employee IDs or raw emails)
+
+    Excludes any email already in TO list (pass via exclude_emails).
+    """
+    cc_set: set = set()
+    exclude = set(e.lower() for e in (exclude_emails or []) if e)
+
+    # 1. Performer — ALWAYS CC'd
+    if performer_id:
+        performer = _resolve_person(performer_id)
+        if performer and performer.get('email'):
+            cc_set.add(performer['email'].lower())
+
+    # 2. PM
+    if pm_email:
+        cc_set.add(pm_email.lower())
+
+    # 3. Extra CC from employee IDs (from UI cc_selector widget)
+    for p in _resolve_persons(extra_person_ids or []):
+        if p.get('email'):
+            cc_set.add(p['email'].lower())
+
+    # 4. Extra CC from raw emails (manual input in UI)
+    for email in (extra_emails or []):
+        if email and '@' in email:
+            cc_set.add(email.strip().lower())
+
+    # Remove anyone already in TO list
+    cc_set -= exclude
+
+    return sorted(cc_set)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ACTION REQUIRED BLOCK — Actionable emails
+# ══════════════════════════════════════════════════════════════════════
+
+def _action_required_block(items: List[str], title: str = "Action Required") -> str:
+    """Render an Action Required section with checkbox-style items."""
+    if not items:
+        return ''
+    li_html = ''.join(
+        f'<li style="margin:6px 0;color:#1f2937;">{item}</li>'
+        for item in items
+    )
+    return f'''
+    <div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:14px 16px;margin:20px 0;border-radius:0 6px 6px 0;">
+        <p style="margin:0 0 8px;font-weight:700;color:#92400e;font-size:14px;">
+            🎯 {title}
+        </p>
+        <ul style="margin:0;padding-left:20px;font-size:13px;">
+            {li_html}
+        </ul>
+    </div>'''
+
+
+# ══════════════════════════════════════════════════════════════════════
+# FORMATTING HELPERS — User-friendly display
+# ══════════════════════════════════════════════════════════════════════
+
+def _fmt_project(ctx: Dict) -> str:
+    """Format: 'IL-2026-051-010 — Watson Thailand AMR' """
+    code = ctx.get('project_code', '')
+    name = ctx.get('project_name', '')
+    if code and name:
+        return f"<strong>{code}</strong> — {name}"
+    return code or name or '—'
+
+
+def _fmt_person(name: Optional[str], role: Optional[str] = None) -> str:
+    """Format: 'Quý Ngô (PM)' or 'Hiệp Phạm' """
+    if not name or name.startswith('Employee #'):
+        return '—'
+    return f"{name} ({role})" if role else name
+
+
+def _fmt_priority_badge(priority: str) -> str:
+    return {
+        'CRITICAL': '<span style="color:#dc2626;font-weight:700;">🔴 CRITICAL</span>',
+        'HIGH':     '<span style="color:#ea580c;font-weight:700;">🟠 HIGH</span>',
+        'NORMAL':   '🔵 Normal',
+        'LOW':      '🟢 Low',
+    }.get(priority, priority)
+
+
+def _fmt_date(d) -> str:
+    if not d:
+        return '—'
+    return str(d)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. TASK ASSIGNED → TO: assignee | CC: PM + performer + watchers
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_task_assigned(
     task_id: int,
     task_name: str,
     wbs_code: str,
-    project_code: str,
-    project_name: str,
     project_id: int,
     assignee_id: int,
-    assigned_by_name: str,
+    performer_id: int,
     priority: str = 'NORMAL',
-    planned_start: Optional[str] = None,
-    planned_end: Optional[str] = None,
+    planned_start=None,
+    planned_end=None,
     description: Optional[str] = None,
     phase_name: Optional[str] = None,
     is_reassign: bool = False,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
 ) -> bool:
     """
-    Send notification when a task is assigned/reassigned to an engineer.
+    Notify assignee when a task is assigned/reassigned.
 
-    Args:
-        task_id: Task ID
-        task_name: Task name
-        wbs_code: WBS code (e.g. "3.2.1")
-        project_code: Project code
-        project_name: Project name
-        project_id: Project ID (for deep link)
-        assignee_id: Employee ID of the assignee
-        assigned_by_name: Name of person who assigned
-        priority: Task priority
-        planned_start: Planned start date (string)
-        planned_end: Planned end date / deadline (string)
-        description: Task description (optional)
-        phase_name: Phase name (optional)
-        is_reassign: True if this is a reassignment (not first assign)
+    v2 → v3 changes:
+      - performer_id replaces assigned_by_name (resolves server-side)
+      - performer always CC'd
+      - PM always CC'd
+      - extra CC from UI selector
+      - Action Required section added
     """
     if not _is_configured():
         return False
 
-    assignee_email = _get_employee_email(assignee_id)
-    assignee_name  = _get_employee_name(assignee_id)
-    if not assignee_email:
-        logger.warning(f"No email for assignee {assignee_id} — skipping task notification.")
+    assignee = _resolve_person(assignee_id)
+    performer = _resolve_person(performer_id)
+    ctx = _get_project_context(project_id)
+
+    if not assignee or not assignee.get('email'):
+        logger.warning(f"No email for assignee {assignee_id} — skipping.")
         return False
 
-    priority_badge = {
-        'CRITICAL': '🔴 CRITICAL', 'HIGH': '🟠 HIGH',
-        'NORMAL': '🔵 Normal', 'LOW': '🟢 Low',
-    }.get(priority, priority)
+    performer_name = _fmt_person(
+        performer['name'] if performer else None,
+        'PM' if performer and ctx.get('pm_id') == performer_id else None,
+    )
 
     action = "reassigned to you" if is_reassign else "assigned to you"
     subject_prefix = "[Task Reassigned]" if is_reassign else "[New Task]"
@@ -182,44 +368,58 @@ def notify_task_assigned(
     if description:
         desc_block = f'''
         <div style="background:#f0f9ff;border-left:3px solid #3b82f6;padding:12px;margin:16px 0;font-size:13px;">
-            <strong>Description:</strong> {description[:300]}{'...' if len(description) > 300 else ''}
+            <strong>Description:</strong><br>{description[:500]}{'...' if len(description) > 500 else ''}
         </div>'''
 
+    actions = [
+        "Review the task details and description",
+        "Confirm the timeline is achievable — flag concerns to PM",
+        "Update status to <strong>IN_PROGRESS</strong> when you begin",
+        "Log actual hours regularly via Quick Update",
+    ]
+    if planned_end:
+        actions.append(f"Complete by <strong>{_fmt_date(planned_end)}</strong>")
+
     body = f'''
-    <p>Hi <strong>{assignee_name}</strong>,</p>
+    <p>Hi <strong>{assignee['name']}</strong>,</p>
     <p>A task has been {action}:</p>
 
     <table style="width:100%;margin:16px 0;">
         {_info_row('Task', f'<strong>[{wbs_code or "—"}] {task_name}</strong>')}
-        {_info_row('Project', f'{project_code} — {project_name}')}
+        {_info_row('Project', _fmt_project(ctx))}
         {_info_row('Phase', phase_name or '—')}
-        {_info_row('Priority', priority_badge)}
-        {_info_row('Deadline', str(planned_end) if planned_end else '—')}
-        {_info_row('Assigned by', assigned_by_name)}
+        {_info_row('Priority', _fmt_priority_badge(priority))}
+        {_info_row('Planned', f'{_fmt_date(planned_start)} → {_fmt_date(planned_end)}')}
+        {_info_row('Assigned by', performer_name)}
+        {_info_row('Project Manager', _fmt_person(ctx.get('pm_name')))}
     </table>
 
     {desc_block}
+    {_action_required_block(actions)}'''
 
-    <p style="color:#6b7280;font-size:13px;">
-        Please log in to the ERP to review the task details and start working on it.
-    </p>'''
-
-    # CC the PM
-    pm_info = _get_pm_for_project(project_id)
-    pm_email = pm_info['pm_email'] if pm_info else None
+    to_emails = [assignee['email']]
+    cc_emails = _build_cc_list(
+        performer_id=performer_id,
+        pm_email=ctx.get('pm_email'),
+        extra_person_ids=extra_cc_ids,
+        extra_emails=extra_cc_emails,
+        exclude_emails=to_emails,
+    )
 
     app_url = build_wbs_deep_link(project_id, task_id)
 
     return _send_email(
-        to_emails=[assignee_email],
-        subject=f"{subject_prefix} [{wbs_code or '—'}] {task_name} — {project_code}",
-        html_body=_base_template(f"Task {'Reassigned' if is_reassign else 'Assigned'}", body, app_url),
-        cc_emails=_merge_cc(pm_email, exclude=[assignee_email]),
+        to_emails=to_emails,
+        subject=f"{subject_prefix} [{wbs_code or '—'}] {task_name} — {ctx.get('project_code', '')}",
+        html_body=_base_template(
+            f"Task {'Reassigned' if is_reassign else 'Assigned'}", body, app_url
+        ),
+        cc_emails=cc_emails,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 2. MEMBER ADDED → email to new team member
+# 2. MEMBER ADDED → TO: member | CC: PM + performer
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_member_added(
@@ -229,19 +429,28 @@ def notify_member_added(
     employee_id: int,
     role: str,
     allocation_percent: float,
-    added_by_name: str,
+    performer_id: int,
     pm_name: Optional[str] = None,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
 ) -> bool:
     """
-    Send notification when an employee is added to a project team.
+    Notify new team member.
+
+    v2 → v3 changes:
+      - added_by_name → performer_id (resolved server-side)
+      - PM now CC'd (was missing)
+      - Action Required section
     """
     if not _is_configured():
         return False
 
-    member_email = _get_employee_email(employee_id)
-    member_name  = _get_employee_name(employee_id)
-    if not member_email:
-        logger.warning(f"No email for employee {employee_id} — skipping member notification.")
+    member = _resolve_person(employee_id)
+    performer = _resolve_person(performer_id)
+    ctx = _get_project_context(project_id)
+
+    if not member or not member.get('email'):
+        logger.warning(f"No email for employee {employee_id} — skipping.")
         return False
 
     role_label = {
@@ -251,122 +460,170 @@ def notify_member_added(
         'SALES': 'Sales', 'SUBCONTRACTOR': 'Subcontractor', 'OTHER': 'Other',
     }.get(role, role)
 
+    actions = [
+        "Log in to ERP to view your project details",
+        "Review the project scope, timeline, and deliverables",
+        "Await task assignments from the Project Manager",
+        "Update availability if allocation conflicts with other projects",
+    ]
+
     body = f'''
-    <p>Hi <strong>{member_name}</strong>,</p>
+    <p>Hi <strong>{member['name']}</strong>,</p>
     <p>You have been added to a project team:</p>
 
     <table style="width:100%;margin:16px 0;">
-        {_info_row('Project', f'<strong>{project_code} — {project_name}</strong>')}
-        {_info_row('Your Role', role_label)}
+        {_info_row('Project', _fmt_project(ctx))}
+        {_info_row('Your Role', f'<strong>{role_label}</strong>')}
         {_info_row('Allocation', f'{allocation_percent:.0f}%')}
-        {_info_row('PM', pm_name or '—')}
-        {_info_row('Added by', added_by_name)}
+        {_info_row('Project Manager', _fmt_person(ctx.get('pm_name')))}
+        {_info_row('Added by', _fmt_person(performer['name'] if performer else None))}
     </table>
 
-    <p style="color:#6b7280;font-size:13px;">
-        You can now access this project in the ERP system. Tasks will be assigned to you via the WBS page.
-    </p>'''
+    {_action_required_block(actions)}'''
+
+    to_emails = [member['email']]
+    cc_emails = _build_cc_list(
+        performer_id=performer_id,
+        pm_email=ctx.get('pm_email'),
+        extra_person_ids=extra_cc_ids,
+        extra_emails=extra_cc_emails,
+        exclude_emails=to_emails,
+    )
 
     app_url = build_team_deep_link(project_id)
 
     return _send_email(
-        to_emails=[member_email],
-        subject=f"[Team] You've been added to {project_code} — {project_name}",
+        to_emails=to_emails,
+        subject=f"[Team] You've been added to {ctx.get('project_code', project_code)} — {ctx.get('project_name', project_name)}",
         html_body=_base_template("Added to Project Team", body, app_url),
+        cc_emails=cc_emails,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 3. TASK BLOCKED → email to PM
+# 3. TASK BLOCKED → TO: PM | CC: assignee + performer
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_task_blocked(
     task_id: int,
     task_name: str,
     wbs_code: str,
-    project_code: str,
-    project_name: str,
     project_id: int,
     blocked_by_id: int,
+    performer_id: int,
+    assignee_id: Optional[int] = None,
     blocker_reason: Optional[str] = None,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
 ) -> bool:
     """
-    Send notification to PM when a task is marked BLOCKED.
-    This is a critical alert — PM needs to act.
+    Alert PM when a task is BLOCKED.
+
+    v2 → v3 changes:
+      - Assignee now CC'd (was missing — they need to know PM is alerted)
+      - Performer CC'd
+      - Action Required for PM
     """
     if not _is_configured():
         return False
 
-    pm_info = _get_pm_for_project(project_id)
-    if not pm_info or not pm_info.get('pm_email'):
+    ctx = _get_project_context(project_id)
+    if not ctx.get('pm_email'):
         logger.warning(f"No PM email for project {project_id} — skipping BLOCKED notification.")
         return False
 
-    blocker_name = _get_employee_name(blocked_by_id)
+    blocker = _resolve_person(blocked_by_id)
+    blocker_name = blocker['name'] if blocker else '—'
 
     reason_block = ''
     if blocker_reason:
         reason_block = f'''
-        <div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;">
-            <strong>Blocker:</strong> {blocker_reason}
+        <div style="background:#fef2f2;border-left:4px solid #ef4444;padding:14px 16px;margin:16px 0;border-radius:0 6px 6px 0;">
+            <p style="margin:0 0 4px;font-weight:700;color:#991b1b;font-size:13px;">🚧 Blocker reason:</p>
+            <p style="margin:0;color:#1f2937;font-size:13px;">{blocker_reason}</p>
         </div>'''
 
+    actions = [
+        "Review the blocker reason above",
+        "Contact the team member for details",
+        "Remove the blocker or escalate to stakeholders",
+        "Update the task status once resolved",
+    ]
+
     body = f'''
-    <p>Hi <strong>{pm_info['pm_name']}</strong>,</p>
-    <p>A task has been marked as <strong style="color:#dc2626;">BLOCKED</strong> and needs your attention:</p>
+    <p>Hi <strong>{ctx['pm_name']}</strong>,</p>
+    <p>A task has been marked as <strong style="color:#dc2626;">🔴 BLOCKED</strong> and needs your attention:</p>
 
     <table style="width:100%;margin:16px 0;">
         {_info_row('Task', f'<strong>[{wbs_code or "—"}] {task_name}</strong>')}
-        {_info_row('Project', f'{project_code} — {project_name}')}
+        {_info_row('Project', _fmt_project(ctx))}
         {_info_row('Blocked by', blocker_name)}
         {_info_row('Status', '<span style="color:#dc2626;font-weight:700;">🔴 BLOCKED</span>')}
     </table>
 
     {reason_block}
+    {_action_required_block(actions, title="PM Action Required")}'''
 
-    <p style="color:#6b7280;font-size:13px;">
-        Please review the blocker and take action to unblock the task.
-    </p>'''
+    to_emails = [ctx['pm_email']]
+
+    extra = list(extra_cc_ids or [])
+    if assignee_id:
+        extra.append(assignee_id)
+
+    cc_emails = _build_cc_list(
+        performer_id=performer_id,
+        extra_person_ids=extra,
+        extra_emails=extra_cc_emails,
+        exclude_emails=to_emails,
+    )
 
     app_url = build_wbs_deep_link(project_id, task_id)
 
     return _send_email(
-        to_emails=[pm_info['pm_email']],
-        subject=f"🔴 [BLOCKED] [{wbs_code or '—'}] {task_name} — {project_code}",
+        to_emails=to_emails,
+        subject=f"🔴 [BLOCKED] [{wbs_code or '—'}] {task_name} — {ctx.get('project_code', '')}",
         html_body=_base_template("Task Blocked — Action Required", body, app_url),
+        cc_emails=cc_emails,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 4. TASK COMPLETED → email to PM
+# 4. TASK COMPLETED → TO: PM | CC: assignee + performer
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_task_completed(
     task_id: int,
     task_name: str,
     wbs_code: str,
-    project_code: str,
-    project_name: str,
     project_id: int,
     completed_by_id: int,
+    performer_id: int,
+    assignee_id: Optional[int] = None,
     actual_hours: Optional[float] = None,
     phase_name: Optional[str] = None,
     phase_completion: Optional[float] = None,
     project_completion: Optional[float] = None,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
 ) -> bool:
     """
-    Send notification to PM when a task is completed.
-    Includes phase and project completion progress for context.
+    Notify PM when a task is COMPLETED.
+
+    v2 → v3 changes:
+      - Assignee CC'd (confirmation that completion was notified)
+      - Performer CC'd
+      - Progress context + Action Required
     """
     if not _is_configured():
         return False
 
-    pm_info = _get_pm_for_project(project_id)
-    if not pm_info or not pm_info.get('pm_email'):
+    ctx = _get_project_context(project_id)
+    if not ctx.get('pm_email'):
         logger.warning(f"No PM email for project {project_id} — skipping COMPLETED notification.")
         return False
 
-    completed_by_name = _get_employee_name(completed_by_id)
+    completed_by = _resolve_person(completed_by_id)
+    completed_by_name = completed_by['name'] if completed_by else '—'
 
     progress_block = ''
     if phase_completion is not None or project_completion is not None:
@@ -377,60 +634,289 @@ def notify_task_completed(
             items.append(f"Project overall: <strong>{project_completion:.0f}%</strong>")
         if items:
             progress_block = f'''
-            <div style="background:#f0fdf4;border-left:3px solid #22c55e;padding:12px;margin:16px 0;font-size:13px;">
-                📊 <strong>Progress update:</strong><br>
-                {'<br>'.join(items)}
+            <div style="background:#f0fdf4;border-left:4px solid #22c55e;padding:14px 16px;margin:16px 0;border-radius:0 6px 6px 0;">
+                <p style="margin:0 0 4px;font-weight:700;color:#166534;font-size:13px;">📊 Progress update</p>
+                <p style="margin:0;font-size:13px;">{'<br>'.join(items)}</p>
             </div>'''
 
+    actions = [
+        "Review the completed deliverables",
+        "Verify quality meets project requirements",
+        "Update progress report if this is a key milestone",
+    ]
+
     body = f'''
-    <p>Hi <strong>{pm_info['pm_name']}</strong>,</p>
-    <p>A task has been marked as <strong style="color:#16a34a;">COMPLETED</strong>:</p>
+    <p>Hi <strong>{ctx['pm_name']}</strong>,</p>
+    <p>A task has been marked as <strong style="color:#16a34a;">✅ COMPLETED</strong>:</p>
 
     <table style="width:100%;margin:16px 0;">
         {_info_row('Task', f'<strong>[{wbs_code or "—"}] {task_name}</strong>')}
-        {_info_row('Project', f'{project_code} — {project_name}')}
+        {_info_row('Project', _fmt_project(ctx))}
         {_info_row('Phase', phase_name or '—')}
         {_info_row('Completed by', completed_by_name)}
         {_info_row('Actual Hours', f'{actual_hours:.1f}h' if actual_hours else '—')}
         {_info_row('Status', '<span style="color:#16a34a;font-weight:700;">✅ COMPLETED</span>')}
     </table>
 
-    {progress_block}'''
+    {progress_block}
+    {_action_required_block(actions)}'''
+
+    to_emails = [ctx['pm_email']]
+
+    extra = list(extra_cc_ids or [])
+    if assignee_id:
+        extra.append(assignee_id)
+
+    cc_emails = _build_cc_list(
+        performer_id=performer_id,
+        extra_person_ids=extra,
+        extra_emails=extra_cc_emails,
+        exclude_emails=to_emails,
+    )
 
     app_url = build_wbs_deep_link(project_id, task_id)
 
     return _send_email(
-        to_emails=[pm_info['pm_email']],
-        subject=f"✅ [Completed] [{wbs_code or '—'}] {task_name} — {project_code}",
+        to_emails=to_emails,
+        subject=f"✅ [Completed] [{wbs_code or '—'}] {task_name} — {ctx.get('project_code', '')}",
         html_body=_base_template("Task Completed", body, app_url),
+        cc_emails=cc_emails,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════
-# CONVENIENCE — auto-detect and send from task update context
+# 5. ISSUE CREATED → TO: assigned | CC: PM + performer + reporter (NEW)
+# ══════════════════════════════════════════════════════════════════════
+
+def notify_issue_created(
+    issue_id: int,
+    issue_code: str,
+    title: str,
+    project_id: int,
+    severity: str,
+    category: str,
+    assigned_to_id: Optional[int],
+    reporter_id: Optional[int],
+    performer_id: int,
+    description: Optional[str] = None,
+    due_date=None,
+    related_task_name: Optional[str] = None,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
+) -> bool:
+    """
+    Notify when a new issue is created.
+    TO: assigned person (or PM if unassigned).
+    """
+    if not _is_configured():
+        return False
+
+    ctx = _get_project_context(project_id)
+    assigned = _resolve_person(assigned_to_id)
+    reporter = _resolve_person(reporter_id)
+
+    # TO: assigned person, fallback to PM
+    if assigned and assigned.get('email'):
+        to_emails = [assigned['email']]
+        greeting_name = assigned['name']
+    elif ctx.get('pm_email'):
+        to_emails = [ctx['pm_email']]
+        greeting_name = ctx['pm_name']
+    else:
+        logger.warning(f"No recipient for issue {issue_code} — skipping.")
+        return False
+
+    severity_badge = {
+        'CRITICAL': '<span style="color:#dc2626;font-weight:700;">🔴 CRITICAL</span>',
+        'HIGH': '<span style="color:#ea580c;font-weight:700;">🟠 HIGH</span>',
+        'MEDIUM': '🟡 Medium',
+        'LOW': '🟢 Low',
+    }.get(severity, severity)
+
+    desc_block = ''
+    if description:
+        desc_block = f'''
+        <div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;">
+            <strong>Description:</strong><br>{description[:500]}{'...' if len(description) > 500 else ''}
+        </div>'''
+
+    actions = [
+        "Review the issue details and assess impact",
+        "Investigate root cause",
+        f"Target resolution by <strong>{_fmt_date(due_date)}</strong>" if due_date else "Set a target resolution date",
+        "Update status to <strong>IN_PROGRESS</strong> when you begin",
+    ]
+
+    body = f'''
+    <p>Hi <strong>{greeting_name}</strong>,</p>
+    <p>A new issue has been reported that requires your attention:</p>
+
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('Issue', f'<strong>{issue_code} — {title}</strong>')}
+        {_info_row('Project', _fmt_project(ctx))}
+        {_info_row('Severity', severity_badge)}
+        {_info_row('Category', category)}
+        {_info_row('Due Date', _fmt_date(due_date))}
+        {_info_row('Related Task', related_task_name or '—')}
+        {_info_row('Reported by', _fmt_person(reporter['name'] if reporter else None))}
+    </table>
+
+    {desc_block}
+    {_action_required_block(actions)}'''
+
+    extra = list(extra_cc_ids or [])
+    if reporter_id and reporter_id != performer_id:
+        extra.append(reporter_id)
+
+    cc_emails = _build_cc_list(
+        performer_id=performer_id,
+        pm_email=ctx.get('pm_email'),
+        extra_person_ids=extra,
+        extra_emails=extra_cc_emails,
+        exclude_emails=to_emails,
+    )
+
+    app_url = build_issues_deep_link(project_id)
+
+    return _send_email(
+        to_emails=to_emails,
+        subject=f"🔧 [Issue] {issue_code} — {title} ({severity}) — {ctx.get('project_code', '')}",
+        html_body=_base_template("New Issue Reported", body, app_url),
+        cc_emails=cc_emails,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 6. CO STATUS CHANGED → TO: requester | CC: PM + approver + performer (NEW)
+# ══════════════════════════════════════════════════════════════════════
+
+def notify_co_status_change(
+    co_id: int,
+    co_number: str,
+    title: str,
+    project_id: int,
+    old_status: str,
+    new_status: str,
+    requested_by_id: Optional[int],
+    approved_by_id: Optional[int],
+    performer_id: int,
+    cost_impact=None,
+    schedule_impact_days: Optional[int] = None,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
+) -> bool:
+    """Notify requester when CO status changes (SUBMITTED → APPROVED, etc.)."""
+    if not _is_configured():
+        return False
+
+    ctx = _get_project_context(project_id)
+    requester = _resolve_person(requested_by_id)
+    approver = _resolve_person(approved_by_id)
+
+    if not requester or not requester.get('email'):
+        logger.warning(f"No email for CO requester — skipping.")
+        return False
+
+    status_badge = {
+        'APPROVED': '<span style="color:#16a34a;font-weight:700;">✅ APPROVED</span>',
+        'REJECTED': '<span style="color:#dc2626;font-weight:700;">❌ REJECTED</span>',
+        'SUBMITTED': '<span style="color:#2563eb;font-weight:700;">📤 SUBMITTED</span>',
+        'CANCELLED': '<span style="color:#6b7280;">🚫 CANCELLED</span>',
+    }.get(new_status, new_status)
+
+    impact_str = '—'
+    if cost_impact is not None:
+        try:
+            v = float(cost_impact)
+            impact_str = f"+{v:,.0f}" if v > 0 else f"{v:,.0f}"
+        except (TypeError, ValueError):
+            pass
+
+    actions_map = {
+        'APPROVED': [
+            "Proceed with implementing the approved changes",
+            "Update project plan for new scope/schedule",
+            "Communicate changes to the team",
+        ],
+        'REJECTED': [
+            "Review the rejection reasoning",
+            "Discuss alternatives with PM",
+            "Revise and resubmit if appropriate",
+        ],
+        'SUBMITTED': [
+            "Review the change order details",
+            "Evaluate cost and schedule impact",
+            "Approve or reject with reasoning",
+        ],
+    }
+    actions = actions_map.get(new_status, ["Review the status change"])
+
+    body = f'''
+    <p>Hi <strong>{requester['name']}</strong>,</p>
+    <p>A Change Order status has been updated:</p>
+
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('Change Order', f'<strong>{co_number} — {title}</strong>')}
+        {_info_row('Project', _fmt_project(ctx))}
+        {_info_row('Status Change', f'{old_status} → {status_badge}')}
+        {_info_row('Cost Impact', impact_str)}
+        {_info_row('Schedule Impact', f'{schedule_impact_days or 0} days')}
+        {_info_row('Approved by', _fmt_person(approver['name'] if approver else None))}
+    </table>
+
+    {_action_required_block(actions)}'''
+
+    to_emails = [requester['email']]
+
+    extra = list(extra_cc_ids or [])
+    if approved_by_id:
+        extra.append(approved_by_id)
+
+    cc_emails = _build_cc_list(
+        performer_id=performer_id,
+        pm_email=ctx.get('pm_email'),
+        extra_person_ids=extra,
+        extra_emails=extra_cc_emails,
+        exclude_emails=to_emails,
+    )
+
+    app_url = build_issues_deep_link(project_id)
+    icon = {'APPROVED': '✅', 'REJECTED': '❌', 'SUBMITTED': '📤'}.get(new_status, '📝')
+
+    return _send_email(
+        to_emails=to_emails,
+        subject=f"{icon} [CO {new_status}] {co_number} — {title} — {ctx.get('project_code', '')}",
+        html_body=_base_template(f"Change Order — {new_status}", body, app_url),
+        cc_emails=cc_emails,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CONVENIENCE — Auto-detect and send from task update context
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_on_task_status_change(
     task_id: int,
     old_status: str,
     new_status: str,
-    changed_by_id: int,
+    performer_id: int,
     blocker_reason: Optional[str] = None,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
 ) -> bool:
     """
     Auto-send the right notification based on status transition.
-    Call this from quick_update_task() or update_task() after save.
+    Call from quick_update_task() or update_task() after save.
 
-    Only fires for: BLOCKED → notify PM, COMPLETED → notify PM.
-    Other transitions are logged but no email sent.
+    ⚠️ performer_id MUST be employee_id (from st.session_state['employee_id']),
+    NOT user_id (from auth.get_user_id()). This was the "Employee #51" bug.
 
-    Returns True if email was sent (or not needed), False on error.
+    Fires for: BLOCKED → notify PM, COMPLETED → notify PM.
     """
     if old_status == new_status:
-        return True  # No change — nothing to send
-
+        return True
     if new_status not in ('BLOCKED', 'COMPLETED'):
-        return True  # No email trigger for this transition
+        return True
 
     try:
         from .wbs_queries import get_task
@@ -439,27 +925,23 @@ def notify_on_task_status_change(
             logger.warning(f"notify_on_task_status_change: task {task_id} not found")
             return False
 
-        from ..db import execute_query
-        proj_rows = execute_query(
-            "SELECT project_code, project_name FROM il_projects WHERE id = :pid",
-            {'pid': task['project_id']},
-        )
-        proj = proj_rows[0] if proj_rows else {}
-
         if new_status == 'BLOCKED':
             return notify_task_blocked(
                 task_id=task_id,
                 task_name=task['task_name'],
                 wbs_code=task.get('wbs_code', ''),
-                project_code=proj.get('project_code', ''),
-                project_name=proj.get('project_name', ''),
                 project_id=task['project_id'],
-                blocked_by_id=changed_by_id,
+                blocked_by_id=performer_id,
+                performer_id=performer_id,
+                assignee_id=task.get('assignee_id'),
                 blocker_reason=blocker_reason,
+                extra_cc_ids=extra_cc_ids,
+                extra_cc_emails=extra_cc_emails,
             )
 
         if new_status == 'COMPLETED':
-            # Fetch latest completion percentages for context
+            from ..db import execute_query
+
             phase_completion = None
             phase_name = task.get('phase_name')
             if task.get('phase_id'):
@@ -482,14 +964,16 @@ def notify_on_task_status_change(
                 task_id=task_id,
                 task_name=task['task_name'],
                 wbs_code=task.get('wbs_code', ''),
-                project_code=proj.get('project_code', ''),
-                project_name=proj.get('project_name', ''),
                 project_id=task['project_id'],
-                completed_by_id=changed_by_id,
+                completed_by_id=performer_id,
+                performer_id=performer_id,
+                assignee_id=task.get('assignee_id'),
                 actual_hours=task.get('actual_hours'),
                 phase_name=phase_name,
                 phase_completion=phase_completion,
                 project_completion=proj_completion,
+                extra_cc_ids=extra_cc_ids,
+                extra_cc_emails=extra_cc_emails,
             )
 
     except Exception as e:
@@ -503,22 +987,20 @@ def notify_on_task_assign(
     task_id: int,
     old_assignee_id: Optional[int],
     new_assignee_id: Optional[int],
-    assigned_by_id: int,
+    performer_id: int,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
 ) -> bool:
     """
     Auto-send assignment notification when assignee changes.
-    Call this from create_task() or update_task() after save.
+    Call from create_task() or update_task() after save.
 
-    Fires when:
-    - new_assignee_id is set and differs from old_assignee_id
-    - Skips if assignee unchanged or removed (set to None)
-
-    Returns True if email sent (or not needed), False on error.
+    ⚠️ performer_id MUST be employee_id, NOT user_id.
     """
     if not new_assignee_id:
-        return True  # Unassigned — nothing to send
+        return True
     if old_assignee_id == new_assignee_id:
-        return True  # No change
+        return True
 
     try:
         from .wbs_queries import get_task
@@ -526,30 +1008,21 @@ def notify_on_task_assign(
         if not task:
             return False
 
-        from ..db import execute_query
-        proj_rows = execute_query(
-            "SELECT project_code, project_name FROM il_projects WHERE id = :pid",
-            {'pid': task['project_id']},
-        )
-        proj = proj_rows[0] if proj_rows else {}
-
-        assigned_by_name = _get_employee_name(assigned_by_id)
-
         return notify_task_assigned(
             task_id=task_id,
             task_name=task['task_name'],
             wbs_code=task.get('wbs_code', ''),
-            project_code=proj.get('project_code', ''),
-            project_name=proj.get('project_name', ''),
             project_id=task['project_id'],
             assignee_id=new_assignee_id,
-            assigned_by_name=assigned_by_name,
+            performer_id=performer_id,
             priority=task.get('priority', 'NORMAL'),
-            planned_start=str(task.get('planned_start') or ''),
-            planned_end=str(task.get('planned_end') or ''),
+            planned_start=task.get('planned_start'),
+            planned_end=task.get('planned_end'),
             description=task.get('description'),
             phase_name=task.get('phase_name'),
             is_reassign=(old_assignee_id is not None),
+            extra_cc_ids=extra_cc_ids,
+            extra_cc_emails=extra_cc_emails,
         )
 
     except Exception as e:
