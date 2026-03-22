@@ -143,18 +143,28 @@ def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
     Resolve employee to {id, name, email, code}.
     Returns None if not found or employee_id is None.
 
-    IMPORTANT: pass employee_id (from session_state), NOT user_id (from auth).
+    Email resolution (priority order):
+      1. employees.email (primary)
+      2. users.email WHERE users.employee_id = :id (fallback)
+
+    This ensures contractors/customers who have a users account
+    but no email in the employees table still get notifications.
     """
     if not employee_id:
         return None
     try:
         from ..db import execute_query
         rows = execute_query("""
-            SELECT id, employee_code,
-                   CONCAT(first_name, ' ', last_name) AS full_name,
-                   email
-            FROM employees
-            WHERE id = :id AND delete_flag = 0
+            SELECT e.id, e.employee_code,
+                   CONCAT(e.first_name, ' ', e.last_name) AS full_name,
+                   COALESCE(NULLIF(TRIM(e.email), ''), u.email) AS email
+            FROM employees e
+            LEFT JOIN users u
+                ON u.employee_id = e.id
+                AND u.delete_flag = 0
+                AND u.is_active = 1
+            WHERE e.id = :id AND e.delete_flag = 0
+            LIMIT 1
         """, {'id': employee_id})
         if rows:
             r = rows[0]
@@ -182,17 +192,22 @@ def _resolve_persons(employee_ids: List[int]) -> List[Dict]:
 def _get_project_context(project_id: int) -> Dict:
     """
     Get project details + PM info in one query.
-    Replaces old _get_pm_for_project() with richer data.
+    PM email: employees.email → fallback users.email.
     """
     try:
         from ..db import execute_query
         rows = execute_query("""
             SELECT p.project_code, p.project_name, p.pm_employee_id,
                    CONCAT(e.first_name, ' ', e.last_name) AS pm_name,
-                   e.email AS pm_email
+                   COALESCE(NULLIF(TRIM(e.email), ''), u.email) AS pm_email
             FROM il_projects p
             LEFT JOIN employees e ON p.pm_employee_id = e.id
+            LEFT JOIN users u
+                ON u.employee_id = p.pm_employee_id
+                AND u.delete_flag = 0
+                AND u.is_active = 1
             WHERE p.id = :pid AND p.delete_flag = 0
+            LIMIT 1
         """, {'pid': project_id})
         if rows:
             r = rows[0]
@@ -353,14 +368,28 @@ def notify_task_assigned(
     performer = _resolve_person(performer_id)
     ctx = _get_project_context(project_id)
 
+    # ── Determine TO recipient — fallback to PM if assignee has no email ──
+    _assignee_no_email = False
     if not assignee:
-        logger.warning(f"📧 [SKIP] notify_task_assigned(task={task_id}): _resolve_person({assignee_id}) returned None — employee not found in DB")
-        return False
-    if not assignee.get('email'):
-        logger.warning(f"📧 [SKIP] notify_task_assigned(task={task_id}): assignee '{assignee.get('name')}' (id={assignee_id}) has NO EMAIL in employees table")
-        return False
+        logger.warning(f"📧 [FALLBACK] notify_task_assigned(task={task_id}): _resolve_person({assignee_id}) returned None — employee not found in DB")
+        _assignee_no_email = True
+    elif not assignee.get('email'):
+        logger.warning(f"📧 [FALLBACK] notify_task_assigned(task={task_id}): assignee '{assignee.get('name')}' (id={assignee_id}) has NO EMAIL in employees table")
+        _assignee_no_email = True
 
-    logger.info(f"📧 [SEND] notify_task_assigned(task={task_id}): TO={assignee['email']}, project={ctx.get('project_code','?')}")
+    if _assignee_no_email:
+        # Fallback: send to PM instead, so CC recipients (performer, extras) still get notified
+        if ctx.get('pm_email'):
+            logger.info(f"📧 [SEND] notify_task_assigned(task={task_id}): TO=PM ({ctx['pm_email']}) — assignee has no email, CC will still receive")
+            to_emails = [ctx['pm_email']]
+            greeting_name = ctx.get('pm_name', 'PM')
+        else:
+            logger.warning(f"📧 [SKIP] notify_task_assigned(task={task_id}): assignee has no email AND no PM email — cannot send to anyone")
+            return False
+    else:
+        logger.info(f"📧 [SEND] notify_task_assigned(task={task_id}): TO={assignee['email']}, project={ctx.get('project_code','?')}")
+        to_emails = [assignee['email']]
+        greeting_name = assignee['name']
 
     performer_name = _fmt_person(
         performer['name'] if performer else None,
@@ -369,6 +398,12 @@ def notify_task_assigned(
 
     action = "reassigned to you" if is_reassign else "assigned to you"
     subject_prefix = "[Task Reassigned]" if is_reassign else "[New Task]"
+
+    # If fallback to PM, adjust email content
+    if _assignee_no_email:
+        assignee_display = assignee['name'] if assignee else f"Employee #{assignee_id}"
+        action = f"assigned to **{assignee_display}** (⚠️ no email on file)"
+        subject_prefix = "[New Task — Assignee No Email]" if not is_reassign else "[Task Reassigned — Assignee No Email]"
 
     desc_block = ''
     if description:
@@ -383,11 +418,13 @@ def notify_task_assigned(
         "Update status to <strong>IN_PROGRESS</strong> when you begin",
         "Log actual hours regularly via Quick Update",
     ]
+    if _assignee_no_email:
+        actions.insert(0, f"⚠️ <strong>Assignee has no email</strong> — please add their email to the employee record")
     if planned_end:
         actions.append(f"Complete by <strong>{_fmt_date(planned_end)}</strong>")
 
     body = f'''
-    <p>Hi <strong>{assignee['name']}</strong>,</p>
+    <p>Hi <strong>{greeting_name}</strong>,</p>
     <p>A task has been {action}:</p>
 
     <table style="width:100%;margin:16px 0;">
@@ -403,7 +440,6 @@ def notify_task_assigned(
     {desc_block}
     {_action_required_block(actions)}'''
 
-    to_emails = [assignee['email']]
     cc_emails = _build_cc_list(
         performer_id=performer_id,
         pm_email=ctx.get('pm_email'),
