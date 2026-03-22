@@ -33,7 +33,7 @@ Triggers:
 All sends are non-blocking: failures are logged but never crash the app.
 """
 
-_WBS_NOTIFY_VERSION = '3.2'  # ← removed employee_code column reference
+_WBS_NOTIFY_VERSION = '3.3'  # ← fix page slugs for deep links
 
 import logging
 from typing import List, Optional, Dict
@@ -68,10 +68,10 @@ from .email_notify import (
 # Pattern follows email_notify.py: build_pr_deep_link() → IL_5_🛒_Purchase_Request
 
 _PAGE_SLUGS = {
-    'wbs':      'IL_6_📋_WBS',
-    'team':     'IL_7_👥_Team',
-    'issues':   'IL_8_⚠️_Issues',
-    'progress': 'IL_9_📊_Progress',
+    'wbs':      '6_📋_WBS',
+    'team':     '7_👥_WBS_Team',
+    'issues':   '8_⚠️_WBS_Issues',
+    'progress': '9_📊_WBS_Progress',
 }
 
 
