@@ -2,6 +2,12 @@
 """
 Email Notification for WBS / Task Management workflow.
 
+v3.1 — COALESCE fix + name resolution:
+  - _resolve_person: COALESCE(employees.email, users.email) + CONCAT_WS
+  - _get_project_context: same COALESCE for PM email
+  - notify_task_assigned: PM fallback when assignee has no email
+  - Diagnostic logging with 📧 prefix at every checkpoint
+
 v3.0 — Enhanced notifications:
   - Fixed deep links: configurable page slugs + proper URL encoding
   - Always CC the performer (person who triggered the action)
@@ -27,11 +33,14 @@ Triggers:
 All sends are non-blocking: failures are logged but never crash the app.
 """
 
+_WBS_NOTIFY_VERSION = '3.1'  # ← Check this in logs to verify deployment
+
 import logging
 from typing import List, Optional, Dict
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
+logger.info(f"📧 wbs_notify module loaded — version {_WBS_NOTIFY_VERSION}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -169,15 +178,18 @@ def _resolve_person(employee_id: Optional[int]) -> Optional[Dict]:
         """, {'id': employee_id})
         if rows:
             r = rows[0]
-            return {
+            result = {
                 'id': r['id'],
                 'name': r['full_name'] or r.get('username') or f"Employee #{employee_id}",
                 'email': r.get('email'),
                 'code': r.get('employee_code', ''),
             }
+            logger.info(f"📧 _resolve_person({employee_id}) → name='{result['name']}', email='{result['email']}'")
+            return result
+        logger.warning(f"📧 _resolve_person({employee_id}) → no rows found in employees table")
         return None
     except Exception as e:
-        logger.warning(f"_resolve_person({employee_id}) failed: {e}")
+        logger.warning(f"📧 _resolve_person({employee_id}) EXCEPTION: {e}", exc_info=True)
         return None
 
 
