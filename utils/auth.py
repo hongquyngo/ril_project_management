@@ -255,12 +255,32 @@ class AuthManager:
     
     def require_auth(self) -> bool:
         """
-        Require authentication to access a page
-        Use at the beginning of each protected page
+        Require authentication to access a page.
+        Use at the beginning of each protected page.
+
+        If not authenticated, saves the current page URL as return_url
+        so user can be redirected back after login, then switches to
+        the main page (which has the login form).
         """
         if not self.check_session():
+            # Save intended destination for post-login redirect
+            try:
+                ctx = st.context
+                if hasattr(ctx, 'headers'):
+                    # Store the full path+query so deep links work after login
+                    import urllib.parse
+                    path = st.query_params.to_dict()
+                    if path:
+                        st.session_state['_return_after_login'] = path
+            except Exception:
+                pass  # Non-critical — skip if context unavailable
+
             st.warning("⚠️ Please login to access this page")
-            st.stop()
+            try:
+                st.switch_page("app.py")  # Redirect to main page with login form
+            except Exception:
+                # Fallback for older Streamlit or if app.py is named differently
+                st.stop()
             return False
         return True
     
