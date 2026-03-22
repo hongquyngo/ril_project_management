@@ -2,19 +2,18 @@
 """
 WBS Management — Phases, Tasks, Checklists, Comments, Team.
 
-v2.0 — Performance optimization:
-  - Bootstrap: 3 cached queries replace 7-8 per-rerun queries
-  - Client-side filtering: filter_tasks_client() replaces DB queries with pandas (~0ms)
-  - @st.fragment for Checklist/Comments/Files inside Task Detail dialog
-  - Targeted cache invalidation: invalidate_wbs_cache() replaces st.cache_data.clear()
-  - Session-state prefetch: task data cached on select, reused in dialog
+v3.0 — Role-based UX + Dashboard:
+  Phase 1: Role resolution from il_project_members → 5 tiers × 12 permissions
+  Phase 2: Dashboard tab with KPIs, action items, phase progress
+  Phase 3: Tasks tab with quick filters, overdue indicators, permission-gated actions
 
-UX: @st.dialog cho CRUD | tabs cho Phases/Tasks/My Tasks/Team | session state cho dialog chaining
+  (v2.0 performance features preserved: bootstrap cache, client-side filter, @st.fragment)
 """
 
 import streamlit as st
 import pandas as pd
 import logging
+from datetime import date, timedelta
 
 from utils.auth import AuthManager
 from utils.il_project import (
@@ -45,9 +44,13 @@ from utils.il_project.wbs_helpers import (
     TASK_STATUS_OPTIONS, TASK_STATUS_ICONS, PHASE_STATUS_OPTIONS,
     PRIORITY_OPTIONS, PRIORITY_ICONS,
     DEPENDENCY_TYPES, DEPENDENCY_LABELS, DEFAULT_PHASE_TEMPLATES,
+    MEMBER_ROLE_LABELS,
     fmt_status, fmt_priority, fmt_completion, fmt_hours, comment_type_icon,
     invalidate_wbs_cache, render_attachments,
     render_cc_selector,
+    # v3.0 — Role + Dashboard
+    resolve_project_role, can_edit_task, can_quick_update_task,
+    compute_dashboard_kpis, compute_action_items,
 )
 from utils.il_project.wbs_notify import (
     notify_on_task_status_change,
@@ -66,7 +69,7 @@ is_admin    = auth.is_admin()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CACHED DATA LOADING — Bootstrap pattern
+# CACHED DATA LOADING — Bootstrap pattern (unchanged from v2.0)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
@@ -79,17 +82,14 @@ def _load_projects():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_wbs_data(project_id: int, _v: int = 0):
-    """Bootstrap: load phases + tasks + members in 3 queries. Cached per project."""
     return bootstrap_wbs_data(project_id)
 
 def _get_wbs(project_id: int) -> dict:
-    """Get cached WBS data with version-based invalidation."""
     v = st.session_state.get(f'_wbs_v_{project_id}', 0)
     return _cached_wbs_data(project_id, _v=v)
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_my_tasks(employee_id: int, _v: int = 0):
-    """My Tasks across ALL projects — separate query, cached."""
     return get_my_tasks_df(employee_id)
 
 def _get_my_tasks(emp_id: int) -> pd.DataFrame:
@@ -101,7 +101,40 @@ emp_map   = {e['id']: e['full_name'] for e in employees}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — Project selector + filters
+# HELPER — Due date formatting (Phase 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _format_due_date(planned_end, status) -> str:
+    """Format due date with overdue indicator."""
+    if not planned_end or status in ('COMPLETED', 'CANCELLED'):
+        return str(planned_end) if planned_end else '—'
+    try:
+        if hasattr(planned_end, 'date'):
+            d = planned_end.date()
+        elif isinstance(planned_end, date):
+            d = planned_end
+        else:
+            d = pd.to_datetime(planned_end).date()
+
+        today = date.today()
+        diff = (d - today).days
+
+        if diff < 0:
+            return f"🔴 {-diff}d late"
+        elif diff == 0:
+            return "⚠️ Today"
+        elif diff <= 3:
+            return f"🟡 {diff}d left"
+        elif diff <= 7:
+            return f"📅 {diff}d"
+        else:
+            return str(d)
+    except Exception:
+        return str(planned_end) if planned_end else '—'
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — Project selector + filters + user guide
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.title("📋 WBS Management")
@@ -128,6 +161,10 @@ with st.sidebar:
     f_assignee = st.selectbox("Assignee", ["All", "🙋 Me"] +
                                [e['full_name'] for e in employees])
 
+    st.divider()
+    if st.button("❓ User Guide", use_container_width=True):
+        st.session_state["open_user_guide"] = True
+
 # Resolve filters
 phase_filter_id = None
 status_filter   = None if f_status == "All" else f_status
@@ -144,227 +181,440 @@ if not wbs['ok']:
     st.error(f"⚠️ {wbs['error']}")
     st.stop()
 
-# Project header
-if proj_info:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Project", proj_info['project_code'])
-    c2.metric("Status", proj_info['status'])
-    c3.metric("PM", proj_info.get('pm_name', '—'))
-    c4.metric("Completion", fmt_completion(proj_info.get('overall_completion_percent')))
-    st.divider()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1: ROLE RESOLUTION — Determine permissions for current user
+# ══════════════════════════════════════════════════════════════════════════════
+
+perms = resolve_project_role(wbs['members'], employee_id, is_admin)
+
+_my_name = emp_map.get(employee_id, 'there')
+_my_role_label = MEMBER_ROLE_LABELS.get(perms['role'], perms.get('role') or 'Guest')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN TABS
+# WELCOME BANNER + KPIs (role-aware)
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab_phases, tab_tasks, tab_mytasks, tab_team = st.tabs(
-    ["🔷 Phases", "📋 Tasks", "🙋 My Tasks", "👥 Team"]
-)
+kpis = compute_dashboard_kpis(wbs['tasks'], wbs['phases'], proj_info or {})
 
+_project_label = f"**{proj_info['project_code']}** — {proj_info['project_name']}" if proj_info else ""
+_role_chip = f"`{_my_role_label}`" if perms['is_member'] else "`Guest`"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1: PHASES (from bootstrap cache)
-# ══════════════════════════════════════════════════════════════════════════════
+welcome_col, guide_col = st.columns([7, 1])
+with welcome_col:
+    st.markdown(f"Hi **{_my_name}** · {_role_chip} on {_project_label}")
+with guide_col:
+    if not perms['is_member'] and not is_admin:
+        st.caption("🔒 Read-only")
 
-with tab_phases:
-    ph_df = wbs['phases']  # From bootstrap — no extra query
-
-    pa1, pa2, pa3 = st.columns([1, 1, 5])
-    if pa1.button("➕ Add Phase", type="primary"):
-        st.session_state["open_create_phase"] = True
-    if pa2.button("📦 Load Template"):
-        st.session_state["open_phase_template"] = True
-
-    if ph_df.empty:
-        st.info("No phases defined. Add phases or load a template to get started.")
-    else:
-        for _, ph in ph_df.iterrows():
-            with st.container(border=True):
-                pc1, pc2, pc3, pc4, pc5 = st.columns([3, 2, 2, 1, 1])
-                pc1.markdown(f"**{ph['sequence_no']}. {ph['phase_name']}** `{ph['phase_code']}`")
-                pc2.caption(f"{fmt_status(ph['status'])} · {ph['task_count']:.0f} tasks ({ph['tasks_done']:.0f} done)")
-                pc3.progress(float(ph['completion_percent'] or 0) / 100,
-                             text=f"{ph['completion_percent']:.0f}%")
-                if pc4.button("✏️", key=f"ph_edit_{ph['id']}", help="Edit phase"):
-                    st.session_state["open_edit_phase"] = int(ph['id'])
-                    st.rerun()
-                if pc5.button("🗑", key=f"ph_del_{ph['id']}", help="Delete phase"):
-                    if soft_delete_phase(int(ph['id']), user_id):
-                        st.success("Phase deleted.")
-                        invalidate_wbs_cache(selected_project_id)
-                        st.rerun()
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Overall", f"{kpis['overall_pct']:.0f}%")
+k2.metric("Tasks Done", kpis['completion_rate'])
+k3.metric("Overdue", kpis['overdue'],
+          delta=None if kpis['overdue'] == 0 else f"-{kpis['overdue']}",
+          delta_color="inverse")
+k4.metric("Blocked", kpis['blocked'],
+          delta=None if kpis['blocked'] == 0 else f"-{kpis['blocked']}",
+          delta_color="inverse")
+k5.metric("Due This Week", kpis['due_this_week'])
+st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: TASKS (client-side filter on bootstrap cache)
+# MAIN TABS — Built dynamically based on role permissions
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_tasks:
-    # Phase options from bootstrap — no extra query
-    phase_opts = {int(r['id']): f"{r['sequence_no']}. {r['phase_name']}" for _, r in wbs['phases'].iterrows()}
+tab_labels = []
+tab_keys   = []
 
-    ta1, ta2, _ = st.columns([1, 1, 5])
-    if ta1.button("➕ Add Task", type="primary", key="btn_add_task"):
-        st.session_state["open_create_task"] = True
+if perms.get('show_dashboard'):
+    tab_labels.append("📊 Dashboard")
+    tab_keys.append("dashboard")
 
-    # Client-side filter on cached data (~0ms vs ~200ms DB query)
-    task_df = filter_tasks_client(
-        wbs['tasks'],
-        phase_id=phase_filter_id,
-        assignee_id=assignee_filter,
-        status=status_filter,
-    )
+tab_labels.append("🙋 My Tasks")
+tab_keys.append("mytasks")
 
-    if task_df.empty:
-        st.info("No tasks found. Create phases first, then add tasks.")
-    else:
-        display = task_df.copy()
-        display['●'] = display['status'].map(lambda s: TASK_STATUS_ICONS.get(s, '⚪'))
-        display['prio'] = display['priority'].map(lambda p: PRIORITY_ICONS.get(p, '🔵'))
-        display['pct_fmt'] = display['completion_percent'].apply(fmt_completion)
-        display['cl_fmt'] = display.apply(
-            lambda r: f"{r['checklist_done']:.0f}/{r['checklist_total']:.0f}"
-            if r['checklist_total'] > 0 else '—', axis=1
-        )
+if perms.get('show_all_tasks_tab'):
+    tab_labels.append("📋 All Tasks")
+    tab_keys.append("tasks")
 
-        event = st.dataframe(
-            display,
-            key=f"task_tbl_{st.session_state.get('_task_tbl_key', 0)}",
-            width="stretch", hide_index=True,
-            on_select="rerun", selection_mode="single-row",
-            column_config={
-                '●':                st.column_config.TextColumn('', width=30),
-                'prio':             st.column_config.TextColumn('!', width=30),
-                'wbs_code':         st.column_config.TextColumn('WBS', width=60),
-                'task_name':        st.column_config.TextColumn('Task'),
-                'phase_name':       st.column_config.TextColumn('Phase'),
-                'assignee_name':    st.column_config.TextColumn('Assignee'),
-                'status':           st.column_config.TextColumn('Status', width=100),
-                'pct_fmt':          st.column_config.TextColumn('%', width=70),
-                'planned_end':      st.column_config.DateColumn('Due'),
-                'cl_fmt':           st.column_config.TextColumn('✓', width=50),
-                'comment_count':    st.column_config.NumberColumn('💬', width=40),
-                'id': None, 'project_id': None, 'phase_id': None,
-                'parent_task_id': None, 'description': None,
-                'assignee_id': None, 'priority': None,
-                'planned_start': None, 'actual_start': None, 'actual_end': None,
-                'estimated_hours': None, 'actual_hours': None,
-                'completion_percent': None,
-                'dependency_task_id': None, 'dependency_type': None,
-                'phase_code': None, 'checklist_total': None, 'checklist_done': None,
-            },
-        )
+if perms.get('show_phases_tab'):
+    tab_labels.append("🔷 Phases")
+    tab_keys.append("phases")
 
-        sel = event.selection.rows
-        if sel:
-            selected_task_id = int(display.iloc[sel[0]]['id'])
-            task_info = get_task(selected_task_id)
-            if task_info:
-                st.markdown(
-                    f"**Selected:** `{task_info.get('wbs_code', '')}` {task_info['task_name']} "
-                    f"({TASK_STATUS_ICONS.get(task_info['status'], '⚪')} {task_info['status']})"
-                )
-                ab1, ab2, ab3, ab4, _ = st.columns([1, 1, 1, 1, 3])
-                if ab1.button("👁️ View", type="primary", use_container_width=True, key="task_view"):
-                    st.session_state["open_view_task"] = selected_task_id
-                    st.rerun()
-                if ab2.button("✏️ Edit", use_container_width=True, key="task_edit"):
-                    st.session_state["open_edit_task"] = selected_task_id
-                    st.rerun()
-                if ab3.button("⚡ Quick Update", use_container_width=True, key="task_quick"):
-                    st.session_state["open_quick_task"] = selected_task_id
-                    st.rerun()
-                if ab4.button("🗑 Delete", use_container_width=True, key="task_del"):
-                    if soft_delete_task(selected_task_id, user_id):
-                        st.success("Task deleted.")
-                        invalidate_wbs_cache(selected_project_id)
-                        st.rerun()
+if perms.get('show_team_tab'):
+    tab_labels.append("👥 Team")
+    tab_keys.append("team")
+
+tabs_obj = st.tabs(tab_labels)
+tab_map = dict(zip(tab_keys, tabs_obj))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3: MY TASKS (separate cached query — cross-project)
+# TAB: DASHBOARD (📊) — Phase 2
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_mytasks:
-    if not employee_id:
-        st.warning("Cannot determine your employee ID. Please contact admin.")
-    else:
-        my_df = _get_my_tasks(employee_id)  # Cached, cross-project
-        st.metric("Active Tasks", len(my_df))
+if 'dashboard' in tab_map:
+    with tab_map['dashboard']:
+        action_items = compute_action_items(wbs['tasks'], employee_id, perms['tier'])
 
-        if my_df.empty:
-            st.success("🎉 No pending tasks assigned to you!")
+        # ── Action Required Panel ──
+        if action_items:
+            st.subheader(f"🎯 Action Required ({len(action_items)})")
+            for item in action_items[:15]:
+                with st.container(border=True):
+                    ic1, ic2, ic3 = st.columns([5, 2, 3])
+                    ic1.markdown(
+                        f"{item['icon']} **[{item['wbs_code']}]** {item['task_name']}"
+                    )
+                    ic2.caption(f"👤 {item['assignee']}")
+                    ic3.caption(f"{item['message']}")
+
+                    ba1, ba2, ba3, _ = st.columns([1, 1, 1, 4])
+                    _tid = item['task_id']
+
+                    if 'view' in item.get('actions', []):
+                        if ba1.button("👁️", key=f"ai_v_{_tid}_{item['type']}", help="View task"):
+                            st.session_state["open_view_task"] = _tid
+                            st.rerun()
+
+                    if 'quick_update' in item.get('actions', []):
+                        if can_quick_update_task(perms, None, employee_id) or perms.get('can_quick_update_any'):
+                            if ba2.button("⚡", key=f"ai_q_{_tid}_{item['type']}", help="Quick update"):
+                                st.session_state["open_quick_task"] = _tid
+                                st.rerun()
+
+                    if 'edit' in item.get('actions', []):
+                        if perms.get('can_edit_any_task') or perms['tier'] == 'lead':
+                            if ba3.button("✏️", key=f"ai_e_{_tid}_{item['type']}", help="Edit task"):
+                                st.session_state["open_edit_task"] = _tid
+                                st.rerun()
         else:
-            my_display = my_df.copy()
-            my_display['prio'] = my_display['priority'].map(lambda p: PRIORITY_ICONS.get(p, '🔵'))
-            my_display['pct_fmt'] = my_display['completion_percent'].apply(fmt_completion)
+            st.success("🎉 No action items — all tasks are on track!")
 
-            event_my = st.dataframe(
-                my_display,
-                key="my_task_tbl", width="stretch", hide_index=True,
+        st.divider()
+
+        # ── Phase Progress Strip ──
+        ph_df = wbs['phases']
+        if not ph_df.empty:
+            st.subheader("📊 Phase Progress")
+            today_d = date.today()
+            for _, ph in ph_df.iterrows():
+                pc1, pc2, pc3 = st.columns([3, 4, 2])
+                pct = float(ph['completion_percent'] or 0)
+                task_info = f"{ph['tasks_done']:.0f}/{ph['task_count']:.0f} tasks"
+
+                pc1.markdown(f"**{ph['sequence_no']}. {ph['phase_name']}**")
+                pc2.progress(min(pct / 100, 1.0), text=f"{pct:.0f}% · {task_info}")
+
+                # Count overdue in this phase
+                n_overdue = 0
+                if not wbs['tasks'].empty:
+                    pt = wbs['tasks'][
+                        (wbs['tasks']['phase_id'] == ph['id']) &
+                        (~wbs['tasks']['status'].isin(['COMPLETED', 'CANCELLED'])) &
+                        (wbs['tasks']['planned_end'].notna())
+                    ]
+                    if not pt.empty:
+                        n_overdue = int((pd.to_datetime(pt['planned_end']).dt.date < today_d).sum())
+
+                if n_overdue > 0:
+                    pc3.caption(f"⏰ {n_overdue} overdue")
+                else:
+                    pc3.caption(fmt_status(ph['status']))
+
+        # ── Quick Stats ──
+        st.divider()
+        qs1, qs2, qs3 = st.columns(3)
+        if kpis['unassigned'] > 0 and perms['tier'] == 'manager':
+            qs1.warning(f"❓ **{kpis['unassigned']}** unassigned tasks")
+        if not wbs['members'].empty:
+            active_mem = wbs['members']
+            if 'is_active' in active_mem.columns:
+                active_mem = active_mem[active_mem['is_active'] == 1]
+            qs2.info(f"👥 **{len(active_mem)}** active team members")
+        if not wbs['tasks'].empty:
+            in_prog = int((wbs['tasks']['status'] == 'IN_PROGRESS').sum())
+            qs3.info(f"🔵 **{in_prog}** tasks in progress")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: MY TASKS (🙋)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if 'mytasks' in tab_map:
+    with tab_map['mytasks']:
+        if not employee_id:
+            st.warning("Cannot determine your employee ID. Please contact admin.")
+        else:
+            my_df = _get_my_tasks(employee_id)
+
+            # My action items summary
+            my_actions = compute_action_items(wbs['tasks'], employee_id, 'member')
+            if my_actions:
+                n_crit = sum(1 for a in my_actions if a['severity'] == 'critical')
+                n_high = sum(1 for a in my_actions if a['severity'] == 'high')
+                parts = []
+                if n_crit: parts.append(f"🔴 {n_crit} critical")
+                if n_high: parts.append(f"🟠 {n_high} high")
+                if parts:
+                    st.caption(f"🎯 {' · '.join(parts)} action items")
+
+            st.metric("Active Tasks", len(my_df))
+
+            if my_df.empty:
+                st.success("🎉 No pending tasks assigned to you!")
+            else:
+                my_display = my_df.copy()
+                my_display['prio'] = my_display['priority'].map(lambda p: PRIORITY_ICONS.get(p, '🔵'))
+                my_display['pct_fmt'] = my_display['completion_percent'].apply(fmt_completion)
+                my_display['due_fmt'] = my_display.apply(
+                    lambda r: _format_due_date(r.get('planned_end'), r.get('status')), axis=1
+                )
+
+                event_my = st.dataframe(
+                    my_display,
+                    key="my_task_tbl", width="stretch", hide_index=True,
+                    on_select="rerun", selection_mode="single-row",
+                    column_config={
+                        'prio':            st.column_config.TextColumn('!', width=30),
+                        'project_code':    st.column_config.TextColumn('Project', width=100),
+                        'phase_name':      st.column_config.TextColumn('Phase'),
+                        'wbs_code':        st.column_config.TextColumn('WBS', width=60),
+                        'task_name':       st.column_config.TextColumn('Task'),
+                        'status':          st.column_config.TextColumn('Status', width=100),
+                        'pct_fmt':         st.column_config.TextColumn('%', width=70),
+                        'due_fmt':         st.column_config.TextColumn('Due', width=100),
+                        'id': None, 'priority': None, 'completion_percent': None,
+                        'actual_start': None, 'estimated_hours': None,
+                        'actual_hours': None, 'project_name': None,
+                        'planned_end': None,
+                    },
+                )
+                sel_my = event_my.selection.rows
+                if sel_my:
+                    my_tid = int(my_display.iloc[sel_my[0]]['id'])
+                    mc1, mc2, _ = st.columns([1, 1, 5])
+                    if mc1.button("⚡ Quick Update", type="primary", key="my_quick"):
+                        st.session_state["open_quick_task"] = my_tid
+                        st.rerun()
+                    if mc2.button("👁️ View", key="my_view"):
+                        st.session_state["open_view_task"] = my_tid
+                        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: ALL TASKS (📋) — Phase 3 Enhanced
+# ══════════════════════════════════════════════════════════════════════════════
+
+if 'tasks' in tab_map:
+    with tab_map['tasks']:
+        # ── Action buttons (permission-gated) ──
+        ta1, _ = st.columns([1, 6])
+        if perms['can_create_tasks']:
+            if ta1.button("➕ Add Task", type="primary", key="btn_add_task"):
+                st.session_state["open_create_task"] = True
+
+        # ── Phase 3: Quick Filter Chips ──
+        st.caption("Quick filters:")
+        fc1, fc2, fc3, fc4, fc5, _ = st.columns([1, 1, 1, 1, 1, 2])
+        qf_overdue  = fc1.toggle("⏰ Overdue", value=False, key="qf_overdue")
+        qf_blocked  = fc2.toggle("🔴 Blocked", value=False, key="qf_blocked")
+        qf_mine     = fc3.toggle("🙋 Mine", value=False, key="qf_mine")
+        qf_critical = fc4.toggle("🔴 Crit/High", value=False, key="qf_critical")
+        qf_noassign = False
+        if perms['tier'] in ('manager', 'lead'):
+            qf_noassign = fc5.toggle("❓ No assignee", value=False, key="qf_noassign")
+
+        # ── Apply sidebar + quick filters (~0ms) ──
+        task_df = filter_tasks_client(
+            wbs['tasks'],
+            phase_id=phase_filter_id,
+            assignee_id=assignee_filter,
+            status=status_filter,
+        )
+
+        if not task_df.empty:
+            today_d = date.today()
+            mask = pd.Series(True, index=task_df.index)
+
+            if qf_overdue:
+                has_due = task_df['planned_end'].notna()
+                not_done = ~task_df['status'].isin(['COMPLETED', 'CANCELLED'])
+                mask &= has_due & not_done & (pd.to_datetime(task_df['planned_end']).dt.date < today_d)
+
+            if qf_blocked:
+                mask &= (task_df['status'] == 'BLOCKED')
+
+            if qf_mine and employee_id:
+                mask &= (task_df['assignee_id'] == employee_id)
+
+            if qf_critical:
+                mask &= task_df['priority'].isin(['CRITICAL', 'HIGH'])
+
+            if qf_noassign:
+                mask &= task_df['assignee_id'].isna()
+
+            task_df = task_df[mask].reset_index(drop=True)
+
+        if task_df.empty:
+            st.info("No tasks match current filters.")
+        else:
+            display = task_df.copy()
+            display['●'] = display['status'].map(lambda s: TASK_STATUS_ICONS.get(s, '⚪'))
+            display['prio'] = display['priority'].map(lambda p: PRIORITY_ICONS.get(p, '🔵'))
+            display['pct_fmt'] = display['completion_percent'].apply(fmt_completion)
+            display['cl_fmt'] = display.apply(
+                lambda r: f"{r['checklist_done']:.0f}/{r['checklist_total']:.0f}"
+                if r['checklist_total'] > 0 else '—', axis=1
+            )
+            display['due_fmt'] = display.apply(
+                lambda r: _format_due_date(r.get('planned_end'), r.get('status')), axis=1
+            )
+
+            event = st.dataframe(
+                display,
+                key=f"task_tbl_{st.session_state.get('_task_tbl_key', 0)}",
+                width="stretch", hide_index=True,
                 on_select="rerun", selection_mode="single-row",
                 column_config={
-                    'prio':            st.column_config.TextColumn('!', width=30),
-                    'project_code':    st.column_config.TextColumn('Project', width=100),
-                    'phase_name':      st.column_config.TextColumn('Phase'),
-                    'wbs_code':        st.column_config.TextColumn('WBS', width=60),
-                    'task_name':       st.column_config.TextColumn('Task'),
-                    'status':          st.column_config.TextColumn('Status', width=100),
-                    'pct_fmt':         st.column_config.TextColumn('%', width=70),
-                    'planned_end':     st.column_config.DateColumn('Due'),
-                    'id': None, 'priority': None, 'completion_percent': None,
-                    'actual_start': None, 'estimated_hours': None,
-                    'actual_hours': None, 'project_name': None,
+                    '●':                st.column_config.TextColumn('', width=30),
+                    'prio':             st.column_config.TextColumn('!', width=30),
+                    'wbs_code':         st.column_config.TextColumn('WBS', width=60),
+                    'task_name':        st.column_config.TextColumn('Task'),
+                    'phase_name':       st.column_config.TextColumn('Phase'),
+                    'assignee_name':    st.column_config.TextColumn('Assignee'),
+                    'status':           st.column_config.TextColumn('Status', width=100),
+                    'pct_fmt':          st.column_config.TextColumn('%', width=70),
+                    'due_fmt':          st.column_config.TextColumn('Due', width=100),
+                    'cl_fmt':           st.column_config.TextColumn('✓', width=50),
+                    'comment_count':    st.column_config.NumberColumn('💬', width=40),
+                    'id': None, 'project_id': None, 'phase_id': None,
+                    'parent_task_id': None, 'description': None,
+                    'assignee_id': None, 'priority': None,
+                    'planned_start': None, 'planned_end': None,
+                    'actual_start': None, 'actual_end': None,
+                    'estimated_hours': None, 'actual_hours': None,
+                    'completion_percent': None,
+                    'dependency_task_id': None, 'dependency_type': None,
+                    'phase_code': None, 'checklist_total': None, 'checklist_done': None,
                 },
             )
-            sel_my = event_my.selection.rows
-            if sel_my:
-                my_tid = int(my_display.iloc[sel_my[0]]['id'])
-                mc1, mc2, _ = st.columns([1, 1, 5])
-                if mc1.button("⚡ Quick Update", type="primary", key="my_quick"):
-                    st.session_state["open_quick_task"] = my_tid
-                    st.rerun()
-                if mc2.button("👁️ View", key="my_view"):
-                    st.session_state["open_view_task"] = my_tid
-                    st.rerun()
+
+            # ── Permission-gated action buttons ──
+            sel = event.selection.rows
+            if sel:
+                selected_task_id = int(display.iloc[sel[0]]['id'])
+                sel_assignee_id  = display.iloc[sel[0]].get('assignee_id')
+                task_info = get_task(selected_task_id)
+
+                if task_info:
+                    st.markdown(
+                        f"**Selected:** `{task_info.get('wbs_code', '')}` {task_info['task_name']} "
+                        f"({TASK_STATUS_ICONS.get(task_info['status'], '⚪')} {task_info['status']})"
+                    )
+                    ab1, ab2, ab3, ab4, _ = st.columns([1, 1, 1, 1, 3])
+
+                    if ab1.button("👁️ View", type="primary", use_container_width=True, key="task_view"):
+                        st.session_state["open_view_task"] = selected_task_id
+                        st.rerun()
+
+                    if can_quick_update_task(perms, sel_assignee_id, employee_id):
+                        if ab2.button("⚡ Quick Update", use_container_width=True, key="task_quick"):
+                            st.session_state["open_quick_task"] = selected_task_id
+                            st.rerun()
+
+                    if can_edit_task(perms, sel_assignee_id, employee_id):
+                        if ab3.button("✏️ Edit", use_container_width=True, key="task_edit"):
+                            st.session_state["open_edit_task"] = selected_task_id
+                            st.rerun()
+
+                    if perms['can_delete']:
+                        if ab4.button("🗑 Delete", use_container_width=True, key="task_del"):
+                            if soft_delete_task(selected_task_id, user_id):
+                                st.success("Task deleted.")
+                                invalidate_wbs_cache(selected_project_id)
+                                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: TEAM (from bootstrap cache — no extra query)
+# TAB: PHASES (🔷) — Permission-gated CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_team:
-    mem_df = wbs['members']  # From bootstrap
+if 'phases' in tab_map:
+    with tab_map['phases']:
+        ph_df = wbs['phases']
 
-    if mem_df.empty:
-        st.info("No team members assigned yet. Go to **👥 Team & Resources** to add members.")
-    else:
-        active_df = mem_df[mem_df['is_active'] == 1] if 'is_active' in mem_df.columns else mem_df
-        tm1, tm2, tm3 = st.columns(3)
-        tm1.metric("Team Size", len(active_df))
-        tm2.metric("Total Allocation",
-                   f"{active_df['allocation_percent'].sum():.0f}%"
-                   if 'allocation_percent' in active_df.columns else '—')
-        roles = active_df['role'].nunique() if 'role' in active_df.columns else 0
-        tm3.metric("Roles", roles)
+        if perms['can_manage_phases']:
+            pa1, pa2, _ = st.columns([1, 1, 5])
+            if pa1.button("➕ Add Phase", type="primary"):
+                st.session_state["open_create_phase"] = True
+            if pa2.button("📦 Load Template"):
+                st.session_state["open_phase_template"] = True
+        else:
+            st.caption("📖 Phase overview (read-only for your role)")
 
-        st.dataframe(
-            mem_df, width="stretch", hide_index=True,
-            column_config={
-                'member_name':       st.column_config.TextColumn('Name'),
-                'email':             st.column_config.TextColumn('Email'),
-                'role':              st.column_config.TextColumn('Role'),
-                'allocation_percent': st.column_config.NumberColumn('Allocation %', format="%.0f%%"),
-                'daily_rate':        st.column_config.NumberColumn('Daily Rate', format="%.0f"),
-                'start_date':        st.column_config.DateColumn('Start'),
-                'end_date':          st.column_config.DateColumn('End'),
-                'is_active':         st.column_config.CheckboxColumn('Active'),
-                'id': None, 'employee_id': None, 'notes': None,
-            },
-        )
+        if ph_df.empty:
+            msg = "No phases defined."
+            if perms['can_manage_phases']:
+                msg += " Add phases or load a template to get started."
+            st.info(msg)
+        else:
+            for _, ph in ph_df.iterrows():
+                with st.container(border=True):
+                    pc1, pc2, pc3, pc4, pc5 = st.columns([3, 2, 2, 1, 1])
+                    pc1.markdown(f"**{ph['sequence_no']}. {ph['phase_name']}** `{ph['phase_code']}`")
+                    pc2.caption(f"{fmt_status(ph['status'])} · {ph['task_count']:.0f} tasks ({ph['tasks_done']:.0f} done)")
+                    pc3.progress(float(ph['completion_percent'] or 0) / 100,
+                                 text=f"{ph['completion_percent']:.0f}%")
+                    if perms['can_manage_phases']:
+                        if pc4.button("✏️", key=f"ph_edit_{ph['id']}", help="Edit phase"):
+                            st.session_state["open_edit_phase"] = int(ph['id'])
+                            st.rerun()
+                        if pc5.button("🗑", key=f"ph_del_{ph['id']}", help="Delete phase"):
+                            if soft_delete_phase(int(ph['id']), user_id):
+                                st.success("Phase deleted.")
+                                invalidate_wbs_cache(selected_project_id)
+                                st.rerun()
 
-    st.page_link("pages/7_👥_WBS_Team.py", label="👥 Manage Team & Resources →", icon="👥")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: TEAM (👥)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if 'team' in tab_map:
+    with tab_map['team']:
+        mem_df = wbs['members']
+
+        if mem_df.empty:
+            st.info("No team members assigned yet.")
+        else:
+            active_df = mem_df[mem_df['is_active'] == 1] if 'is_active' in mem_df.columns else mem_df
+            tm1, tm2, tm3 = st.columns(3)
+            tm1.metric("Team Size", len(active_df))
+            tm2.metric("Total Allocation",
+                       f"{active_df['allocation_percent'].sum():.0f}%"
+                       if 'allocation_percent' in active_df.columns else '—')
+            tm3.metric("Roles", active_df['role'].nunique() if 'role' in active_df.columns else 0)
+
+            st.dataframe(
+                mem_df, width="stretch", hide_index=True,
+                column_config={
+                    'member_name':       st.column_config.TextColumn('Name'),
+                    'email':             st.column_config.TextColumn('Email'),
+                    'role':              st.column_config.TextColumn('Role'),
+                    'allocation_percent': st.column_config.NumberColumn('Allocation %', format="%.0f%%"),
+                    'daily_rate':        st.column_config.NumberColumn('Daily Rate', format="%.0f"),
+                    'start_date':        st.column_config.DateColumn('Start'),
+                    'end_date':          st.column_config.DateColumn('End'),
+                    'is_active':         st.column_config.CheckboxColumn('Active'),
+                    'id': None, 'employee_id': None, 'notes': None,
+                },
+            )
+
+        label = "👥 Manage Team & Resources →" if perms['can_manage_team'] else "👥 View Team Details →"
+        st.page_link("pages/7_👥_WBS_Team.py", label=label, icon="👥")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -480,7 +730,6 @@ def _dialog_edit_phase(phase_id: int):
 
 def _task_form_fields(task: dict, is_create: bool):
     """Shared task form fields. Returns dict of values."""
-    # Use bootstrap cache for phase options — no extra query
     ph_df_form = wbs['phases']
     phase_opts = [(int(r['id']), f"{r['sequence_no']}. {r['phase_name']}") for _, r in ph_df_form.iterrows()]
 
@@ -492,13 +741,25 @@ def _task_form_fields(task: dict, is_create: bool):
     phase_id = phase_opts[phase_labels.index(phase_sel)][0] if phase_opts else None
 
     c3, c4, c5 = st.columns(3)
-    emp_opts = ["(Unassigned)"] + [e['full_name'] for e in employees]
-    emp_idx  = next((i + 1 for i, e in enumerate(employees) if e['id'] == task.get('assignee_id')), 0)
-    emp_sel  = c3.selectbox("Assignee", emp_opts, index=emp_idx)
-    assignee_id = employees[emp_opts.index(emp_sel) - 1]['id'] if emp_sel != "(Unassigned)" else None
 
-    priority = c4.selectbox("Priority", PRIORITY_OPTIONS,
-                            index=PRIORITY_OPTIONS.index(task['priority']) if task.get('priority') in PRIORITY_OPTIONS else 1)
+    # Assignee — only if user has permission
+    if perms['can_assign_tasks'] or is_create:
+        emp_opts = ["(Unassigned)"] + [e['full_name'] for e in employees]
+        emp_idx  = next((i + 1 for i, e in enumerate(employees) if e['id'] == task.get('assignee_id')), 0)
+        emp_sel  = c3.selectbox("Assignee", emp_opts, index=emp_idx)
+        assignee_id = employees[emp_opts.index(emp_sel) - 1]['id'] if emp_sel != "(Unassigned)" else None
+    else:
+        assignee_id = task.get('assignee_id')
+        c3.text_input("Assignee", value=emp_map.get(assignee_id, '(Unassigned)'), disabled=True)
+
+    # Priority — only manager/lead
+    if perms['can_assign_tasks']:
+        priority = c4.selectbox("Priority", PRIORITY_OPTIONS,
+                                index=PRIORITY_OPTIONS.index(task['priority']) if task.get('priority') in PRIORITY_OPTIONS else 1)
+    else:
+        priority = task.get('priority', 'NORMAL')
+        c4.text_input("Priority", value=priority, disabled=True)
+
     if is_create:
         wbs_code = c5.text_input("WBS Code", value=generate_wbs_code(phase_id) if phase_id else '',
                             help="Auto-generated. Edit if needed.")
@@ -519,24 +780,17 @@ def _task_form_fields(task: dict, is_create: bool):
     description = st.text_area("Description", value=task.get('description') or '', height=80)
 
     return {
-        'project_id':       selected_project_id,
-        'phase_id':         phase_id,
-        'parent_task_id':   task.get('parent_task_id'),
-        'wbs_code':         wbs_code.strip() or None,
-        'task_name':        task_name.strip(),
-        'description':      description.strip() or None,
-        'assignee_id':      assignee_id,
-        'priority':         priority,
-        'status':           status,
-        'planned_start':    p_start,
-        'planned_end':      p_end,
-        'actual_start':     task.get('actual_start'),
-        'actual_end':       task.get('actual_end'),
-        'estimated_hours':  est_hrs or None,
-        'actual_hours':     task.get('actual_hours'),
+        'project_id': selected_project_id, 'phase_id': phase_id,
+        'parent_task_id': task.get('parent_task_id'),
+        'wbs_code': wbs_code.strip() or None, 'task_name': task_name.strip(),
+        'description': description.strip() or None, 'assignee_id': assignee_id,
+        'priority': priority, 'status': status,
+        'planned_start': p_start, 'planned_end': p_end,
+        'actual_start': task.get('actual_start'), 'actual_end': task.get('actual_end'),
+        'estimated_hours': est_hrs or None, 'actual_hours': task.get('actual_hours'),
         'completion_percent': float(task.get('completion_percent', 0)),
         'dependency_task_id': task.get('dependency_task_id'),
-        'dependency_type':    task.get('dependency_type', 'FS'),
+        'dependency_type': task.get('dependency_type', 'FS'),
     }
 
 
@@ -548,7 +802,6 @@ def _dialog_create_task():
         submitted = col_s.form_submit_button("💾 Create", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
-    # CC selector OUTSIDE form
     cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_create")
 
     if cancelled:
@@ -575,6 +828,10 @@ def _dialog_create_task():
 @st.dialog("✏️ Edit Task", width="large")
 def _dialog_edit_task(task_id: int):
     task = get_task(task_id) or {}
+    if not can_edit_task(perms, task.get('assignee_id'), employee_id):
+        st.warning("You don't have permission to edit this task.")
+        return
+
     with st.form("edit_task_form"):
         data = _task_form_fields(task, is_create=False)
         e1, e2 = st.columns(2)
@@ -588,8 +845,9 @@ def _dialog_edit_task(task_id: int):
         submitted = col_s.form_submit_button("💾 Save", type="primary", width="stretch")
         cancelled = col_c.form_submit_button("✖ Cancel", width="stretch")
 
-    # CC selector OUTSIDE form
-    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_edit")
+    cc_ids, cc_emails = [], []
+    if perms['can_assign_tasks']:
+        cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_edit")
 
     if cancelled:
         st.rerun()
@@ -617,8 +875,11 @@ def _dialog_edit_task(task_id: int):
 
 @st.dialog("⚡ Quick Update", width="small")
 def _dialog_quick_update(task_id: int):
-    """Engineer fast-update: status, %, hours only."""
     task = get_task(task_id) or {}
+    if not can_quick_update_task(perms, task.get('assignee_id'), employee_id):
+        st.warning("You don't have permission to update this task.")
+        return
+
     st.markdown(f"**{task.get('wbs_code', '')}** {task.get('task_name', '')}")
 
     with st.form("quick_update_form"):
@@ -629,8 +890,9 @@ def _dialog_quick_update(task_id: int):
         blocker_note = st.text_input("Blocker reason (if blocked)", help="Required when status = BLOCKED")
         submitted = st.form_submit_button("💾 Update", type="primary", width="stretch")
 
-    # CC selector OUTSIDE form
-    cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_quick")
+    cc_ids, cc_emails = [], []
+    if perms['can_assign_tasks']:
+        cc_ids, cc_emails = render_cc_selector(employees, key_prefix="task_quick")
 
     if submitted:
         try:
@@ -651,7 +913,7 @@ def _dialog_quick_update(task_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DIALOG — Task Detail View (with @st.fragment for Checklist/Comments/Files)
+# DIALOG — Task Detail View
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.dialog("📋 Task Details", width="large")
@@ -661,14 +923,14 @@ def _dialog_view_task(task_id: int):
         st.warning("Task not found.")
         return
 
-    # Header
     hc1, hc2 = st.columns([5, 1])
     hc1.subheader(f"{TASK_STATUS_ICONS.get(task['status'], '⚪')} {task.get('wbs_code', '')} — {task['task_name']}")
-    if hc2.button("✏️ Edit", type="primary"):
-        st.session_state["open_edit_task"] = task_id
-        st.rerun()
 
-    # KPIs
+    if can_edit_task(perms, task.get('assignee_id'), employee_id):
+        if hc2.button("✏️ Edit", type="primary"):
+            st.session_state["open_edit_task"] = task_id
+            st.rerun()
+
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Status", task['status'])
     k2.metric("Completion", fmt_completion(task.get('completion_percent')))
@@ -677,7 +939,6 @@ def _dialog_view_task(task_id: int):
 
     dt_info, dt_checklist, dt_comments, dt_files = st.tabs(["📋 Info", "✅ Checklist", "💬 Comments", "📎 Files"])
 
-    # ── Info tab ──────────────────────────────────────────────────────────────
     with dt_info:
         ic1, ic2 = st.columns(2)
         ic1.markdown(f"**Phase:** {task.get('phase_name', '—')}")
@@ -685,11 +946,15 @@ def _dialog_view_task(task_id: int):
         ic1.markdown(f"**Planned:** {task.get('planned_start', '—')} → {task.get('planned_end', '—')}")
         ic2.markdown(f"**Actual:** {task.get('actual_start', '—')} → {task.get('actual_end', '—')}")
         ic2.markdown(f"**Dependency:** {task.get('dependency_task_name') or '—'} ({task.get('dependency_type', '—')})")
+        due_label = _format_due_date(task.get('planned_end'), task.get('status'))
+        if '🔴' in due_label or '⚠️' in due_label:
+            ic2.warning(f"**Due:** {due_label}")
         if task.get('description'):
             st.markdown(f"**Description:**\n{task['description']}")
 
-    # ── Checklist tab (fragment — toggle doesn't rerun full page) ─────────────
     with dt_checklist:
+        _can_toggle = can_quick_update_task(perms, task.get('assignee_id'), employee_id)
+
         @st.fragment
         def _checklist_fragment():
             items = get_checklists(task_id)
@@ -697,40 +962,34 @@ def _dialog_view_task(task_id: int):
                 for item in items:
                     cc1, cc2 = st.columns([5, 1])
                     checked = bool(item['is_completed'])
-                    new_val = cc1.checkbox(
-                        item['item_name'],
-                        value=checked,
-                        key=f"cl_{item['id']}",
-                        help=f"{'Done by ' + item['completed_by_name'] if item.get('completed_by_name') else ''}",
-                    )
-                    if new_val != checked:
-                        toggle_checklist_item(item['id'], employee_id, new_val)
-                        st.rerun()  # Only reruns this fragment!
-                    if cc2.button("🗑", key=f"cl_del_{item['id']}"):
-                        delete_checklist_item(item['id'])
-                        st.rerun()
+                    if _can_toggle:
+                        new_val = cc1.checkbox(item['item_name'], value=checked, key=f"cl_{item['id']}",
+                            help=f"{'Done by ' + item['completed_by_name'] if item.get('completed_by_name') else ''}")
+                        if new_val != checked:
+                            toggle_checklist_item(item['id'], employee_id, new_val)
+                            st.rerun()
+                        if cc2.button("🗑", key=f"cl_del_{item['id']}"):
+                            delete_checklist_item(item['id'])
+                            st.rerun()
+                    else:
+                        cc1.markdown(f"{'✅' if checked else '⬜'} {item['item_name']}")
             else:
                 st.caption("No checklist items.")
 
-            with st.expander("➕ Add Checklist Item"):
-                with st.form(f"cl_form_{task_id}"):
-                    cl_name = st.text_input("Item Name *")
-                    cl_seq  = st.number_input("Sequence", min_value=1, value=len(items) + 1)
-                    if st.form_submit_button("Add", type="primary"):
-                        if cl_name.strip():
-                            create_checklist_item({
-                                'task_id': task_id,
-                                'sequence_no': cl_seq,
-                                'item_name': cl_name.strip(),
-                                'notes': None,
-                            }, user_id)
-                            st.rerun()
-                        else:
-                            st.error("Item name required.")
-
+            if _can_toggle or perms.get('can_edit_any_task'):
+                with st.expander("➕ Add Checklist Item"):
+                    with st.form(f"cl_form_{task_id}"):
+                        cl_name = st.text_input("Item Name *")
+                        cl_seq  = st.number_input("Sequence", min_value=1, value=len(items) + 1)
+                        if st.form_submit_button("Add", type="primary"):
+                            if cl_name.strip():
+                                create_checklist_item({'task_id': task_id, 'sequence_no': cl_seq,
+                                    'item_name': cl_name.strip(), 'notes': None}, user_id)
+                                st.rerun()
+                            else:
+                                st.error("Item name required.")
         _checklist_fragment()
 
-    # ── Comments tab (fragment — post comment doesn't rerun full page) ────────
     with dt_comments:
         @st.fragment
         def _comments_fragment():
@@ -757,33 +1016,118 @@ def _dialog_view_task(task_id: int):
                             st.rerun()
                         else:
                             st.error("Comment text required.")
-
         _comments_fragment()
 
-    # ── Files tab (fragment — upload doesn't rerun full page) ─────────────────
     with dt_files:
         @st.fragment
         def _files_fragment():
             render_attachments('task', task_id, task['project_id'], user_id)
-
         _files_fragment()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DIALOG TRIGGERS (at end of page — same pattern as IL_1)
+# DIALOG — User Guide
 # ══════════════════════════════════════════════════════════════════════════════
 
-if st.session_state.pop("open_create_phase", False):
+@st.dialog("❓ WBS User Guide", width="large")
+def _dialog_user_guide():
+    guide_tabs = []
+    if perms['is_pm'] or perms['tier'] == 'manager':
+        guide_tabs.append("🔵 PM Guide")
+    if perms['tier'] in ('lead', 'member', 'restricted'):
+        guide_tabs.append("🟢 Engineer Guide")
+    if perms['tier'] == 'viewer':
+        guide_tabs.append("🟠 Viewer Guide")
+    guide_tabs.append("📖 General")
+
+    tabs = st.tabs(guide_tabs)
+    idx = 0
+
+    if "🔵 PM Guide" in guide_tabs:
+        with tabs[idx]:
+            st.markdown("""
+**📊 Dashboard** — Your command center
+- KPI row: overall %, tasks done, overdue, blocked, due this week
+- Action Required: tasks needing attention, sorted critical → high → medium
+- Phase Progress: each phase % with overdue counts
+
+**🔷 Phase Management**
+- Add Phase / Load Template to set up project structure
+- Weight % affects how phase rolls up to project completion
+- Completion auto-syncs: task → phase (weighted avg) → project
+
+**📋 Task Management**
+- Create tasks, assign to team → auto-email sent
+- Quick filters: Overdue, Blocked, Mine, Critical, Unassigned
+- 🔴 in Due column = overdue, ⚠️ = due today, 🟡 = within 3 days
+
+**📧 Auto-notifications:** task assigned, blocked (→ PM), completed (→ PM)
+
+**💡 Daily routine:** Dashboard → action overdue/blocked → review due this week
+            """)
+        idx += 1
+
+    if "🟢 Engineer Guide" in guide_tabs:
+        with tabs[idx]:
+            st.markdown("""
+**🙋 My Tasks — your default tab**
+- All active tasks across projects, sorted by priority
+- Focus on 🔴 items and ⏰ overdue first
+
+**⚡ Quick Update — your main action**
+- Select task → ⚡ Quick Update
+- Status: NOT_STARTED → IN_PROGRESS → COMPLETED
+- Completion %: reflect actual progress
+- If BLOCKED: enter reason → PM gets notified automatically
+
+**✅ Checklist** — inside Task Details
+- Toggle items as you complete them; PM monitors progress
+
+**💬 Comments** — type BLOCKER to alert PM
+
+**💡 Tips:** Set IN_PROGRESS when you start · Update % regularly · Flag BLOCKED early
+            """)
+        idx += 1
+
+    if "🟠 Viewer Guide" in guide_tabs:
+        with tabs[idx]:
+            st.markdown("""
+**Read-only access.** You can: view Dashboard, browse tasks, post comments.
+
+Contact PM if you need edit access or task assignments.
+            """)
+        idx += 1
+
+    with tabs[idx]:
+        st.markdown("""
+**WBS Code:** `[phase_seq].[task_seq]` → e.g. "2.3"
+
+**Status Flow:** `NOT_STARTED → IN_PROGRESS → COMPLETED / BLOCKED / ON_HOLD / CANCELLED`
+
+**Priority:** 🔴 CRITICAL > 🟠 HIGH > 🔵 NORMAL > 🟢 LOW
+
+**Completion Sync:** Task % → Phase % (weighted by hours) → Project % (weighted by phase weight)
+
+**Due Icons:** 🔴 overdue · ⚠️ today · 🟡 ≤3 days · 📅 ≤7 days
+        """)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIALOG TRIGGERS — Permission-checked
+# ══════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.pop("open_create_phase", False) and perms['can_manage_phases']:
     _dialog_create_phase()
 
-if st.session_state.pop("open_phase_template", False):
+if st.session_state.pop("open_phase_template", False) and perms['can_manage_phases']:
     _dialog_phase_template()
 
 if "open_edit_phase" in st.session_state:
     pid = st.session_state.pop("open_edit_phase")
-    _dialog_edit_phase(pid)
+    if perms['can_manage_phases']:
+        _dialog_edit_phase(pid)
 
-if st.session_state.pop("open_create_task", False):
+if st.session_state.pop("open_create_task", False) and perms['can_create_tasks']:
     _dialog_create_task()
 
 if "open_edit_task" in st.session_state:
@@ -797,3 +1141,6 @@ if "open_view_task" in st.session_state:
 if "open_quick_task" in st.session_state:
     tid = st.session_state.pop("open_quick_task")
     _dialog_quick_update(tid)
+
+if st.session_state.pop("open_user_guide", False):
+    _dialog_user_guide()

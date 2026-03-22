@@ -119,6 +119,404 @@ MEMBER_ROLE_LABELS: Dict[str, str] = {
     'OTHER':              'Other',
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ROLE-BASED PERMISSIONS (Phase 1 v3.0)
+# ══════════════════════════════════════════════════════════════════════════════
+
+ROLE_TIERS: Dict[str, str] = {
+    # Tier 1: Full project control
+    'PROJECT_MANAGER':    'manager',
+    # Tier 2: Can create tasks, assign within scope
+    'SOLUTION_ARCHITECT': 'lead',
+    'SENIOR_ENGINEER':    'lead',
+    # Tier 3: Own tasks, quick update
+    'ENGINEER':           'member',
+    'SITE_ENGINEER':      'member',
+    'FAE':                'member',
+    # Tier 4: Read-only + own tasks
+    'SALES':              'viewer',
+    # Tier 5: Restricted — own tasks only
+    'SUBCONTRACTOR':      'restricted',
+    'OTHER':              'viewer',
+}
+
+# Permission matrix per tier
+_TIER_PERMISSIONS: Dict[str, Dict[str, bool]] = {
+    'manager': {
+        'can_manage_phases': True,   # create/edit/delete phase, load template
+        'can_create_tasks':  True,
+        'can_edit_any_task': True,   # full edit on ANY task
+        'can_assign_tasks':  True,   # assign/reassign to anyone
+        'can_delete':        True,   # delete phase/task
+        'can_see_all_tasks': True,
+        'can_manage_team':   True,
+        'can_quick_update_any': True,
+        'show_dashboard':    True,
+        'show_phases_tab':   True,
+        'show_all_tasks_tab': True,
+        'show_team_tab':     True,
+        'default_tab_index': 0,      # Dashboard
+    },
+    'lead': {
+        'can_manage_phases': False,
+        'can_create_tasks':  True,
+        'can_edit_any_task': False,   # only own tasks
+        'can_assign_tasks':  True,
+        'can_delete':        False,
+        'can_see_all_tasks': True,
+        'can_manage_team':   False,
+        'can_quick_update_any': False,
+        'show_dashboard':    True,
+        'show_phases_tab':   True,   # read-only
+        'show_all_tasks_tab': True,
+        'show_team_tab':     True,   # read-only
+        'default_tab_index': 0,      # Dashboard
+    },
+    'member': {
+        'can_manage_phases': False,
+        'can_create_tasks':  False,
+        'can_edit_any_task': False,
+        'can_assign_tasks':  False,
+        'can_delete':        False,
+        'can_see_all_tasks': True,   # can see, not edit
+        'can_manage_team':   False,
+        'can_quick_update_any': False,
+        'show_dashboard':    False,
+        'show_phases_tab':   False,
+        'show_all_tasks_tab': True,  # read-only on others' tasks
+        'show_team_tab':     False,
+        'default_tab_index': 0,      # My Tasks (first visible tab)
+    },
+    'viewer': {
+        'can_manage_phases': False,
+        'can_create_tasks':  False,
+        'can_edit_any_task': False,
+        'can_assign_tasks':  False,
+        'can_delete':        False,
+        'can_see_all_tasks': True,
+        'can_manage_team':   False,
+        'can_quick_update_any': False,
+        'show_dashboard':    True,
+        'show_phases_tab':   False,
+        'show_all_tasks_tab': True,  # read-only
+        'show_team_tab':     False,
+        'default_tab_index': 0,      # Dashboard
+    },
+    'restricted': {
+        'can_manage_phases': False,
+        'can_create_tasks':  False,
+        'can_edit_any_task': False,
+        'can_assign_tasks':  False,
+        'can_delete':        False,
+        'can_see_all_tasks': False,  # only own tasks
+        'can_manage_team':   False,
+        'can_quick_update_any': False,
+        'show_dashboard':    False,
+        'show_phases_tab':   False,
+        'show_all_tasks_tab': False,
+        'show_team_tab':     False,
+        'default_tab_index': 0,      # My Tasks only
+    },
+}
+
+
+def resolve_project_role(
+    members_df,  # pd.DataFrame from wbs['members']
+    employee_id: Optional[int],
+    is_admin: bool = False,
+) -> Dict:
+    """
+    Resolve current user's role and permissions for THIS project.
+
+    Lookup employee_id in members_df → get highest-tier role → derive permissions.
+    Admin users always get 'manager' tier regardless of project membership.
+    Non-members get 'viewer' tier (can see but not modify).
+
+    Returns dict with:
+        role, tier, is_pm, is_member, + all boolean permissions from _TIER_PERMISSIONS
+    """
+    import pandas as pd
+
+    result = {
+        'role': None,
+        'tier': 'viewer',
+        'is_pm': False,
+        'is_member': False,
+    }
+
+    # Admin override → manager tier
+    if is_admin:
+        result['tier'] = 'manager'
+        result['is_pm'] = True
+        result['is_member'] = True
+        result['role'] = 'ADMIN'
+        result.update(_TIER_PERMISSIONS['manager'])
+        return result
+
+    # Lookup in project members
+    if employee_id and not members_df.empty and 'employee_id' in members_df.columns:
+        my_memberships = members_df[members_df['employee_id'] == employee_id]
+        if not my_memberships.empty:
+            result['is_member'] = True
+            # Pick highest-tier role (lowest rank in tier hierarchy)
+            tier_rank = {'manager': 0, 'lead': 1, 'member': 2, 'viewer': 3, 'restricted': 4}
+            best_tier = 'restricted'
+            best_role = None
+            for _, row in my_memberships.iterrows():
+                role = row.get('role', 'OTHER')
+                tier = ROLE_TIERS.get(role, 'viewer')
+                if tier_rank.get(tier, 9) < tier_rank.get(best_tier, 9):
+                    best_tier = tier
+                    best_role = role
+            result['role'] = best_role
+            result['tier'] = best_tier
+            result['is_pm'] = (best_role == 'PROJECT_MANAGER')
+        # Non-member: stays at 'viewer' tier (read-only guest)
+
+    # Apply tier permissions
+    result.update(_TIER_PERMISSIONS.get(result['tier'], _TIER_PERMISSIONS['viewer']))
+    return result
+
+
+def can_edit_task(perms: Dict, task_assignee_id: Optional[int], employee_id: Optional[int]) -> bool:
+    """Check if user can edit a specific task (full edit)."""
+    if perms.get('can_edit_any_task'):
+        return True
+    # Lead/member/restricted can edit own tasks
+    if employee_id and task_assignee_id == employee_id:
+        return perms['tier'] in ('lead', 'member')
+    return False
+
+
+def can_quick_update_task(perms: Dict, task_assignee_id: Optional[int], employee_id: Optional[int]) -> bool:
+    """Check if user can quick-update a specific task."""
+    if perms.get('can_quick_update_any'):
+        return True
+    # Own task: lead/member/restricted can quick-update
+    if employee_id and task_assignee_id == employee_id:
+        return perms['tier'] in ('lead', 'member', 'restricted')
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD COMPUTATION (Phase 2 v3.0) — All client-side, zero DB queries
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_dashboard_kpis(task_df, phases_df, proj_info: Dict) -> Dict:
+    """
+    Compute dashboard KPIs from cached bootstrap data.
+    Cost: ~0ms (pandas operations on cached DataFrames).
+    """
+    import pandas as pd
+    from datetime import date
+
+    today = date.today()
+    active = task_df[~task_df['status'].isin(['CANCELLED'])] if not task_df.empty else task_df
+
+    total = len(active)
+    completed = len(active[active['status'] == 'COMPLETED']) if total else 0
+
+    overdue = 0
+    blocked = 0
+    due_this_week = 0
+    unassigned = 0
+
+    if total > 0:
+        blocked = int((active['status'] == 'BLOCKED').sum())
+        not_done = active[~active['status'].isin(['COMPLETED', 'CANCELLED'])]
+
+        if 'planned_end' in not_done.columns:
+            has_due = not_done[not_done['planned_end'].notna()]
+            if not has_due.empty:
+                due_dates = pd.to_datetime(has_due['planned_end']).dt.date
+                overdue = int((due_dates < today).sum())
+                week_end = today + pd.Timedelta(days=7)
+                due_this_week = int(((due_dates >= today) & (due_dates <= week_end)).sum())
+
+        if 'assignee_id' in not_done.columns:
+            unassigned = int(not_done['assignee_id'].isna().sum())
+
+    overall_pct = float(proj_info.get('overall_completion_percent') or 0)
+
+    return {
+        'total_tasks':    total,
+        'completed':      completed,
+        'overdue':        overdue,
+        'blocked':        blocked,
+        'due_this_week':  due_this_week,
+        'unassigned':     unassigned,
+        'overall_pct':    overall_pct,
+        'completion_rate': f"{completed}/{total}" if total else "0/0",
+    }
+
+
+def compute_action_items(
+    task_df,
+    employee_id: Optional[int],
+    role_tier: str,
+) -> List[Dict]:
+    """
+    Compute role-specific action items from cached task data.
+    Returns list of dicts sorted by severity (critical → high → medium).
+    Cost: ~0ms.
+    """
+    import pandas as pd
+    from datetime import date
+
+    today = date.today()
+    items: List[Dict] = []
+
+    if task_df.empty:
+        return items
+
+    active = task_df[~task_df['status'].isin(['COMPLETED', 'CANCELLED'])].copy()
+    if active.empty:
+        return items
+
+    # Parse planned_end to date for comparison
+    if 'planned_end' in active.columns:
+        active['_due'] = pd.to_datetime(active['planned_end'], errors='coerce').dt.date
+    else:
+        active['_due'] = None
+
+    if role_tier in ('manager', 'lead'):
+        # ── PM/Lead: project-wide action items ──
+
+        # 1. Blocked tasks → critical
+        blocked = active[active['status'] == 'BLOCKED']
+        for _, t in blocked.iterrows():
+            items.append({
+                'type': 'blocked', 'severity': 'critical', 'icon': '🔴',
+                'task_id': int(t['id']),
+                'wbs_code': t.get('wbs_code', ''),
+                'task_name': t['task_name'],
+                'assignee': t.get('assignee_name', '—'),
+                'message': "BLOCKED — needs unblock or escalation",
+                'actions': ['view', 'edit', 'comment'],
+            })
+
+        # 2. Overdue tasks → high
+        has_due = active[active['_due'].notna()]
+        overdue = has_due[has_due['_due'] < today].sort_values('_due')
+        for _, t in overdue.iterrows():
+            days_late = (today - t['_due']).days
+            items.append({
+                'type': 'overdue', 'severity': 'high', 'icon': '⏰',
+                'task_id': int(t['id']),
+                'wbs_code': t.get('wbs_code', ''),
+                'task_name': t['task_name'],
+                'assignee': t.get('assignee_name', '—'),
+                'message': f"Overdue by {days_late} day{'s' if days_late != 1 else ''}",
+                'actions': ['view', 'quick_update', 'edit'],
+            })
+
+        # 3. Unassigned tasks → medium (PM only)
+        if role_tier == 'manager':
+            unassigned = active[active['assignee_id'].isna()]
+            for _, t in unassigned.iterrows():
+                items.append({
+                    'type': 'unassigned', 'severity': 'medium', 'icon': '❓',
+                    'task_id': int(t['id']),
+                    'wbs_code': t.get('wbs_code', ''),
+                    'task_name': t['task_name'],
+                    'assignee': '(Unassigned)',
+                    'message': "Needs assignee",
+                    'actions': ['edit'],
+                })
+
+        # 4. Due this week → medium
+        if not has_due.empty:
+            week_end = today + pd.Timedelta(days=7)
+            due_soon = has_due[(has_due['_due'] >= today) & (has_due['_due'] <= week_end)]
+            due_soon = due_soon[due_soon['status'] != 'BLOCKED']  # already listed above
+            for _, t in due_soon.sort_values('_due').iterrows():
+                days_left = (t['_due'] - today).days
+                label = "Due today" if days_left == 0 else f"Due in {days_left}d"
+                items.append({
+                    'type': 'due_soon', 'severity': 'medium', 'icon': '📋',
+                    'task_id': int(t['id']),
+                    'wbs_code': t.get('wbs_code', ''),
+                    'task_name': t['task_name'],
+                    'assignee': t.get('assignee_name', '—'),
+                    'message': label,
+                    'actions': ['view', 'quick_update'],
+                })
+
+    else:
+        # ── Member/Viewer/Restricted: own tasks only ──
+        if employee_id:
+            my = active[active['assignee_id'] == employee_id].copy()
+        else:
+            my = pd.DataFrame()
+
+        if not my.empty:
+            # 1. My blocked tasks
+            my_blocked = my[my['status'] == 'BLOCKED']
+            for _, t in my_blocked.iterrows():
+                items.append({
+                    'type': 'my_blocked', 'severity': 'critical', 'icon': '🔴',
+                    'task_id': int(t['id']),
+                    'wbs_code': t.get('wbs_code', ''),
+                    'task_name': t['task_name'],
+                    'assignee': 'You',
+                    'message': "Your task is BLOCKED — update PM on status",
+                    'actions': ['view', 'quick_update', 'comment'],
+                })
+
+            # 2. My overdue
+            my_has_due = my[my['_due'].notna()]
+            my_overdue = my_has_due[my_has_due['_due'] < today]
+            for _, t in my_overdue.sort_values('_due').iterrows():
+                days_late = (today - t['_due']).days
+                items.append({
+                    'type': 'my_overdue', 'severity': 'high', 'icon': '⏰',
+                    'task_id': int(t['id']),
+                    'wbs_code': t.get('wbs_code', ''),
+                    'task_name': t['task_name'],
+                    'assignee': 'You',
+                    'message': f"Overdue by {days_late}d — update progress or flag blocker",
+                    'actions': ['quick_update', 'comment'],
+                })
+
+            # 3. My NOT_STARTED (newly assigned)
+            my_new = my[my['status'] == 'NOT_STARTED']
+            for _, t in my_new.iterrows():
+                items.append({
+                    'type': 'my_new', 'severity': 'medium', 'icon': '🆕',
+                    'task_id': int(t['id']),
+                    'wbs_code': t.get('wbs_code', ''),
+                    'task_name': t['task_name'],
+                    'assignee': 'You',
+                    'message': "Not started — set to IN_PROGRESS when you begin",
+                    'actions': ['quick_update', 'view'],
+                })
+
+            # 4. My due this week
+            if not my_has_due.empty:
+                week_end = today + pd.Timedelta(days=7)
+                my_soon = my_has_due[
+                    (my_has_due['_due'] >= today) & (my_has_due['_due'] <= week_end) &
+                    (~my_has_due['status'].isin(['BLOCKED']))
+                ]
+                for _, t in my_soon.sort_values('_due').iterrows():
+                    days_left = (t['_due'] - today).days
+                    label = "Due today" if days_left == 0 else f"Due in {days_left}d"
+                    items.append({
+                        'type': 'my_due_soon', 'severity': 'medium', 'icon': '📋',
+                        'task_id': int(t['id']),
+                        'wbs_code': t.get('wbs_code', ''),
+                        'task_name': t['task_name'],
+                        'assignee': 'You',
+                        'message': label,
+                        'actions': ['quick_update', 'view'],
+                    })
+
+    # Sort: critical → high → medium
+    sev_order = {'critical': 0, 'high': 1, 'medium': 2}
+    items.sort(key=lambda x: sev_order.get(x['severity'], 9))
+    return items
+
+
 DEPENDENCY_TYPES: List[str] = ['FS', 'FF', 'SS', 'SF']
 
 DEPENDENCY_LABELS: Dict[str, str] = {
