@@ -37,6 +37,11 @@ from utils.il_project.wbs_helpers import (
 )
 from utils.il_project.helpers import DEFAULT_RATES_BY_LEVEL
 from utils.il_project.wbs_notify import notify_member_added
+from utils.il_project.wbs_guide_common import search_guide
+from utils.il_project.wbs_guide_7_team import (
+    get_team_guide_sections, get_team_faq, get_team_workflows,
+    get_team_context_tips,
+)
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -94,6 +99,10 @@ with st.sidebar:
     selected_project_id = int(proj_df.iloc[proj_idx]['project_id'])
     proj_info = get_project(selected_project_id)
 
+    st.divider()
+    if st.button("❓ User Guide", use_container_width=True, key="sidebar_team_guide"):
+        st.session_state["open_team_guide"] = True
+
 # ── Load data ──
 wbs = _get_wbs(selected_project_id)
 
@@ -122,7 +131,10 @@ _my_role_label = MEMBER_ROLE_LABELS.get(perms['role'], perms.get('role') or 'Gue
 if proj_info:
     _project_label = f"**{proj_info['project_code']}** — {proj_info['project_name']}"
     _role_chip = f"`{_my_role_label}`" if perms['is_member'] else "`Guest`"
-    st.markdown(f"Hi **{_my_name}** · {_role_chip} on {_project_label}")
+    wc1, wc2 = st.columns([7, 1])
+    wc1.markdown(f"Hi **{_my_name}** · {_role_chip} on {_project_label}")
+    if wc2.button("❓", key="banner_team_guide", help="Open User Guide"):
+        st.session_state["open_team_guide"] = True
 
 # Enrich members with task data (Phase 2 — 0 extra queries)
 mem_df = wbs['members']
@@ -630,6 +642,93 @@ def _dialog_workload(emp_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# DIALOG — User Guide (bilingual, searchable, role-aware)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.dialog("❓ Team User Guide", width="large")
+def _dialog_team_guide():
+    """Bilingual user guide for Team page."""
+
+    # Language + Search
+    lang_col, search_col = st.columns([1, 4])
+    with lang_col:
+        lang_opts = {"🇻🇳 Tiếng Việt": "vi", "🇬🇧 English": "en"}
+        lang_label = st.radio("Ngôn ngữ", list(lang_opts.keys()), index=0,
+                              key="_tguide_lang", horizontal=True, label_visibility="collapsed")
+        lang = lang_opts[lang_label]
+    with search_col:
+        placeholder = "Tìm: allocation, cost, workload, thêm member..." if lang == 'vi' else "Search: allocation, cost, workload, add member..."
+        search_q = st.text_input("🔍", placeholder=placeholder,
+                                 key="_tguide_search", label_visibility="collapsed")
+
+    # Context tips
+    ctx_tips = get_team_context_tips(enriched, perms, lang=lang)
+    for tip in ctx_tips:
+        st.info(tip)
+
+    if ctx_tips:
+        st.divider()
+
+    # Load content
+    sections  = get_team_guide_sections(perms['tier'], lang=lang)
+    faq_items = get_team_faq(perms['tier'], lang=lang)
+    workflows = get_team_workflows(perms['tier'], lang=lang)
+
+    # Search filter
+    if search_q and len(search_q) >= 2:
+        result = search_guide(search_q, sections, faq_items)
+        sections = result['sections']
+        faq_items = result['faq']
+        q_lower = search_q.lower()
+        workflows = [w for w in workflows if q_lower in w['title'].lower()
+                     or any(q_lower in s.lower() for s in w.get('steps', []))
+                     or any(q_lower in t for t in w.get('tags', []))]
+        if not sections and not faq_items and not workflows:
+            msg = f"Không tìm thấy '{search_q}'." if lang == 'vi' else f"No results for '{search_q}'."
+            st.warning(msg)
+            return
+
+    # Tabs
+    lbl_guide = "📖 Hướng dẫn" if lang == 'vi' else "📖 Guide"
+    lbl_wf    = "🔄 Quy trình"  if lang == 'vi' else "🔄 Workflows"
+    lbl_faq   = "❓ Hỏi đáp"    if lang == 'vi' else "❓ FAQ"
+
+    tab_labels = [lbl_guide]
+    if workflows:
+        tab_labels.append(lbl_wf)
+    if faq_items:
+        tab_labels.append(lbl_faq)
+
+    guide_tabs = st.tabs(tab_labels)
+
+    with guide_tabs[0]:
+        if not sections:
+            st.caption("Không có nội dung khớp." if lang == 'vi' else "No matching content.")
+        else:
+            for s in sections:
+                with st.expander(f"{s['icon']} {s['title']}", expanded=bool(search_q)):
+                    st.markdown(s['content'])
+
+    if workflows and lbl_wf in tab_labels:
+        with guide_tabs[tab_labels.index(lbl_wf)]:
+            for wf in workflows:
+                with st.expander(f"{wf['icon']} {wf['title']}", expanded=bool(search_q)):
+                    step_num = 0
+                    for step in wf['steps']:
+                        if step.startswith("  "):
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{step.strip()}")
+                        else:
+                            step_num += 1
+                            st.markdown(f"**{step_num}.** {step}")
+
+    if faq_items and lbl_faq in tab_labels:
+        with guide_tabs[tab_labels.index(lbl_faq)]:
+            for item in faq_items:
+                with st.expander(f"❓ {item['q']}", expanded=bool(search_q)):
+                    st.markdown(item['a'])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # DIALOG TRIGGERS — Permission-checked
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -643,6 +742,8 @@ if "open_edit_member" in st.session_state:
 
 if "open_workload_emp" in st.session_state:
     eid = st.session_state.pop("open_workload_emp")
-    # PM can view anyone, others only own
     if perms['tier'] == 'manager' or eid == employee_id:
         _dialog_workload(eid)
+
+if st.session_state.pop("open_team_guide", False):
+    _dialog_team_guide()

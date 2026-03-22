@@ -56,9 +56,10 @@ from utils.il_project.wbs_notify import (
     notify_on_task_status_change,
     notify_on_task_assign,
 )
-from utils.il_project.wbs_user_guide import (
+from utils.il_project.wbs_guide_common import search_guide
+from utils.il_project.wbs_guide_6_wbs import (
     get_guide_sections_for_role, get_faq_for_role, get_workflows_for_role,
-    get_context_tips, search_guide,
+    get_context_tips,
 )
 
 logger = logging.getLogger(__name__)

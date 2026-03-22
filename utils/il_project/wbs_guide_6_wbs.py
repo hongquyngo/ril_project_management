@@ -1,35 +1,11 @@
-# utils/il_project/wbs_user_guide.py
+# utils/il_project/wbs_guide.py
 """
-WBS User Guide — Role-aware, bilingual (VI default / EN) content.
-
-v3.1 — Bilingual:
-  - Every content item has 'vi' and 'en' variants
-  - Language selected at dialog level, stored in session_state
-  - Search works across both languages (tags are shared)
-
-Structure:
-  _SECTIONS[role_key] → list of {icon, tags[], title_vi, content_vi, title_en, content_en}
-  _FAQ               → list of {q_vi, a_vi, q_en, a_en, roles[], tags[]}
-  _WORKFLOWS         → list of {icon, role, tags[], title_vi, steps_vi[], title_en, steps_en[]}
+User Guide content for WBS page (Page 6).
+Bilingual VI/EN. Role-aware sections, FAQ, workflows, context tips.
 """
 
-from typing import Dict, List, Optional
-
-# Default language
-DEFAULT_LANG = 'vi'
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HELPER — Pick language field
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _t(item: dict, field: str, lang: str) -> str:
-    """Get translated field. Falls back to English if Vietnamese missing."""
-    val = item.get(f'{field}_{lang}')
-    if val:
-        return val
-    return item.get(f'{field}_en', item.get(f'{field}_vi', ''))
-
+from typing import Dict, List
+from .wbs_guide_common import _t
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GUIDE SECTIONS
@@ -860,7 +836,7 @@ def get_context_tips(kpis: dict, perms: dict, has_phases: bool, lang: str = 'vi'
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API — Language-aware getters
+# PUBLIC API
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_guide_sections_for_role(tier: str, lang: str = 'vi') -> List[Dict]:
@@ -926,23 +902,3 @@ def get_workflows_for_role(tier: str, lang: str = 'vi') -> List[Dict]:
         if w.get('role') == role_key
     ]
 
-
-def search_guide(query: str, sections: List[Dict], faq: List[Dict]) -> dict:
-    """Search guide content by query string (works across both languages via tags)."""
-    if not query or len(query) < 2:
-        return {'sections': sections, 'faq': faq}
-
-    q = query.lower()
-    matched_sections = [
-        s for s in sections
-        if q in s.get('title', '').lower()
-        or q in s.get('content', '').lower()
-        or any(q in t for t in s.get('tags', []))
-    ]
-    matched_faq = [
-        f for f in faq
-        if q in f.get('q', '').lower()
-        or q in f.get('a', '').lower()
-        or any(q in t for t in f.get('tags', []))
-    ]
-    return {'sections': matched_sections, 'faq': matched_faq}
