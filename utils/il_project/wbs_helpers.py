@@ -13,8 +13,8 @@ v3.0 — Enhanced:
 import time
 import functools
 import logging
-from typing import Dict, List, Optional, Tuple
 import pandas as pd
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -522,7 +522,7 @@ def compute_action_items(
 # TEAM ENRICHMENT & ALERTS (Phase 2-4 for Page 7 v3.0)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def enrich_members_with_tasks(members_df, tasks_df) -> 'pd.DataFrame':
+def enrich_members_with_tasks(members_df, tasks_df) -> pd.DataFrame:
     """
     Add task stats per member from cached bootstrap data.
     Columns added: task_count, overdue_count, avg_completion, total_est_hours, total_actual_hours
@@ -697,6 +697,141 @@ def compute_cost_summary(members_df, working_days: int = 22) -> List[Dict]:
     role_order = {r: i for i, r in enumerate(MEMBER_ROLES)}
     rows.sort(key=lambda x: role_order.get(x['role'], 99))
     return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXECUTION KPIs & ACTION ITEMS (Page 8 v3.0)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_exec_kpis(issues_df, risks_df, co_df, co_summary: Dict) -> Dict:
+    """Cross-tab KPIs for Issues & Risks page. All client-side."""
+    import pandas as pd
+    from datetime import date
+
+    today = date.today()
+
+    # Issues
+    open_iss = issues_df[~issues_df['status'].isin(['RESOLVED', 'CLOSED'])] if not issues_df.empty else pd.DataFrame()
+    critical_iss = open_iss[open_iss['severity'] == 'CRITICAL'] if not open_iss.empty else pd.DataFrame()
+    overdue_iss = 0
+    if not open_iss.empty and 'due_date' in open_iss.columns:
+        has_due = open_iss[open_iss['due_date'].notna()]
+        if not has_due.empty:
+            overdue_iss = int((pd.to_datetime(has_due['due_date']).dt.date < today).sum())
+
+    # Risks
+    active_risks = risks_df[~risks_df['status'].isin(['CLOSED'])] if not risks_df.empty else pd.DataFrame()
+    high_risks = active_risks[active_risks['risk_score'] >= 10] if not active_risks.empty and 'risk_score' in active_risks.columns else pd.DataFrame()
+
+    # COs
+    pending_co = co_df[co_df['status'] == 'SUBMITTED'] if not co_df.empty else pd.DataFrame()
+
+    return {
+        'open_issues': len(open_iss),
+        'critical_issues': len(critical_iss),
+        'overdue_issues': overdue_iss,
+        'high_risks': len(high_risks),
+        'total_risks': len(active_risks),
+        'pending_co': len(pending_co),
+        'pending_co_cost': co_summary.get('pending_impact') or 0,
+        'approved_co_cost': co_summary.get('approved_impact') or 0,
+        'approved_co_days': co_summary.get('approved_days') or 0,
+    }
+
+
+def compute_exec_action_items(
+    issues_df, risks_df, co_df,
+    employee_id: Optional[int],
+    role_tier: str,
+) -> List[Dict]:
+    """Role-specific action items for Issues & Risks page."""
+    import pandas as pd
+    from datetime import date
+
+    today = date.today()
+    items: List[Dict] = []
+
+    # ── Issues ──
+    if not issues_df.empty:
+        open_iss = issues_df[~issues_df['status'].isin(['RESOLVED', 'CLOSED'])].copy()
+
+        if role_tier in ('manager', 'lead'):
+            # Critical issues
+            for _, r in open_iss[open_iss['severity'] == 'CRITICAL'].iterrows():
+                items.append({
+                    'type': 'critical_issue', 'severity': 'critical', 'icon': '🔴',
+                    'tab': 'issues', 'entity_id': int(r['id']),
+                    'code': r.get('issue_code', ''),
+                    'title': r.get('title', ''),
+                    'assignee': r.get('assigned_to_name', '—'),
+                    'message': f"CRITICAL issue — needs immediate attention",
+                })
+
+            # Overdue issues
+            if 'due_date' in open_iss.columns:
+                has_due = open_iss[open_iss['due_date'].notna()]
+                if not has_due.empty:
+                    overdue = has_due[pd.to_datetime(has_due['due_date']).dt.date < today]
+                    for _, r in overdue.iterrows():
+                        days = (today - pd.to_datetime(r['due_date']).date()).days
+                        items.append({
+                            'type': 'overdue_issue', 'severity': 'high', 'icon': '⏰',
+                            'tab': 'issues', 'entity_id': int(r['id']),
+                            'code': r.get('issue_code', ''),
+                            'title': r.get('title', ''),
+                            'assignee': r.get('assigned_to_name', '—'),
+                            'message': f"Overdue by {days}d",
+                        })
+
+        elif employee_id:
+            # Member: issues assigned to me or reported by me
+            my_iss = open_iss[
+                (open_iss.get('assigned_to') == employee_id) |
+                (open_iss.get('reported_by') == employee_id)
+            ] if 'assigned_to' in open_iss.columns else pd.DataFrame()
+            for _, r in my_iss.iterrows():
+                items.append({
+                    'type': 'my_issue', 'severity': 'medium', 'icon': '🙋',
+                    'tab': 'issues', 'entity_id': int(r['id']),
+                    'code': r.get('issue_code', ''),
+                    'title': r.get('title', ''),
+                    'assignee': r.get('assigned_to_name', '—'),
+                    'message': "Assigned to you" if r.get('assigned_to') == employee_id else "Reported by you",
+                })
+
+    # ── Risks needing review (PM/Lead) ──
+    if role_tier in ('manager', 'lead') and not risks_df.empty:
+        active_risks = risks_df[~risks_df['status'].isin(['CLOSED'])]
+        if 'review_date' in active_risks.columns:
+            has_review = active_risks[active_risks['review_date'].notna()]
+            if not has_review.empty:
+                overdue_review = has_review[pd.to_datetime(has_review['review_date']).dt.date < today]
+                for _, r in overdue_review.iterrows():
+                    items.append({
+                        'type': 'risk_review', 'severity': 'medium', 'icon': '⚠️',
+                        'tab': 'risks', 'entity_id': int(r['id']),
+                        'code': r.get('risk_code', ''),
+                        'title': r.get('title', ''),
+                        'assignee': r.get('owner_name', '—'),
+                        'message': "Review overdue",
+                    })
+
+    # ── COs pending approval (PM) ──
+    if role_tier == 'manager' and not co_df.empty:
+        pending = co_df[co_df['status'] == 'SUBMITTED']
+        for _, r in pending.iterrows():
+            items.append({
+                'type': 'co_pending', 'severity': 'high', 'icon': '📝',
+                'tab': 'co', 'entity_id': int(r['id']),
+                'code': r.get('co_number', ''),
+                'title': r.get('title', ''),
+                'assignee': r.get('requested_by_name', '—'),
+                'message': "Pending approval",
+            })
+
+    sev_order = {'critical': 0, 'high': 1, 'medium': 2}
+    items.sort(key=lambda x: sev_order.get(x['severity'], 9))
+    return items
 
 
 DEPENDENCY_TYPES: List[str] = ['FS', 'FF', 'SS', 'SF']
