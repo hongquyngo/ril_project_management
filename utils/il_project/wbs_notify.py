@@ -346,15 +346,21 @@ def notify_task_assigned(
       - Action Required section added
     """
     if not _is_configured():
+        logger.warning(f"📧 [SKIP] notify_task_assigned(task={task_id}): email not configured — check ENABLE_EMAIL_NOTIFICATIONS + EMAIL_SENDER/PASSWORD in .env")
         return False
 
     assignee = _resolve_person(assignee_id)
     performer = _resolve_person(performer_id)
     ctx = _get_project_context(project_id)
 
-    if not assignee or not assignee.get('email'):
-        logger.warning(f"No email for assignee {assignee_id} — skipping.")
+    if not assignee:
+        logger.warning(f"📧 [SKIP] notify_task_assigned(task={task_id}): _resolve_person({assignee_id}) returned None — employee not found in DB")
         return False
+    if not assignee.get('email'):
+        logger.warning(f"📧 [SKIP] notify_task_assigned(task={task_id}): assignee '{assignee.get('name')}' (id={assignee_id}) has NO EMAIL in employees table")
+        return False
+
+    logger.info(f"📧 [SEND] notify_task_assigned(task={task_id}): TO={assignee['email']}, project={ctx.get('project_code','?')}")
 
     performer_name = _fmt_person(
         performer['name'] if performer else None,
@@ -525,13 +531,15 @@ def notify_task_blocked(
       - Action Required for PM
     """
     if not _is_configured():
+        logger.warning(f"📧 [SKIP] notify_task_blocked(task={task_id}): email not configured")
         return False
 
     ctx = _get_project_context(project_id)
     if not ctx.get('pm_email'):
-        logger.warning(f"No PM email for project {project_id} — skipping BLOCKED notification.")
+        logger.warning(f"📧 [SKIP] notify_task_blocked(task={task_id}): No PM email for project {project_id} — check il_projects.pm_employee_id → employees.email")
         return False
 
+    logger.info(f"📧 [SEND] notify_task_blocked(task={task_id}): TO={ctx['pm_email']} (PM)")
     blocker = _resolve_person(blocked_by_id)
     blocker_name = blocker['name'] if blocker else '—'
 
@@ -615,12 +623,15 @@ def notify_task_completed(
       - Progress context + Action Required
     """
     if not _is_configured():
+        logger.warning(f"📧 [SKIP] notify_task_completed(task={task_id}): email not configured")
         return False
 
     ctx = _get_project_context(project_id)
     if not ctx.get('pm_email'):
-        logger.warning(f"No PM email for project {project_id} — skipping COMPLETED notification.")
+        logger.warning(f"📧 [SKIP] notify_task_completed(task={task_id}): No PM email for project {project_id}")
         return False
+
+    logger.info(f"📧 [SEND] notify_task_completed(task={task_id}): TO={ctx['pm_email']} (PM)")
 
     completed_by = _resolve_person(completed_by_id)
     completed_by_name = completed_by['name'] if completed_by else '—'
@@ -709,6 +720,7 @@ def notify_issue_created(
     TO: assigned person (or PM if unassigned).
     """
     if not _is_configured():
+        logger.warning(f"📧 [SKIP] notify_issue_created(issue={issue_code}): email not configured")
         return False
 
     ctx = _get_project_context(project_id)
@@ -719,6 +731,7 @@ def notify_issue_created(
     if assigned and assigned.get('email'):
         to_emails = [assigned['email']]
         greeting_name = assigned['name']
+        logger.info(f"📧 [SEND] notify_issue_created({issue_code}): TO={assigned['email']} (assignee)")
     elif ctx.get('pm_email'):
         to_emails = [ctx['pm_email']]
         greeting_name = ctx['pm_name']
@@ -918,11 +931,13 @@ def notify_on_task_status_change(
     if new_status not in ('BLOCKED', 'COMPLETED'):
         return True
 
+    logger.info(f"📧 notify_on_task_status_change: task={task_id}, {old_status}→{new_status}")
+
     try:
         from .wbs_queries import get_task
         task = get_task(task_id)
         if not task:
-            logger.warning(f"notify_on_task_status_change: task {task_id} not found")
+            logger.warning(f"📧 [SKIP] notify_on_task_status_change(task={task_id}): get_task returned None")
             return False
 
         if new_status == 'BLOCKED':
@@ -977,7 +992,7 @@ def notify_on_task_status_change(
             )
 
     except Exception as e:
-        logger.error(f"notify_on_task_status_change failed: {e}")
+        logger.error(f"📧 [ERROR] notify_on_task_status_change(task={task_id}, {old_status}→{new_status}) failed: {e}", exc_info=True)
         return False
 
     return True
@@ -998,6 +1013,7 @@ def notify_on_task_assign(
     ⚠️ performer_id MUST be employee_id, NOT user_id.
     """
     if not new_assignee_id:
+        logger.info(f"📧 [SKIP] notify_on_task_assign(task={task_id}): no assignee_id — skipping")
         return True
     if old_assignee_id == new_assignee_id:
         return True
@@ -1006,7 +1022,10 @@ def notify_on_task_assign(
         from .wbs_queries import get_task
         task = get_task(task_id)
         if not task:
+            logger.warning(f"📧 [SKIP] notify_on_task_assign(task={task_id}): get_task returned None")
             return False
+
+        logger.info(f"📧 notify_on_task_assign: task={task_id} '{task['task_name']}', assignee={new_assignee_id}, performer={performer_id}")
 
         return notify_task_assigned(
             task_id=task_id,
@@ -1026,5 +1045,5 @@ def notify_on_task_assign(
         )
 
     except Exception as e:
-        logger.error(f"notify_on_task_assign failed: {e}")
+        logger.error(f"📧 [ERROR] notify_on_task_assign(task={task_id}) failed: {e}", exc_info=True)
         return False

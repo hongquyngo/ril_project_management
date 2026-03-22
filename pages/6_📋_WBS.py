@@ -227,6 +227,10 @@ k4.metric("Blocked", kpis['blocked'],
 k5.metric("Due This Week", kpis['due_this_week'])
 st.divider()
 
+# ── Flash messages (persist across st.rerun) ──
+if st.session_state.pop("_flash_email_warning", False):
+    st.warning("⚠️ Last action saved OK but email notification failed. Check server logs (search `📧 [SKIP]` or `📧 [ERROR]`).")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN TABS — Built dynamically based on role permissions
@@ -927,10 +931,12 @@ def _dialog_create_task():
             return
         try:
             new_id = create_task(data, user_id)
-            notify_on_task_assign(new_id, None, data.get('assignee_id'),
+            email_ok = notify_on_task_assign(new_id, None, data.get('assignee_id'),
                                   performer_id=employee_id,
                                   extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
             st.success(f"✅ Task created! (ID: {new_id})")
+            if not email_ok and data.get('assignee_id'):
+                st.session_state["_flash_email_warning"] = True
             invalidate_wbs_cache(selected_project_id)
             st.rerun()
         except Exception as e:
@@ -972,13 +978,15 @@ def _dialog_edit_task(task_id: int):
             old_status   = task.get('status')
             update_task(task_id, data, user_id)
             sync_completion_up(task_id, user_id)
-            notify_on_task_assign(task_id, old_assignee, data.get('assignee_id'),
+            email_ok_assign = notify_on_task_assign(task_id, old_assignee, data.get('assignee_id'),
                                   performer_id=employee_id,
                                   extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
-            notify_on_task_status_change(task_id, old_status, data.get('status', old_status),
+            email_ok_status = notify_on_task_status_change(task_id, old_status, data.get('status', old_status),
                                          performer_id=employee_id,
                                          extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
             st.success("✅ Task updated!")
+            if not (email_ok_assign and email_ok_status):
+                st.session_state["_flash_email_warning"] = True
             invalidate_wbs_cache(selected_project_id)
             st.rerun()
         except Exception as e:
@@ -1013,11 +1021,13 @@ def _dialog_quick_update(task_id: int):
             sync_completion_up(task_id, user_id)
             if blocker_note.strip() and status == 'BLOCKED':
                 create_comment(task_id, int(user_id), f"🚧 {blocker_note.strip()}", 'BLOCKER')
-            notify_on_task_status_change(task_id, old_status, status,
+            email_ok = notify_on_task_status_change(task_id, old_status, status,
                                          performer_id=employee_id,
                                          blocker_reason=blocker_note.strip() or None,
                                          extra_cc_ids=cc_ids, extra_cc_emails=cc_emails)
             st.success("✅ Updated!")
+            if not email_ok and old_status != status and status in ('BLOCKED', 'COMPLETED'):
+                st.session_state["_flash_email_warning"] = True
             invalidate_wbs_cache(selected_project_id)
             st.rerun()
         except Exception as e:

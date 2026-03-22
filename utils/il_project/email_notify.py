@@ -50,6 +50,105 @@ def _is_configured() -> bool:
     return bool(cfg.get('sender') and cfg.get('password'))
 
 
+def test_email_config() -> Dict:
+    """
+    Diagnostic function — test email configuration end-to-end.
+    Call from admin page or debug console.
+
+    Returns dict:
+        ok: bool — True if SMTP login succeeded
+        checks: list of {step, ok, detail} for each checkpoint
+        error: str or None — final error message if failed
+
+    Usage (in Streamlit admin page):
+        from utils.il_project.email_notify import test_email_config
+        result = test_email_config()
+        for check in result['checks']:
+            st.write(f"{'✅' if check['ok'] else '❌'} {check['step']}: {check['detail']}")
+    """
+    checks = []
+
+    # Step 1: Feature flag
+    try:
+        from ..config import config
+        enabled = config.is_feature_enabled("EMAIL_NOTIFICATIONS")
+        checks.append({
+            'step': 'Feature flag (ENABLE_EMAIL_NOTIFICATIONS)',
+            'ok': enabled,
+            'detail': 'Enabled' if enabled else 'DISABLED — set ENABLE_EMAIL_NOTIFICATIONS=true in .env',
+        })
+        if not enabled:
+            return {'ok': False, 'checks': checks, 'error': 'Email notifications disabled by feature flag.'}
+    except Exception as e:
+        checks.append({'step': 'Feature flag', 'ok': False, 'detail': f'Config load error: {e}'})
+        return {'ok': False, 'checks': checks, 'error': str(e)}
+
+    # Step 2: Email config loaded
+    cfg = _get_email_config()
+    sender = cfg.get('sender')
+    password = cfg.get('password')
+    host = cfg.get('host', 'smtp.gmail.com')
+    port = cfg.get('port', 587)
+
+    checks.append({
+        'step': 'Sender email',
+        'ok': bool(sender),
+        'detail': sender if sender else 'MISSING — set EMAIL_SENDER in .env',
+    })
+    checks.append({
+        'step': 'Password',
+        'ok': bool(password),
+        'detail': f'{"*" * 4}...{"*" * 4} ({len(password)} chars)' if password else 'MISSING — set EMAIL_PASSWORD in .env',
+    })
+    checks.append({
+        'step': 'SMTP server',
+        'ok': True,
+        'detail': f'{host}:{port}',
+    })
+
+    if not sender or not password:
+        return {'ok': False, 'checks': checks, 'error': 'Email credentials not configured.'}
+
+    # Step 3: SMTP connection test (login only, no email sent)
+    import smtplib
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(sender, password)
+        checks.append({
+            'step': 'SMTP login',
+            'ok': True,
+            'detail': f'Login OK as {sender}',
+        })
+        return {'ok': True, 'checks': checks, 'error': None}
+
+    except smtplib.SMTPAuthenticationError as e:
+        checks.append({
+            'step': 'SMTP login',
+            'ok': False,
+            'detail': f'AUTH FAILED — Gmail App Password may be revoked or invalid. Error: {e}',
+        })
+        return {'ok': False, 'checks': checks, 'error': 'SMTP authentication failed.'}
+
+    except smtplib.SMTPException as e:
+        checks.append({
+            'step': 'SMTP login',
+            'ok': False,
+            'detail': f'SMTP error: {e}',
+        })
+        return {'ok': False, 'checks': checks, 'error': f'SMTP error: {e}'}
+
+    except Exception as e:
+        checks.append({
+            'step': 'SMTP login',
+            'ok': False,
+            'detail': f'Connection error: {e}',
+        })
+        return {'ok': False, 'checks': checks, 'error': f'Connection error: {e}'}
+
+
 # ══════════════════════════════════════════════════════════════════════
 # CORE SEND
 # ══════════════════════════════════════════════════════════════════════
