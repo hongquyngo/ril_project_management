@@ -231,6 +231,10 @@ st.divider()
 # ── Flash messages (persist across st.rerun) ──
 if st.session_state.pop("_flash_email_warning", False):
     st.warning("⚠️ Last action saved OK but email notification failed. Check server logs (search `📧 [SKIP]` or `📧 [ERROR]`).")
+if _msg := st.session_state.pop("_flash_resend_ok", None):
+    st.success(_msg)
+if _msg := st.session_state.pop("_flash_resend_fail", None):
+    st.error(_msg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -631,7 +635,7 @@ if 'tasks' in tab_map:
                         f"**Selected:** `{task_info.get('wbs_code', '')}` {task_info['task_name']} "
                         f"({TASK_STATUS_ICONS.get(task_info['status'], '⚪')} {task_info['status']})"
                     )
-                    ab1, ab2, ab3, ab4, ab5, _ = st.columns([1, 1, 1, 1, 1, 2])
+                    ab1, ab2, ab3, ab4, ab5, ab6 = st.columns([1, 1, 1, 1, 1, 1])
 
                     if ab1.button("👁️ View", type="primary", use_container_width=True, key="task_view"):
                         st.session_state["open_view_task"] = selected_task_id
@@ -659,9 +663,16 @@ if 'tasks' in tab_map:
                         if ab5.button("📧 Resend", use_container_width=True, key="task_resend"):
                             result = resend_task_notification(selected_task_id, performer_id=employee_id)
                             if result['ok']:
-                                st.success(result['message'])
+                                st.session_state["_flash_resend_ok"] = result['message']
                             else:
-                                st.error(result['message'])
+                                st.session_state["_flash_resend_fail"] = result['message']
+                            st.session_state['_task_tbl_key'] = st.session_state.get('_task_tbl_key', 0) + 1
+                            st.rerun()
+
+                    # Deselect — clear selection by bumping dataframe key
+                    if ab6.button("✖ Deselect", use_container_width=True, key="task_desel"):
+                        st.session_state['_task_tbl_key'] = st.session_state.get('_task_tbl_key', 0) + 1
+                        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
