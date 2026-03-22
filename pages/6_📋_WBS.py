@@ -456,7 +456,7 @@ if 'mytasks' in tab_map:
                         for _, t in prio_tasks.iterrows():
                             _tid = int(t['id'])
                             with st.container(border=True):
-                                tc1, tc2, tc3, tc4 = st.columns([4, 2, 2, 2])
+                                tc1, tc2, tc3, tc4, tc5 = st.columns([4, 2, 2, 1, 1])
 
                                 # Task info
                                 tc1.markdown(
@@ -472,11 +472,11 @@ if 'mytasks' in tab_map:
                                 tc3.markdown(f"**{t['due_fmt']}**")
                                 tc3.caption(f"{t['status']}")
 
-                                # Actions
-                                if tc4.button("⚡", key=f"myg_q_{_tid}", help="Quick Update"):
+                                # Actions — one button per column
+                                if tc4.button("⚡", key=f"myg_q_{_tid}", help="Quick Update", use_container_width=True):
                                     st.session_state["open_quick_task"] = _tid
                                     st.rerun()
-                                if tc4.button("👁️", key=f"myg_v_{_tid}", help="View Details"):
+                                if tc5.button("👁️", key=f"myg_v_{_tid}", help="View Details", use_container_width=True):
                                     st.session_state["open_view_task"] = _tid
                                     st.rerun()
 
