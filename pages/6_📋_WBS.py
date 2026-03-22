@@ -56,6 +56,10 @@ from utils.il_project.wbs_notify import (
     notify_on_task_status_change,
     notify_on_task_assign,
 )
+from utils.il_project.wbs_user_guide import (
+    get_guide_sections_for_role, get_faq_for_role, get_workflows_for_role,
+    get_context_tips, search_guide,
+)
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -155,15 +159,15 @@ with st.sidebar:
     proj_info = get_project(selected_project_id)
 
     st.divider()
+    if st.button("❓ User Guide", use_container_width=True, key="sidebar_guide"):
+        st.session_state["open_user_guide"] = True
+
+    st.divider()
     st.header("Filters")
     f_phase  = st.selectbox("Phase", ["All"], key="wbs_f_phase")
     f_status = st.selectbox("Task Status", ["All"] + TASK_STATUS_OPTIONS)
     f_assignee = st.selectbox("Assignee", ["All", "🙋 Me"] +
                                [e['full_name'] for e in employees])
-
-    st.divider()
-    if st.button("❓ User Guide", use_container_width=True):
-        st.session_state["open_user_guide"] = True
 
 # Resolve filters
 phase_filter_id = None
@@ -205,6 +209,8 @@ welcome_col, guide_col = st.columns([7, 1])
 with welcome_col:
     st.markdown(f"Hi **{_my_name}** · {_role_chip} on {_project_label}")
 with guide_col:
+    if st.button("❓", key="banner_guide", help="Open User Guide"):
+        st.session_state["open_user_guide"] = True
     if not perms['is_member'] and not is_admin:
         st.caption("🔒 Read-only")
 
@@ -340,7 +346,7 @@ if 'dashboard' in tab_map:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB: MY TASKS (🙋)
+# TAB: MY TASKS (🙋) — Phase 4 Enhanced: action cards + grouped view + table
 # ══════════════════════════════════════════════════════════════════════════════
 
 if 'mytasks' in tab_map:
@@ -350,58 +356,163 @@ if 'mytasks' in tab_map:
         else:
             my_df = _get_my_tasks(employee_id)
 
-            # My action items summary
-            my_actions = compute_action_items(wbs['tasks'], employee_id, 'member')
-            if my_actions:
-                n_crit = sum(1 for a in my_actions if a['severity'] == 'critical')
-                n_high = sum(1 for a in my_actions if a['severity'] == 'high')
-                parts = []
-                if n_crit: parts.append(f"🔴 {n_crit} critical")
-                if n_high: parts.append(f"🟠 {n_high} high")
-                if parts:
-                    st.caption(f"🎯 {' · '.join(parts)} action items")
+            # ── My Tasks KPIs ──
+            my_total = len(my_df)
+            my_in_progress = len(my_df[my_df['status'] == 'IN_PROGRESS']) if my_total else 0
+            my_not_started = len(my_df[my_df['status'] == 'NOT_STARTED']) if my_total else 0
+            my_blocked_n   = len(my_df[my_df['status'] == 'BLOCKED']) if my_total else 0
 
-            st.metric("Active Tasks", len(my_df))
+            mk1, mk2, mk3, mk4 = st.columns(4)
+            mk1.metric("Active Tasks", my_total)
+            mk2.metric("In Progress", my_in_progress)
+            mk3.metric("Not Started", my_not_started)
+            mk4.metric("Blocked", my_blocked_n,
+                        delta=None if my_blocked_n == 0 else f"-{my_blocked_n}",
+                        delta_color="inverse")
 
             if my_df.empty:
                 st.success("🎉 No pending tasks assigned to you!")
             else:
+                # ── Action Cards: urgent items at top ──
+                my_actions = compute_action_items(wbs['tasks'], employee_id, 'member')
+                if my_actions:
+                    st.markdown(f"#### 🎯 Needs Your Attention ({len(my_actions)})")
+
+                    # Group by severity
+                    for sev_label, sev_key, sev_color in [
+                        ("🔴 Critical", 'critical', 'red'),
+                        ("🟠 High Priority", 'high', 'orange'),
+                        ("🔵 Action Items", 'medium', 'blue'),
+                    ]:
+                        sev_items = [a for a in my_actions if a['severity'] == sev_key]
+                        if not sev_items:
+                            continue
+
+                        st.caption(f"**{sev_label}** ({len(sev_items)})")
+
+                        for item in sev_items:
+                            _tid = item['task_id']
+                            with st.container(border=True):
+                                row1, row2 = st.columns([6, 2])
+                                row1.markdown(
+                                    f"{item['icon']} **[{item['wbs_code']}]** {item['task_name']}"
+                                )
+                                row2.caption(item['message'])
+
+                                # Inline actions
+                                ba1, ba2, ba3, _ = st.columns([1, 1, 1, 4])
+                                if ba1.button("⚡ Update", key=f"my_ai_q_{_tid}_{item['type']}",
+                                              use_container_width=True, type="primary"):
+                                    st.session_state["open_quick_task"] = _tid
+                                    st.rerun()
+                                if ba2.button("👁️ View", key=f"my_ai_v_{_tid}_{item['type']}",
+                                              use_container_width=True):
+                                    st.session_state["open_view_task"] = _tid
+                                    st.rerun()
+                                if ba3.button("💬 Comment", key=f"my_ai_c_{_tid}_{item['type']}",
+                                              use_container_width=True):
+                                    st.session_state["open_view_task"] = _tid
+                                    st.rerun()
+
+                    st.divider()
+
+                # ── Priority-Grouped Table View ──
+                st.markdown("#### 📋 All My Tasks")
+
                 my_display = my_df.copy()
                 my_display['prio'] = my_display['priority'].map(lambda p: PRIORITY_ICONS.get(p, '🔵'))
+                my_display['status_icon'] = my_display['status'].map(lambda s: TASK_STATUS_ICONS.get(s, '⚪'))
                 my_display['pct_fmt'] = my_display['completion_percent'].apply(fmt_completion)
                 my_display['due_fmt'] = my_display.apply(
                     lambda r: _format_due_date(r.get('planned_end'), r.get('status')), axis=1
                 )
-
-                event_my = st.dataframe(
-                    my_display,
-                    key="my_task_tbl", width="stretch", hide_index=True,
-                    on_select="rerun", selection_mode="single-row",
-                    column_config={
-                        'prio':            st.column_config.TextColumn('!', width=30),
-                        'project_code':    st.column_config.TextColumn('Project', width=100),
-                        'phase_name':      st.column_config.TextColumn('Phase'),
-                        'wbs_code':        st.column_config.TextColumn('WBS', width=60),
-                        'task_name':       st.column_config.TextColumn('Task'),
-                        'status':          st.column_config.TextColumn('Status', width=100),
-                        'pct_fmt':         st.column_config.TextColumn('%', width=70),
-                        'due_fmt':         st.column_config.TextColumn('Due', width=100),
-                        'id': None, 'priority': None, 'completion_percent': None,
-                        'actual_start': None, 'estimated_hours': None,
-                        'actual_hours': None, 'project_name': None,
-                        'planned_end': None,
-                    },
+                my_display['hours_fmt'] = my_display.apply(
+                    lambda r: f"{fmt_hours(r.get('actual_hours'))}/{fmt_hours(r.get('estimated_hours'))}", axis=1
                 )
-                sel_my = event_my.selection.rows
-                if sel_my:
-                    my_tid = int(my_display.iloc[sel_my[0]]['id'])
-                    mc1, mc2, _ = st.columns([1, 1, 5])
-                    if mc1.button("⚡ Quick Update", type="primary", key="my_quick"):
-                        st.session_state["open_quick_task"] = my_tid
-                        st.rerun()
-                    if mc2.button("👁️ View", key="my_view"):
-                        st.session_state["open_view_task"] = my_tid
-                        st.rerun()
+
+                # View toggle: grouped cards vs flat table
+                view_mode = st.radio(
+                    "View", ["📊 Grouped", "📋 Table"],
+                    horizontal=True, key="my_view_mode", label_visibility="collapsed"
+                )
+
+                if view_mode == "📊 Grouped":
+                    # ── Priority-grouped card layout ──
+                    prio_order = ['CRITICAL', 'HIGH', 'NORMAL', 'LOW']
+                    prio_labels = {
+                        'CRITICAL': '🔴 Critical',
+                        'HIGH': '🟠 High',
+                        'NORMAL': '🔵 Normal',
+                        'LOW': '🟢 Low',
+                    }
+
+                    for prio in prio_order:
+                        prio_tasks = my_display[my_display['priority'] == prio]
+                        if prio_tasks.empty:
+                            continue
+
+                        st.markdown(f"**{prio_labels.get(prio, prio)}** ({len(prio_tasks)})")
+
+                        for _, t in prio_tasks.iterrows():
+                            _tid = int(t['id'])
+                            with st.container(border=True):
+                                tc1, tc2, tc3, tc4 = st.columns([4, 2, 2, 2])
+
+                                # Task info
+                                tc1.markdown(
+                                    f"{t['status_icon']} **[{t['wbs_code']}]** {t['task_name']}"
+                                )
+                                tc1.caption(f"📁 {t['project_code']} · {t.get('phase_name', '—')}")
+
+                                # Progress
+                                tc2.markdown(f"**{t['pct_fmt']}**")
+                                tc2.caption(f"⏱️ {t['hours_fmt']}")
+
+                                # Due date
+                                tc3.markdown(f"**{t['due_fmt']}**")
+                                tc3.caption(f"{t['status']}")
+
+                                # Actions
+                                if tc4.button("⚡", key=f"myg_q_{_tid}", help="Quick Update"):
+                                    st.session_state["open_quick_task"] = _tid
+                                    st.rerun()
+                                if tc4.button("👁️", key=f"myg_v_{_tid}", help="View Details"):
+                                    st.session_state["open_view_task"] = _tid
+                                    st.rerun()
+
+                else:
+                    # ── Flat table view (original) ──
+                    event_my = st.dataframe(
+                        my_display,
+                        key="my_task_tbl", width="stretch", hide_index=True,
+                        on_select="rerun", selection_mode="single-row",
+                        column_config={
+                            'prio':            st.column_config.TextColumn('!', width=30),
+                            'status_icon':     st.column_config.TextColumn('', width=30),
+                            'project_code':    st.column_config.TextColumn('Project', width=100),
+                            'phase_name':      st.column_config.TextColumn('Phase'),
+                            'wbs_code':        st.column_config.TextColumn('WBS', width=60),
+                            'task_name':       st.column_config.TextColumn('Task'),
+                            'status':          st.column_config.TextColumn('Status', width=100),
+                            'pct_fmt':         st.column_config.TextColumn('%', width=70),
+                            'due_fmt':         st.column_config.TextColumn('Due', width=100),
+                            'hours_fmt':       st.column_config.TextColumn('Hours', width=80),
+                            'id': None, 'priority': None, 'completion_percent': None,
+                            'actual_start': None, 'estimated_hours': None,
+                            'actual_hours': None, 'project_name': None,
+                            'planned_end': None,
+                        },
+                    )
+                    sel_my = event_my.selection.rows
+                    if sel_my:
+                        my_tid = int(my_display.iloc[sel_my[0]]['id'])
+                        mc1, mc2, _ = st.columns([1, 1, 5])
+                        if mc1.button("⚡ Quick Update", type="primary", key="my_quick"):
+                            st.session_state["open_quick_task"] = my_tid
+                            st.rerun()
+                        if mc2.button("👁️ View", key="my_view"):
+                            st.session_state["open_view_task"] = my_tid
+                            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1026,90 +1137,108 @@ def _dialog_view_task(task_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DIALOG — User Guide
+# DIALOG — User Guide (Phase 5: bilingual, searchable, role-aware)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.dialog("❓ WBS User Guide", width="large")
 def _dialog_user_guide():
-    guide_tabs = []
-    if perms['is_pm'] or perms['tier'] == 'manager':
-        guide_tabs.append("🔵 PM Guide")
-    if perms['tier'] in ('lead', 'member', 'restricted'):
-        guide_tabs.append("🟢 Engineer Guide")
-    if perms['tier'] == 'viewer':
-        guide_tabs.append("🟠 Viewer Guide")
-    guide_tabs.append("📖 General")
+    """Bilingual (VI default / EN), searchable, role-aware user guide."""
 
-    tabs = st.tabs(guide_tabs)
-    idx = 0
+    # ── Language toggle + Search bar on same row ──
+    lang_col, search_col = st.columns([1, 4])
+    with lang_col:
+        lang_options = {"🇻🇳 Tiếng Việt": "vi", "🇬🇧 English": "en"}
+        lang_label = st.radio(
+            "Ngôn ngữ",
+            list(lang_options.keys()),
+            index=0,  # Vietnamese default
+            key="_guide_lang",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        lang = lang_options[lang_label]
 
-    if "🔵 PM Guide" in guide_tabs:
-        with tabs[idx]:
-            st.markdown("""
-**📊 Dashboard** — Your command center
-- KPI row: overall %, tasks done, overdue, blocked, due this week
-- Action Required: tasks needing attention, sorted critical → high → medium
-- Phase Progress: each phase % with overdue counts
+    with search_col:
+        placeholder = "Tìm: blocked, quá hạn, gán task..." if lang == 'vi' else "Search: blocked, overdue, assign..."
+        search_q = st.text_input(
+            "🔍",
+            placeholder=placeholder,
+            key="_guide_search",
+            label_visibility="collapsed",
+        )
 
-**🔷 Phase Management**
-- Add Phase / Load Template to set up project structure
-- Weight % affects how phase rolls up to project completion
-- Completion auto-syncs: task → phase (weighted avg) → project
+    # ── Context-aware tips ──
+    ctx_tips = get_context_tips(kpis, perms, not wbs['phases'].empty, lang=lang)
+    if ctx_tips:
+        for tip in ctx_tips:
+            st.info(tip)
 
-**📋 Task Management**
-- Create tasks, assign to team → auto-email sent
-- Quick filters: Overdue, Blocked, Mine, Critical, Unassigned
-- 🔴 in Due column = overdue, ⚠️ = due today, 🟡 = within 3 days
+    st.divider()
 
-**📧 Auto-notifications:** task assigned, blocked (→ PM), completed (→ PM)
+    # ── Load content for role + language ──
+    sections = get_guide_sections_for_role(perms['tier'], lang=lang)
+    faq_items = get_faq_for_role(perms['tier'], lang=lang)
+    workflows = get_workflows_for_role(perms['tier'], lang=lang)
 
-**💡 Daily routine:** Dashboard → action overdue/blocked → review due this week
-            """)
-        idx += 1
+    # Apply search filter
+    if search_q and len(search_q) >= 2:
+        result = search_guide(search_q, sections, faq_items)
+        sections = result['sections']
+        faq_items = result['faq']
+        q_lower = search_q.lower()
+        workflows = [w for w in workflows if q_lower in w['title'].lower()
+                     or any(q_lower in s.lower() for s in w.get('steps', []))
+                     or any(q_lower in t for t in w.get('tags', []))]
 
-    if "🟢 Engineer Guide" in guide_tabs:
-        with tabs[idx]:
-            st.markdown("""
-**🙋 My Tasks — your default tab**
-- All active tasks across projects, sorted by priority
-- Focus on 🔴 items and ⏰ overdue first
+        if not sections and not faq_items and not workflows:
+            no_result_msg = f"Không tìm thấy '{search_q}'. Thử từ khóa khác." if lang == 'vi' else f"No results for '{search_q}'. Try a different keyword."
+            st.warning(no_result_msg)
+            return
 
-**⚡ Quick Update — your main action**
-- Select task → ⚡ Quick Update
-- Status: NOT_STARTED → IN_PROGRESS → COMPLETED
-- Completion %: reflect actual progress
-- If BLOCKED: enter reason → PM gets notified automatically
+    # ── Guide tabs ──
+    lbl_guide    = "📖 Hướng dẫn" if lang == 'vi' else "📖 Guide"
+    lbl_workflow = "🔄 Quy trình"  if lang == 'vi' else "🔄 Workflows"
+    lbl_faq      = "❓ Hỏi đáp"    if lang == 'vi' else "❓ FAQ"
 
-**✅ Checklist** — inside Task Details
-- Toggle items as you complete them; PM monitors progress
+    guide_tab_labels = [lbl_guide]
+    if workflows:
+        guide_tab_labels.append(lbl_workflow)
+    if faq_items:
+        guide_tab_labels.append(lbl_faq)
 
-**💬 Comments** — type BLOCKER to alert PM
+    guide_tabs = st.tabs(guide_tab_labels)
 
-**💡 Tips:** Set IN_PROGRESS when you start · Update % regularly · Flag BLOCKED early
-            """)
-        idx += 1
+    # ── Tab 1: Guide Sections ──
+    with guide_tabs[0]:
+        if not sections:
+            msg = "Không có nội dung khớp." if lang == 'vi' else "No sections match your search."
+            st.caption(msg)
+        else:
+            for section in sections:
+                with st.expander(f"{section['icon']} {section['title']}", expanded=bool(search_q)):
+                    st.markdown(section['content'])
 
-    if "🟠 Viewer Guide" in guide_tabs:
-        with tabs[idx]:
-            st.markdown("""
-**Read-only access.** You can: view Dashboard, browse tasks, post comments.
+    # ── Tab 2: Workflows ──
+    if workflows and lbl_workflow in guide_tab_labels:
+        tab_idx = guide_tab_labels.index(lbl_workflow)
+        with guide_tabs[tab_idx]:
+            for wf in workflows:
+                with st.expander(f"{wf['icon']} {wf['title']}", expanded=bool(search_q)):
+                    step_num = 0
+                    for step in wf['steps']:
+                        if step.startswith("  "):
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{step.strip()}")
+                        else:
+                            step_num += 1
+                            st.markdown(f"**{step_num}.** {step}")
 
-Contact PM if you need edit access or task assignments.
-            """)
-        idx += 1
-
-    with tabs[idx]:
-        st.markdown("""
-**WBS Code:** `[phase_seq].[task_seq]` → e.g. "2.3"
-
-**Status Flow:** `NOT_STARTED → IN_PROGRESS → COMPLETED / BLOCKED / ON_HOLD / CANCELLED`
-
-**Priority:** 🔴 CRITICAL > 🟠 HIGH > 🔵 NORMAL > 🟢 LOW
-
-**Completion Sync:** Task % → Phase % (weighted by hours) → Project % (weighted by phase weight)
-
-**Due Icons:** 🔴 overdue · ⚠️ today · 🟡 ≤3 days · 📅 ≤7 days
-        """)
+    # ── Tab 3: FAQ ──
+    if faq_items and lbl_faq in guide_tab_labels:
+        tab_idx = guide_tab_labels.index(lbl_faq)
+        with guide_tabs[tab_idx]:
+            for item in faq_items:
+                with st.expander(f"❓ {item['q']}", expanded=bool(search_q)):
+                    st.markdown(item['a'])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

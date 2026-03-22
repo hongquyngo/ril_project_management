@@ -11,7 +11,7 @@ Features:
 - Toggle active status
 - Reset password
 
-Version: 1.0.0
+Version: 1.1.0 — Added R&D, Engineering, Production roles
 """
 
 import streamlit as st
@@ -70,46 +70,37 @@ if not db_connected:
 # CONSTANTS
 # =============================================================================
 
-AVAILABLE_ROLES = [
-    'admin',
-    'GM',
-    'MD',
-    'sales_manager',
-    'sales',
-    'supply_chain_manager',
-    'supply_chain',
-    'inbound_manager',
-    'outbound_manager',
-    'warehouse_manager',
-    'buyer',
-    'allocator',
-    'fa_manager',
-    'accountant',
-    'project_manager',
-    'production_manager',
-    'qc_manager',
-    'sw_engineer',
-    'fae',
-    'implement_engineer',
-    'production_planner',
-    'production_supervisor',
-    'production_operator',
-    'qc_inspector',
-    'wms_supervisor',
-    'wms_operator',
-    'rcs_operator',
-    'maintenance',
-    'client_admin',
-    'client_viewer',
-    'customer',
-    'vendor',
-    'viewer',
-]
+ROLE_GROUPS = {
+    '🔴 Executive': ['admin', 'GM', 'MD'],
+    '🟠 Sales': ['sales_manager', 'sales'],
+    '🟠 Supply Chain': ['supply_chain_manager', 'supply_chain', 'inbound_manager',
+                        'outbound_manager', 'warehouse_manager', 'buyer', 'allocator'],
+    '🟠 Finance': ['fa_manager', 'accountant'],
+    '🟠 Project': ['project_manager', 'product_manager'],
+    '🟢 Production': ['production_manager', 'production_planner',
+                      'production_supervisor', 'production_operator'],
+    '🟢 Quality': ['qc_manager', 'qc_inspector'],
+    '🟣 R&D Software': ['rd_manager', 'sw_engineer', 'sw_lead', 'sw_developer', 'sw_tester'],
+    '🟣 R&D Hardware': ['hw_lead', 'hw_engineer', 'fw_engineer', 'pcb_designer'],
+    '🟣 R&D Engineering': ['system_architect', 'me_engineer', 'ee_engineer'],
+    '🟡 Implementation': ['fae', 'implement_engineer'],
+    '🟢 WMS & RCS': ['wms_supervisor', 'wms_operator', 'rcs_operator', 'maintenance'],
+    '🔵 External': ['client_admin', 'client_viewer', 'customer', 'vendor'],
+    '⚪ General': ['viewer'],
+}
+
+# Flat list for validation / DB queries
+AVAILABLE_ROLES = [role for roles in ROLE_GROUPS.values() for role in roles]
+
+# Reverse lookup: role -> group name
+ROLE_TO_GROUP = {role: group for group, roles in ROLE_GROUPS.items() for role in roles}
 
 ROLE_COLORS = {
+    # 🔴 Executive / Admin
     'admin':                '🔴',
     'GM':                   '🔴',
     'MD':                   '🔴',
+    # 🟠 Managers
     'sales_manager':        '🟠',
     'supply_chain_manager': '🟠',
     'inbound_manager':      '🟠',
@@ -117,17 +108,33 @@ ROLE_COLORS = {
     'warehouse_manager':    '🟠',
     'fa_manager':           '🟠',
     'project_manager':      '🟠',
+    'product_manager':      '🟠',
     'production_manager':   '🟠',
     'qc_manager':           '🟠',
+    'rd_manager':           '🟠',
+    # 🟡 Staff / Specialist
     'sales':                '🟡',
     'supply_chain':         '🟡',
     'buyer':                '🟡',
     'allocator':            '🟡',
     'accountant':           '🟡',
-    'sw_engineer':          '🟡',
+    'production_planner':   '🟡',
+    # 🟣 R&D / Engineering
+    'system_architect':     '🟣',
+    'sw_engineer':          '🟣',
+    'sw_lead':              '🟣',
+    'sw_developer':         '🟣',
+    'sw_tester':            '🟣',
+    'hw_lead':              '🟣',
+    'hw_engineer':          '🟣',
+    'fw_engineer':          '🟣',
+    'pcb_designer':         '🟣',
+    'me_engineer':          '🟣',
+    'ee_engineer':          '🟣',
+    # 🟡 Field / Implementation
     'fae':                  '🟡',
     'implement_engineer':   '🟡',
-    'production_planner':   '🟡',
+    # 🟢 Operations
     'production_supervisor':'🟢',
     'production_operator':  '🟢',
     'qc_inspector':         '🟢',
@@ -135,10 +142,12 @@ ROLE_COLORS = {
     'wms_operator':         '🟢',
     'rcs_operator':         '🟢',
     'maintenance':          '🟢',
+    # 🔵 External
     'client_admin':         '🔵',
     'client_viewer':        '🔵',
     'customer':             '🔵',
     'vendor':               '🔵',
+    # ⚪ Default
     'viewer':               '⚪',
 }
 
@@ -466,7 +475,9 @@ def is_valid_email(email: str) -> bool:
 def clear_form_state():
     """Clear form-related session state"""
     keys_to_clear = ['edit_user_id', 'show_create_form', 'show_edit_form', 
-                     'delete_confirm', 'reset_pwd_user_id']
+                     'delete_confirm', 'reset_pwd_user_id',
+                     'cu_role_group', 'cu_role_select',
+                     'edit_role_group', 'edit_role_select']
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
@@ -492,6 +503,50 @@ def format_datetime(dt):
         return str(dt)
 
 
+def role_group_selector(key_prefix: str, default_role: str = 'viewer', 
+                        use_columns: bool = True) -> str:
+    """
+    Two-step role selector: pick department/group first, then role.
+    Returns the selected role string.
+    
+    Args:
+        key_prefix: unique prefix for widget keys (e.g. 'create', 'edit')
+        default_role: current/default role value
+        use_columns: if True, render side by side in 2 columns
+    """
+    # Determine default group from role
+    default_group = ROLE_TO_GROUP.get(default_role, '⚪ General')
+    group_list = list(ROLE_GROUPS.keys())
+    default_group_idx = group_list.index(default_group) if default_group in group_list else 0
+    
+    if use_columns:
+        gcol, rcol = st.columns(2)
+    else:
+        gcol = rcol = st  # render inline (stacked)
+    
+    with gcol:
+        selected_group = st.selectbox(
+            "Department *",
+            group_list,
+            index=default_group_idx,
+            key=f"{key_prefix}_role_group",
+        )
+    
+    # Get roles in selected group
+    roles_in_group = ROLE_GROUPS[selected_group]
+    default_role_idx = roles_in_group.index(default_role) if default_role in roles_in_group else 0
+
+    with rcol:
+        selected_role = st.selectbox(
+            "Role *",
+            roles_in_group,
+            index=default_role_idx,
+            key=f"{key_prefix}_role_select",
+        )
+    
+    return selected_role
+
+
 # =============================================================================
 # PAGE HEADER
 # =============================================================================
@@ -507,7 +562,15 @@ with st.sidebar:
     st.header("🔍 Filters")
     
     search_term = st.text_input("Search", placeholder="Username, email, name...")
-    role_filter = st.selectbox("Role", ['All'] + AVAILABLE_ROLES)
+    
+    # Grouped role filter
+    filter_group = st.selectbox("Department", ['All'] + list(ROLE_GROUPS.keys()), key='filter_group')
+    if filter_group == 'All':
+        role_filter = st.selectbox("Role", ['All'] + AVAILABLE_ROLES, key='filter_role')
+    else:
+        roles_in_grp = ROLE_GROUPS[filter_group]
+        role_filter = st.selectbox("Role", ['All'] + roles_in_grp, key='filter_role')
+    
     status_filter = st.selectbox("Status", ['All', 'Active', 'Inactive'])
     
     if st.button("🔄 Refresh Data", use_container_width=True):
@@ -598,6 +661,11 @@ if st.session_state.get('show_create_form', False):
 
     st.markdown("")  # spacing
 
+    # ── Role picker (OUTSIDE form so group→role cascade works) ───────────
+    new_role = role_group_selector('cu', default_role=st.session_state.get('cu_role', 'viewer'))
+
+    st.markdown("")  # spacing
+
     with st.form("create_user_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
 
@@ -616,10 +684,7 @@ if st.session_state.get('show_create_form', False):
                 value=st.session_state.get('cu_email', ''),
                 placeholder="e.g. anne.ninh@rozitek.com"
             )
-            default_role_idx = AVAILABLE_ROLES.index(
-                st.session_state.get('cu_role', 'viewer')
-            ) if st.session_state.get('cu_role', 'viewer') in AVAILABLE_ROLES else AVAILABLE_ROLES.index('viewer')
-            new_role = st.selectbox("Role *", AVAILABLE_ROLES, index=default_role_idx)
+            st.info(f"🏷️ Selected Role: **{new_role}**")
 
         new_is_active = st.checkbox("Active", value=True)
         
@@ -667,7 +732,8 @@ if st.session_state.get('show_create_form', False):
                     st.success(f"✅ {message}")
                     get_users_list.clear()
                     # Clear create-form state
-                    for _k in ['cu_username', 'cu_email', 'cu_employee_id', 'cu_role', 'cu_employee_select']:
+                    for _k in ['cu_username', 'cu_email', 'cu_employee_id', 'cu_role', 
+                              'cu_employee_select', 'cu_role_group', 'cu_role_select']:
                         st.session_state.pop(_k, None)
                     st.session_state['show_create_form'] = False
                     st.rerun()
@@ -675,7 +741,8 @@ if st.session_state.get('show_create_form', False):
                     st.error(f"❌ {message}")
         
         if cancelled:
-            for _k in ['cu_username', 'cu_email', 'cu_employee_id', 'cu_role', 'cu_employee_select']:
+            for _k in ['cu_username', 'cu_email', 'cu_employee_id', 'cu_role', 
+                      'cu_employee_select', 'cu_role_group', 'cu_role_select']:
                 st.session_state.pop(_k, None)
             st.session_state['show_create_form'] = False
             st.rerun()
@@ -693,6 +760,11 @@ if st.session_state.get('show_edit_form', False) and st.session_state.get('edit_
     if edit_user:
         employees_df = get_employees_dropdown()
         
+        # ── Role picker (OUTSIDE form so group→role cascade works) ───────
+        edit_role = role_group_selector('edit', default_role=edit_user['role'])
+        
+        st.markdown("")  # spacing
+        
         with st.form("edit_user_form"):
             col1, col2 = st.columns(2)
             
@@ -702,8 +774,7 @@ if st.session_state.get('show_edit_form', False) and st.session_state.get('edit_
                 edit_is_active = st.checkbox("Active", value=bool(edit_user['is_active']))
             
             with col2:
-                current_role_idx = AVAILABLE_ROLES.index(edit_user['role']) if edit_user['role'] in AVAILABLE_ROLES else 0
-                edit_role = st.selectbox("Role *", AVAILABLE_ROLES, index=current_role_idx)
+                st.info(f"🏷️ Selected Role: **{edit_role}**")
                 
                 # Employee dropdown
                 emp_options = ['-- No Employee Link --'] + employees_df['full_name'].tolist()
@@ -973,7 +1044,7 @@ if not all_users_df.empty:
 
 st.divider()
 st.caption(
-    f"User Management Module v1.0.0 | "
+    f"User Management Module v1.1.0 | "
     f"Admin: {st.session_state.get('username', 'Unknown')} | "
     f"Session: {format_datetime(st.session_state.get('login_time'))}"
 )
