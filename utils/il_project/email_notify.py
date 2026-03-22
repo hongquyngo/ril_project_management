@@ -415,16 +415,17 @@ def build_pr_deep_link(pr_id: int, action: str = 'view') -> Optional[str]:
     Build deep link URL to a specific PR with action.
 
     Actions: view, approve, edit
-    Example: https://ril-projects.streamlit.app/IL_5_🛒_Purchase_Request?pr_id=123&action=approve
+    Example: https://ril-projects.streamlit.app/Purchase_Request?pr_id=123&action=approve
+
+    Streamlit strips "N_" and emoji from filenames for URL routing:
+      File: 5_🛒_Purchase_Request.py → URL slug: Purchase_Request
 
     Returns None if base URL not configured (email will skip the button).
     """
     base = _get_base_url()
     if not base:
         return None
-    # Ensure we point to the PR page
-    page_path = '5_%F0%9F%9B%92_Purchase_Request'
-    # Handle base URL that may or may not include the page
+    page_path = 'Purchase_Request'
     if page_path in base:
         url = base
     else:

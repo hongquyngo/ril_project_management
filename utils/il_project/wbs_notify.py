@@ -68,10 +68,15 @@ from .email_notify import (
 # Pattern follows email_notify.py: build_pr_deep_link() → IL_5_🛒_Purchase_Request
 
 _PAGE_SLUGS = {
-    'wbs':      '6_📋_WBS',
-    'team':     '7_👥_WBS_Team',
-    'issues':   '8_⚠️_WBS_Issues',
-    'progress': '9_📊_WBS_Progress',
+    # Streamlit strips leading "N_" AND emoji from filenames for URL routing.
+    # File: 7_👥_WBS_Team.py → URL slug: WBS_Team
+    # File: 6_📋_WBS.py      → URL slug: WBS
+    #
+    # Verified by clicking sidebar links and checking browser URL bar.
+    'wbs':      'WBS',
+    'team':     'WBS_Team',
+    'issues':   'WBS_Issues',
+    'progress': 'WBS_Progress',
 }
 
 
@@ -87,10 +92,6 @@ def _build_deep_link(page_key: str, **params) -> Optional[str]:
     """
     Build deep link URL for any WBS page.
 
-    Uses urllib.parse.quote() to properly encode the emoji in page slugs.
-    This matches how browsers encode URLs — Streamlit receives the decoded
-    UTF-8 path and routes correctly.
-
     Args:
         page_key: Key in _PAGE_SLUGS (e.g. 'wbs', 'team', 'issues')
         **params: Query parameters (project_id=4, task_id=2, etc.)
@@ -100,7 +101,7 @@ def _build_deep_link(page_key: str, **params) -> Optional[str]:
 
     Example:
         _build_deep_link('wbs', project_id=4, task_id=2)
-        → https://ril-projects.streamlit.app/IL_6_%F0%9F%93%8B_WBS?project_id=4&task_id=2
+        → https://ril-projects.streamlit.app/WBS?project_id=4&task_id=2
     """
     base = _get_base_url()
     if not base:
