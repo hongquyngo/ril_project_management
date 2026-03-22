@@ -1096,3 +1096,107 @@ def notify_on_task_assign(
     except Exception as e:
         logger.error(f"📧 [ERROR] notify_on_task_assign(task={task_id}) failed: {e}", exc_info=True)
         return False
+
+
+# ══════════════════════════════════════════════════════════════════════
+# RESEND / REMIND — PM can manually resend notifications
+# ══════════════════════════════════════════════════════════════════════
+
+def resend_task_notification(
+    task_id: int,
+    performer_id: int,
+    extra_cc_ids: Optional[List[int]] = None,
+    extra_cc_emails: Optional[List[str]] = None,
+) -> Dict:
+    """
+    Resend task assignment email for an existing task.
+    Use when original notification failed (e.g. due to missing email, config issues).
+
+    Returns dict:
+        ok: bool
+        message: str — human-readable result for UI toast
+        to: str — recipient email (for display)
+
+    Usage from UI:
+        result = resend_task_notification(task_id, employee_id)
+        if result['ok']:
+            st.success(result['message'])
+        else:
+            st.error(result['message'])
+    """
+    try:
+        from .wbs_queries import get_task
+        task = get_task(task_id)
+        if not task:
+            return {'ok': False, 'message': f'Task #{task_id} not found.', 'to': ''}
+
+        assignee_id = task.get('assignee_id')
+        if not assignee_id:
+            return {'ok': False, 'message': 'Task has no assignee — cannot send notification.', 'to': ''}
+
+        assignee = _resolve_person(assignee_id)
+        if not assignee:
+            return {'ok': False, 'message': f'Cannot resolve assignee (employee #{assignee_id}) — not found in DB.', 'to': ''}
+
+        logger.info(f"📧 [RESEND] task={task_id}, assignee={assignee.get('name')} ({assignee.get('email')}), triggered by employee={performer_id}")
+
+        ok = notify_task_assigned(
+            task_id=task_id,
+            task_name=task['task_name'],
+            wbs_code=task.get('wbs_code', ''),
+            project_id=task['project_id'],
+            assignee_id=assignee_id,
+            performer_id=performer_id,
+            priority=task.get('priority', 'NORMAL'),
+            planned_start=task.get('planned_start'),
+            planned_end=task.get('planned_end'),
+            description=task.get('description'),
+            phase_name=task.get('phase_name'),
+            is_reassign=False,
+            extra_cc_ids=extra_cc_ids,
+            extra_cc_emails=extra_cc_emails,
+        )
+
+        to_email = assignee.get('email') or '(PM fallback)'
+        if ok:
+            return {'ok': True, 'message': f'📧 Email sent to {assignee["name"]} ({to_email})', 'to': to_email}
+        else:
+            return {'ok': False, 'message': f'Email send failed for {assignee["name"]} ({to_email}). Check server logs.', 'to': to_email}
+
+    except Exception as e:
+        logger.error(f"📧 [ERROR] resend_task_notification(task={task_id}) failed: {e}", exc_info=True)
+        return {'ok': False, 'message': f'Error: {e}', 'to': ''}
+
+
+def resend_bulk_task_notifications(
+    task_ids: List[int],
+    performer_id: int,
+) -> Dict:
+    """
+    Resend notifications for multiple tasks at once.
+    Useful for PM to bulk-resend after fixing email config.
+
+    Returns dict:
+        total: int
+        sent: int
+        failed: int
+        results: list of {task_id, ok, message}
+    """
+    results = []
+    sent = 0
+    failed = 0
+
+    for tid in task_ids:
+        r = resend_task_notification(tid, performer_id)
+        results.append({'task_id': tid, **r})
+        if r['ok']:
+            sent += 1
+        else:
+            failed += 1
+
+    return {
+        'total': len(task_ids),
+        'sent': sent,
+        'failed': failed,
+        'results': results,
+    }

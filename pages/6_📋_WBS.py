@@ -55,6 +55,7 @@ from utils.il_project.wbs_helpers import (
 from utils.il_project.wbs_notify import (
     notify_on_task_status_change,
     notify_on_task_assign,
+    resend_task_notification,
 )
 from utils.il_project.wbs_guide_common import search_guide
 from utils.il_project.wbs_guide_6_wbs import (
@@ -630,7 +631,7 @@ if 'tasks' in tab_map:
                         f"**Selected:** `{task_info.get('wbs_code', '')}` {task_info['task_name']} "
                         f"({TASK_STATUS_ICONS.get(task_info['status'], '⚪')} {task_info['status']})"
                     )
-                    ab1, ab2, ab3, ab4, _ = st.columns([1, 1, 1, 1, 3])
+                    ab1, ab2, ab3, ab4, ab5, _ = st.columns([1, 1, 1, 1, 1, 2])
 
                     if ab1.button("👁️ View", type="primary", use_container_width=True, key="task_view"):
                         st.session_state["open_view_task"] = selected_task_id
@@ -652,6 +653,15 @@ if 'tasks' in tab_map:
                                 st.success("Task deleted.")
                                 invalidate_wbs_cache(selected_project_id)
                                 st.rerun()
+
+                    # Resend email — PM/lead only, task must have assignee
+                    if perms['tier'] in ('manager', 'lead') and task_info.get('assignee_id'):
+                        if ab5.button("📧 Resend", use_container_width=True, key="task_resend"):
+                            result = resend_task_notification(selected_task_id, performer_id=employee_id)
+                            if result['ok']:
+                                st.success(result['message'])
+                            else:
+                                st.error(result['message'])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1045,13 +1055,22 @@ def _dialog_view_task(task_id: int):
         st.warning("Task not found.")
         return
 
-    hc1, hc2 = st.columns([5, 1])
+    hc1, hc2, hc3 = st.columns([5, 1, 1])
     hc1.subheader(f"{TASK_STATUS_ICONS.get(task['status'], '⚪')} {task.get('wbs_code', '')} — {task['task_name']}")
 
     if can_edit_task(perms, task.get('assignee_id'), employee_id):
         if hc2.button("✏️ Edit", type="primary"):
             st.session_state["open_edit_task"] = task_id
             st.rerun()
+
+    # Resend email — visible to PM/lead when task has assignee
+    if perms['tier'] in ('manager', 'lead') and task.get('assignee_id'):
+        if hc3.button("📧", help="Resend assignment email"):
+            result = resend_task_notification(task_id, performer_id=employee_id)
+            if result['ok']:
+                st.success(result['message'])
+            else:
+                st.error(result['message'])
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Status", task['status'])
