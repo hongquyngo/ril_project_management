@@ -89,6 +89,34 @@ st.markdown("""
 
 auth = AuthManager()
 
+# ── Auto-dismiss "Page not found" dialog (appears during deep-link auth redirects) ──
+if st.session_state.get('_return_after_login'):
+    import streamlit.components.v1 as components
+    components.html("""
+    <script>
+    (function dismissPageNotFound() {
+        const target = window.parent.document.body;
+        const observer = new MutationObserver(() => {
+            target.querySelectorAll('div[role="dialog"]').forEach(d => {
+                if (d.textContent.includes('Page not found')) {
+                    const btn = d.querySelector('button[aria-label="Close"], button');
+                    if (btn) btn.click();
+                }
+            });
+        });
+        observer.observe(target, { childList: true, subtree: true });
+        // Also try immediately
+        target.querySelectorAll('div[role="dialog"]').forEach(d => {
+            if (d.textContent.includes('Page not found')) {
+                const btn = d.querySelector('button[aria-label="Close"], button');
+                if (btn) btn.click();
+            }
+        });
+        setTimeout(() => observer.disconnect(), 5000);
+    })();
+    </script>
+    """, height=0)
+
 # ==================== HELPER FUNCTIONS ====================
 
 def show_login_page():

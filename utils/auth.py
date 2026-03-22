@@ -224,6 +224,34 @@ class AuthManager:
         
         logger.info(f"User {user_info['username']} (ID: {user_info['id']}, keycloak_id: {user_info.get('keycloak_id')}) logged in successfully")
     
+    def redirect_after_login(self):
+        """
+        After successful login, redirect to the page the user originally
+        requested (from deep link / email). Call this in app.py right after
+        self.login(user_info) + st.rerun().
+
+        Usage in app.py (after login success):
+            auth.login(user_info)
+            auth.redirect_after_login()  # ← redirects if deep link saved
+            st.rerun()
+        """
+        dest = st.session_state.pop('_return_after_login', None)
+        if not dest or not dest.get('page'):
+            return  # No saved destination — stay on main page
+
+        page_file = dest['page']   # e.g. "pages/7_👥_WBS_Team.py"
+        query = dest.get('query', {})
+
+        logger.info(f"Post-login redirect → {page_file} params={query}")
+        try:
+            # Set query params first so the target page receives them
+            if query:
+                st.query_params.update(query)
+            st.switch_page(page_file)
+        except Exception as e:
+            logger.warning(f"Post-login redirect failed: {e}")
+            # Non-fatal — user stays on main page, can navigate manually
+    
     def logout(self):
         """Clear user session and cache"""
         # Get info before clearing
@@ -258,28 +286,47 @@ class AuthManager:
         Require authentication to access a page.
         Use at the beginning of each protected page.
 
-        If not authenticated, saves the current page URL as return_url
-        so user can be redirected back after login, then switches to
-        the main page (which has the login form).
+        If not authenticated:
+          1. Saves the current page file path + query params to session state
+          2. Redirects to main page (login form) via st.switch_page
+          3. After login, app.py can read _return_after_login and redirect back
         """
         if not self.check_session():
-            # Save intended destination for post-login redirect
+            # ── Save intended destination for post-login redirect ──
             try:
-                ctx = st.context
-                if hasattr(ctx, 'headers'):
-                    # Store the full path+query so deep links work after login
-                    import urllib.parse
-                    path = st.query_params.to_dict()
-                    if path:
-                        st.session_state['_return_after_login'] = path
-            except Exception:
-                pass  # Non-critical — skip if context unavailable
+                import inspect, os
+                # Walk up call stack to find the page script (in pages/ directory)
+                page_file = None
+                for frame_info in inspect.stack():
+                    fpath = frame_info.filename
+                    if os.sep + 'pages' + os.sep in fpath or '/pages/' in fpath:
+                        # e.g. "pages/6_📋_WBS.py"
+                        idx = fpath.find('pages' + os.sep)
+                        if idx == -1:
+                            idx = fpath.find('pages/')
+                        if idx >= 0:
+                            page_file = fpath[idx:]  # "pages/6_📋_WBS.py"
+                        break
+
+                if page_file:
+                    query = {}
+                    try:
+                        query = st.query_params.to_dict()
+                    except Exception:
+                        pass
+                    st.session_state['_return_after_login'] = {
+                        'page': page_file,
+                        'query': query,
+                    }
+                    logger.info(f"Saved return destination: {page_file} params={query}")
+            except Exception as e:
+                logger.debug(f"Could not save return destination: {e}")
 
             st.warning("⚠️ Please login to access this page")
             try:
-                st.switch_page("app.py")  # Redirect to main page with login form
+                st.query_params.clear()  # Clear params to avoid URL mismatch
+                st.switch_page("app.py")
             except Exception:
-                # Fallback for older Streamlit or if app.py is named differently
                 st.stop()
             return False
         return True
