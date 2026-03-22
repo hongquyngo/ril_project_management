@@ -10,8 +10,9 @@ Features:
 - Soft delete user (dialog)
 - Toggle active status (fragment — no full rerun)
 - Reset password (dialog)
+- Email notifications: welcome, password reset, status change, account deleted
 
-Version: 2.0.0 — Dialog + Fragment architecture (no full-page reruns)
+Version: 2.2.0 — Dialog + Fragment + Full email notifications
 """
 
 import streamlit as st
@@ -19,6 +20,9 @@ from datetime import datetime
 import pandas as pd
 import logging
 import re as _re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Shared utilities
 from utils.auth import AuthManager
@@ -423,6 +427,243 @@ def _cleanup_keys(prefix: str):
         del st.session_state[k]
 
 
+# =============================================================================
+# EMAIL NOTIFICATIONS — non-blocking, failures logged but never crash app
+# =============================================================================
+
+def _get_email_config() -> dict:
+    """Load outbound email config from utils.config."""
+    try:
+        from utils.config import config
+        if not config.is_feature_enabled("EMAIL_NOTIFICATIONS"):
+            logger.info("Email notifications disabled by feature flag.")
+            return {}
+        return config.get_email_config("outbound")
+    except Exception as e:
+        logger.warning(f"Could not load email config: {e}")
+        return {}
+
+
+def _get_app_url() -> str:
+    """Get app base URL for deep links."""
+    try:
+        from utils.config import config
+        return (config.get_app_setting('APP_BASE_URL', '') or '').rstrip('/')
+    except Exception:
+        return ''
+
+
+def _email_template(title: str, body_html: str, app_url: str = '') -> str:
+    """Wrap body in a clean HTML email template (shared by all notifications)."""
+    action_btn = ''
+    if app_url:
+        action_btn = f'''
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{app_url}"
+               style="background:#2563eb;color:#fff;padding:12px 28px;
+                      border-radius:6px;text-decoration:none;font-weight:600;
+                      display:inline-block;">
+                Login to ERP
+            </a>
+        </div>'''
+
+    return f'''
+    <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;
+                background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+        <div style="background:#1e3a5f;padding:16px 24px;">
+            <h2 style="color:#fff;margin:0;font-size:18px;">{title}</h2>
+        </div>
+        <div style="padding:24px;">
+            {body_html}
+            {action_btn}
+        </div>
+        <div style="background:#f9fafb;padding:12px 24px;border-top:1px solid #e5e7eb;
+                    font-size:12px;color:#6b7280;">
+            Rozitek ERP System<br>
+            This is an automated notification. Please do not reply to this email.
+        </div>
+    </div>'''
+
+
+def _info_row(label: str, value: str) -> str:
+    return f'''<tr>
+        <td style="padding:4px 0;color:#6b7280;width:140px;">{label}</td>
+        <td style="padding:4px 0;font-weight:500;">{value}</td>
+    </tr>'''
+
+
+def _send_user_email(to_email: str, subject: str,
+                     html_body: str) -> tuple[bool, str]:
+    """
+    Core send function. Non-blocking.
+    Returns (True, 'sent to ...') or (False, reason).
+    """
+    cfg = _get_email_config()
+    if not cfg.get('sender') or not cfg.get('password'):
+        return False, "Email not configured — notification skipped"
+
+    if not to_email or '@' not in to_email:
+        return False, "No valid recipient email"
+
+    sender = cfg['sender']
+    smtp_pwd = cfg['password']
+    host = cfg.get('host', 'smtp.gmail.com')
+    port = cfg.get('port', 587)
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['From'] = f"Rozitek ERP <{sender}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+        with smtplib.SMTP(host, port, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(sender, smtp_pwd)
+            server.sendmail(sender, [to_email], msg.as_string())
+
+        logger.info(f"📧 Email sent: '{subject}' → {to_email}")
+        return True, f"Email sent to {to_email}"
+
+    except smtplib.SMTPAuthenticationError:
+        logger.error("📧 SMTP auth failed — check email credentials in .env")
+        return False, "SMTP authentication failed"
+    except smtplib.SMTPException as e:
+        logger.error(f"📧 SMTP error: {e}")
+        return False, f"SMTP error: {e}"
+    except Exception as e:
+        logger.error(f"📧 Email send failed: {e}")
+        return False, str(e)
+
+
+# ── 1. Welcome email (after user creation) ──────────────────────────
+
+def send_welcome_email(email: str, username: str, password: str,
+                       role: str) -> tuple[bool, str]:
+    role_group = ROLE_TO_GROUP.get(role, '⚪ General')
+    role_icon = ROLE_COLORS.get(role, '⚪')
+
+    body = f'''
+    <p>Hi <strong>{username}</strong>,</p>
+    <p>Your account has been created. Here are your login credentials:</p>
+
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('Username', f'<strong>{username}</strong>')}
+        {_info_row('Password',
+            f'<code style="background:#f3f4f6;padding:2px 8px;border-radius:4px;'
+            f'font-family:monospace;font-size:14px;">{password}</code>')}
+        {_info_row('Role', f'{role_icon} {role} <span style="color:#9ca3af;">({role_group})</span>')}
+    </table>
+
+    <div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:12px;margin:16px 0;font-size:13px;">
+        <strong>⚠️ Important:</strong> Please change your password after your first login.
+    </div>'''
+
+    html = _email_template('👤 Welcome to Rozitek ERP', body, _get_app_url())
+    return _send_user_email(
+        email,
+        f"[Rozitek ERP] Your account has been created — {username}",
+        html,
+    )
+
+
+# ── 2. Password reset email ─────────────────────────────────────────
+
+def send_reset_password_email(email: str, username: str,
+                              new_password: str) -> tuple[bool, str]:
+    admin_name = st.session_state.get('username', 'System')
+
+    body = f'''
+    <p>Hi <strong>{username}</strong>,</p>
+    <p>Your password has been reset by an administrator (<strong>{admin_name}</strong>).</p>
+
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('Username', f'<strong>{username}</strong>')}
+        {_info_row('New Password',
+            f'<code style="background:#f3f4f6;padding:2px 8px;border-radius:4px;'
+            f'font-family:monospace;font-size:14px;">{new_password}</code>')}
+    </table>
+
+    <div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;">
+        <strong>🔐 Security:</strong> Please change your password immediately after logging in.
+    </div>'''
+
+    html = _email_template('🔐 Password Reset', body, _get_app_url())
+    return _send_user_email(
+        email,
+        f"[Rozitek ERP] Your password has been reset — {username}",
+        html,
+    )
+
+
+# ── 3. Account status change email (activate / deactivate) ──────────
+
+def send_status_change_email(email: str, username: str,
+                             is_now_active: bool) -> tuple[bool, str]:
+    admin_name = st.session_state.get('username', 'System')
+
+    if is_now_active:
+        status_badge = '<span style="color:#16a34a;font-weight:700;">✅ ACTIVATED</span>'
+        message = 'Your account has been re-activated. You can now log in to the ERP system.'
+        note = ''
+    else:
+        status_badge = '<span style="color:#dc2626;font-weight:700;">🚫 DEACTIVATED</span>'
+        message = 'Your account has been deactivated. You will no longer be able to log in.'
+        note = '''
+        <div style="background:#fef2f2;border-left:3px solid #ef4444;padding:12px;margin:16px 0;font-size:13px;">
+            If you believe this is a mistake, please contact your administrator.
+        </div>'''
+
+    body = f'''
+    <p>Hi <strong>{username}</strong>,</p>
+    <p>{message}</p>
+
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('Account', f'<strong>{username}</strong>')}
+        {_info_row('Status', status_badge)}
+        {_info_row('Changed by', admin_name)}
+    </table>
+    {note}'''
+
+    action = "activated" if is_now_active else "deactivated"
+    html = _email_template(f'👤 Account {action.title()}', body,
+                           _get_app_url() if is_now_active else '')
+    return _send_user_email(
+        email,
+        f"[Rozitek ERP] Your account has been {action} — {username}",
+        html,
+    )
+
+
+# ── 4. Account deleted email ────────────────────────────────────────
+
+def send_account_deleted_email(email: str, username: str) -> tuple[bool, str]:
+    admin_name = st.session_state.get('username', 'System')
+
+    body = f'''
+    <p>Hi <strong>{username}</strong>,</p>
+    <p>Your account has been removed from the ERP system.</p>
+
+    <table style="width:100%;margin:16px 0;">
+        {_info_row('Account', f'<strong>{username}</strong>')}
+        {_info_row('Status', '<span style="color:#6b7280;font-weight:700;">⬛ DELETED</span>')}
+        {_info_row('Removed by', admin_name)}
+    </table>
+
+    <div style="background:#f3f4f6;border-left:3px solid #9ca3af;padding:12px;margin:16px 0;font-size:13px;">
+        If you believe this is a mistake, please contact your administrator.
+    </div>'''
+
+    html = _email_template('👤 Account Removed', body)
+    return _send_user_email(
+        email,
+        f"[Rozitek ERP] Your account has been removed — {username}",
+        html,
+    )
+
+
 def role_group_selector(key_prefix: str, default_role: str = 'viewer') -> str:
     """
     Two-step role selector: department/group → role.
@@ -572,7 +813,19 @@ def open_create_dialog():
                     is_active=new_is_active
                 )
                 if success:
-                    st.success(f"✅ {msg}")
+                    # Send welcome email (non-blocking)
+                    email_ok, email_msg = send_welcome_email(
+                        email=new_email.strip(),
+                        username=new_username.strip(),
+                        password=new_password,
+                        role=new_role,
+                    )
+                    if email_ok:
+                        st.toast(f"📧 {email_msg}", icon="✅")
+                    else:
+                        st.toast(f"📧 {email_msg}", icon="⚠️")
+
+                    st.toast(f"User **{new_username.strip()}** created!", icon="✅")
                     get_users_list.clear()
                     _cleanup_keys('_cu')
                     st.rerun()  # → closes dialog, refreshes page
@@ -676,8 +929,8 @@ def open_edit_dialog(user_id: int):
 # RESET PASSWORD DIALOG
 # ─────────────────────────────────────────────────
 @st.dialog("🔐 Reset Password")
-def open_reset_pwd_dialog(user_id: int, username: str):
-    st.info(f"Resetting password for: **{username}**")
+def open_reset_pwd_dialog(user_id: int, username: str, email: str):
+    st.info(f"Resetting password for: **{username}** ({email})")
 
     with st.form("dlg_reset_pwd_form"):
         new_pwd = st.text_input("New Password *", type="password")
@@ -699,7 +952,15 @@ def open_reset_pwd_dialog(user_id: int, username: str):
             else:
                 success, msg = reset_password(user_id, new_pwd)
                 if success:
-                    st.success(f"✅ {msg}")
+                    # Send password reset email (non-blocking)
+                    email_ok, email_msg = send_reset_password_email(
+                        email=email, username=username, new_password=new_pwd)
+                    if email_ok:
+                        st.toast(f"📧 {email_msg}", icon="✅")
+                    else:
+                        st.toast(f"📧 {email_msg}", icon="⚠️")
+
+                    st.toast(f"Password reset for **{username}**", icon="🔐")
                     st.rerun()
                 else:
                     st.error(f"❌ {msg}")
@@ -712,7 +973,7 @@ def open_reset_pwd_dialog(user_id: int, username: str):
 # DELETE CONFIRM DIALOG
 # ─────────────────────────────────────────────────
 @st.dialog("⚠️ Confirm Delete")
-def open_delete_dialog(user_id: int, username: str):
+def open_delete_dialog(user_id: int, username: str, email: str):
     st.warning(f"Are you sure you want to delete user **{username}**?")
     st.caption("This action will deactivate and soft-delete the user.")
 
@@ -722,7 +983,15 @@ def open_delete_dialog(user_id: int, username: str):
         if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
             success, msg = soft_delete_user(user_id)
             if success:
-                st.success(msg)
+                # Send account deleted email (non-blocking)
+                email_ok, email_msg = send_account_deleted_email(
+                    email=email, username=username)
+                if email_ok:
+                    st.toast(f"📧 {email_msg}", icon="✅")
+                else:
+                    st.toast(f"📧 {email_msg}", icon="⚠️")
+
+                st.toast(f"User **{username}** deleted", icon="🗑️")
                 get_users_list.clear()
                 st.rerun()
             else:
@@ -867,7 +1136,7 @@ def users_table_fragment(search_term, role_filter, status_filter):
             with a2:
                 if st.button("🔐", key=f"pwd_{row['id']}", help="Reset password"):
                     st.session_state['_dlg'] = ('reset_pwd', int(row['id']),
-                                                 row['username'])
+                                                 row['username'], row['email'])
                     st.rerun()
 
             with a3:
@@ -877,6 +1146,18 @@ def users_table_fragment(search_term, role_filter, status_filter):
                              help=status_help):
                     success, msg = toggle_user_status(int(row['id']))
                     if success:
+                        # Send status change email (non-blocking)
+                        is_now_active = not bool(row['is_active'])
+                        email_ok, email_msg = send_status_change_email(
+                            email=row['email'],
+                            username=row['username'],
+                            is_now_active=is_now_active,
+                        )
+                        if email_ok:
+                            st.toast(f"📧 {email_msg}", icon="✅")
+                        else:
+                            st.toast(f"📧 {email_msg}", icon="⚠️")
+
                         get_users_list.clear()
                         st.rerun(scope="fragment")   # ← fragment-only rerun!
                     else:
@@ -887,7 +1168,7 @@ def users_table_fragment(search_term, role_filter, status_filter):
                     if st.button("🗑️", key=f"del_{row['id']}",
                                  help="Delete user"):
                         st.session_state['_dlg'] = ('delete', int(row['id']),
-                                                     row['username'])
+                                                     row['username'], row['email'])
                         st.rerun()
 
         st.divider()
@@ -904,9 +1185,9 @@ if _dlg:
     if action == 'edit':
         open_edit_dialog(_dlg[1])
     elif action == 'reset_pwd':
-        open_reset_pwd_dialog(_dlg[1], _dlg[2])
+        open_reset_pwd_dialog(_dlg[1], _dlg[2], _dlg[3])
     elif action == 'delete':
-        open_delete_dialog(_dlg[1], _dlg[2])
+        open_delete_dialog(_dlg[1], _dlg[2], _dlg[3])
 
 # =============================================================================
 # STATISTICS — @st.fragment (independent of table reruns)
@@ -962,7 +1243,7 @@ statistics_fragment()
 
 st.divider()
 st.caption(
-    f"User Management Module v2.0.0 | "
+    f"User Management Module v2.2.0 | "
     f"Admin: {st.session_state.get('username', 'Unknown')} | "
     f"Session: {format_datetime(st.session_state.get('login_time'))}"
 )
