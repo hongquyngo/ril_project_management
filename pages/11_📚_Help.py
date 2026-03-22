@@ -1500,15 +1500,310 @@ def render_qa(qa: dict):
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  SECTION 8: PAGE LAYOUT                                                    ║
+# ║  SECTION 8: WBS LIFECYCLE — End-to-End Training                           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+WBS_LIFECYCLE_PHASES = [
+    {
+        'week': 'Tuần 0',
+        'phase': '🏗️ Setup dự án',
+        'title': 'Khởi tạo WBS & Team',
+        'who_what': [
+            ('PM', [
+                'Tạo project (IL_1) → status CONTRACTED',
+                'Vào IL_7 Team → ➕ Add Member cho từng thành viên (role, allocation %, daily rate)',
+                'Vào IL_6 WBS → tab Phases → 📦 Load Template (7 phases chuẩn)',
+                'Chỉnh weight % cho mỗi phase phù hợp dự án thực tế',
+                'Set Planned Start/End cho từng phase',
+            ]),
+            ('PM', [
+                'Tab All Tasks → ➕ Add Task cho từng phase',
+                'Gán task cho engineer → email tự động gửi',
+                'Set Priority, Estimated Hours, Planned Start/End cho mỗi task',
+                'Thêm Checklist items nếu task có nhiều bước nhỏ',
+                'Đính kèm file (bản vẽ, spec, scope doc)',
+            ]),
+            ('Engineer', [
+                'Nhận email "Task Assigned" → click "Open in ERP"',
+                'Vào My Tasks → review task list, priority, deadline',
+                'Nếu có câu hỏi → comment trong task',
+            ]),
+        ],
+        'deliverable': 'WBS hoàn chỉnh: phases + tasks + team + assignments',
+        'tip': 'Dành 1-2 giờ setup kỹ. WBS tốt = nền tảng quản lý tốt cả dự án.',
+    },
+    {
+        'week': 'Tuần 1–2',
+        'phase': '⚡ Kick-off & Bắt đầu triển khai',
+        'title': 'Team bắt đầu làm việc',
+        'who_what': [
+            ('Engineer', [
+                'Mở My Tasks hàng ngày → kiểm tra action items',
+                'Task NOT_STARTED → chuyển IN_PROGRESS khi bắt đầu làm',
+                '⚡ Quick Update hàng ngày: Status, Completion %, Actual Hours',
+                'Tick checklist items khi hoàn thành từng bước',
+            ]),
+            ('PM', [
+                'Mở Dashboard hàng ngày (~5 phút)',
+                'Kiểm tra KPI row: Overdue? Blocked? Due This Week?',
+                'Xử lý Action Required từ trên xuống',
+                'Kiểm tra Phase Progress — phase nào đứng yên?',
+            ]),
+            ('SA / Senior', [
+                'Review tiến độ qua All Tasks tab',
+                'Hỗ trợ engineer kỹ thuật qua comments trong task',
+                'Báo cáo PM nếu phát hiện risk hoặc issue',
+            ]),
+        ],
+        'deliverable': 'Tasks chuyển sang IN_PROGRESS, completion % bắt đầu tăng',
+        'tip': 'Engineer nên update % hàng ngày, KHÔNG để cuối tuần mới update 1 lần.',
+    },
+    {
+        'week': 'Tuần 3–6',
+        'phase': '🔄 Triển khai chính — Daily operations',
+        'title': 'Vòng lặp hàng ngày/tuần',
+        'who_what': [
+            ('Engineer (hàng ngày, 2 phút)', [
+                'My Tasks → kiểm tra 🔴 và ⏰',
+                '⚡ Quick Update cho task đã làm hôm nay',
+                'Nếu bị kẹt → set BLOCKED + nhập lý do cụ thể (PM nhận email ngay)',
+                'Nếu xong → set COMPLETED (PM nhận email)',
+            ]),
+            ('PM (hàng ngày, 5 phút)', [
+                'Dashboard → KPIs → Action Required',
+                '🔴 Blocked: đọc lý do → comment/gỡ block/reassign',
+                '⏰ Overdue: follow-up assignee → điều chỉnh deadline hoặc thêm resource',
+                'Log Issues (IL_8) nếu phát hiện vấn đề mới',
+            ]),
+            ('PM (hàng tuần)', [
+                'Review Phase Progress — có phase nào completion % dừng lại?',
+                'Check Workload Matrix (IL_7) — ai over-allocated?',
+                'Tạo Progress Report (IL_9): set RAG, điền narrative',
+                'Review Risk Register (IL_8) — risk nào cần update?',
+            ]),
+        ],
+        'deliverable': 'Completion % tăng đều, issues được track, report hàng tuần',
+        'tip': 'Nhịp hàng ngày (engineer 2\', PM 5\') + hàng tuần (PM 30\') = kiểm soát tốt nhất.',
+    },
+    {
+        'week': 'Tuần 7–8',
+        'phase': '🔍 Xử lý tình huống — Blockers, Issues, Changes',
+        'title': 'Khi có vấn đề phát sinh',
+        'who_what': [
+            ('Engineer', [
+                'Task bị BLOCKED → nhập lý do cụ thể: "Chờ cable tray giao, ETA 15/4"',
+                'PM chưa phản hồi → comment type BLOCKER trong task',
+                'Issue mới phát sinh → IL_8 → ➕ Report Issue (set severity đúng mức)',
+            ]),
+            ('PM', [
+                'Nhận email 🔴 BLOCKED → View → đọc lý do → hành động:',
+                '  A: Comment hướng dẫn → engineer tự giải quyết',
+                '  B: Reassign cho người có khả năng gỡ block',
+                '  C: Escalate → ghi nhận trong comment',
+                'Nếu scope change → tạo Change Order (IL_8):',
+                '  ➕ New CO → DRAFT → SUBMITTED → review → APPROVED',
+                '  Cập nhật Amended Contract Value nếu khách chấp nhận',
+                'Update Risk Register → risk nào đã OCCURRED? → tạo Issue tương ứng',
+            ]),
+        ],
+        'deliverable': 'Blockers gỡ xong, issues tracked, COs documented',
+        'tip': 'Flag BLOCKED sớm (đừng chờ) → PM support nhanh → dự án không bị delay.',
+    },
+    {
+        'week': 'Tuần 9–10',
+        'phase': '✅ Commissioning & Quality',
+        'title': 'Kiểm tra chất lượng & nghiệm thu',
+        'who_what': [
+            ('PM / Lead', [
+                'Tạo Quality Checklists (IL_9): FAT, SAT, Commissioning',
+                'Set Inspector, Location, Date, link tới Milestone',
+                'Chuẩn bị checklist items chi tiết',
+            ]),
+            ('Engineer (Inspector)', [
+                'Ngày kiểm tra: Edit QC → set IN_PROGRESS',
+                'Thực hiện kiểm tra → nhập Total Items, Passed, Failed',
+                'Set status: PASSED / FAILED / CONDITIONAL',
+                'Đính kèm ảnh, biên bản kiểm tra, video',
+                'Nếu FAILED: điền Remarks + Next Action + Retest Date',
+            ]),
+            ('PM', [
+                'Review kết quả QC → Customer Sign-off khi khách ký',
+                'Nếu FAILED: lập kế hoạch retest → assign engineer fix',
+                'Tất cả QC PASSED → chuyển phase Commissioning → COMPLETED',
+            ]),
+        ],
+        'deliverable': 'QC passed + customer sign-off',
+        'tip': 'QC chuẩn bị kỹ = pass lần 1 = tiết kiệm thời gian + chi phí retest.',
+    },
+    {
+        'week': 'Tuần 11–12',
+        'phase': '📊 Đóng dự án & Lessons Learned',
+        'title': 'Wrap-up, báo cáo, handover',
+        'who_what': [
+            ('PM', [
+                'All tasks COMPLETED → Phase % = 100% → Overall = 100%',
+                'Tạo Progress Report cuối cùng: RAG = ON_TRACK hoặc DELAYED + narrative',
+                'Review tất cả Issues → đảm bảo CLOSED',
+                'Review Risk Register → CLOSED tất cả risks',
+                'Close COs → đảm bảo customer approval',
+            ]),
+            ('PM', [
+                'IL_4 COGS Dashboard: Sync COGS Actual lần cuối',
+                '⚡ Generate All Variance → điền Root Cause cho khoản lệch >5%',
+                'Finalize COGS → khóa vĩnh viễn',
+                'Chuyển project → COMPLETED → CLOSED',
+                'Tạo Benchmark: auto-fill α/β/γ → nhập Lessons Learned',
+            ]),
+            ('SA / Engineer', [
+                'Upload tài liệu handover, as-built drawings vào task files',
+                'Comment final notes trong tasks nếu có',
+                'Review Lessons Learned cùng PM',
+            ]),
+        ],
+        'deliverable': 'Project CLOSED + Benchmark + Variance Analysis + Lessons Learned',
+        'tip': 'Benchmark chất lượng → estimate dự án sau chính xác hơn → GP% cải thiện.',
+    },
+]
+
+
+TRAINING_SCENARIOS = [
+    {
+        'id': 'S1',
+        'title': '🆕 Kịch bản 1: Dự án mới — từ ký HĐ đến gán task đầu tiên',
+        'context': 'Dự án IL-2026-060 Watson Thailand AMR vừa ký hợp đồng. PM: Quý. Team: 2 Engineers (Hiệp, Thành) + 1 SA (Minh). Cần setup WBS trong 1 buổi chiều.',
+        'actors': ['PM (Quý)', 'SA (Minh)', 'Engineer (Hiệp)', 'Engineer (Thành)'],
+        'timeline': [
+            ('14:00', 'PM', 'Tạo project IL_1 → status CONTRACTED. Edit financial: Contract Value, Billing Type, Timeline.'),
+            ('14:10', 'PM', 'IL_7 Team → ➕ Add 3 members: Minh (SA, 100%), Hiệp (Eng, 100%), Thành (Eng, 80%). Email tự gửi cho cả 3.'),
+            ('14:15', 'PM', 'IL_6 WBS → 📦 Load Template → 7 phases. Chỉnh weight: Implementation 40%, Commissioning 25%.'),
+            ('14:30', 'PM', 'Tab All Tasks: tạo 12 tasks cho phase Implementation + 5 cho Commissioning.'),
+            ('14:45', 'PM', 'Assign: Hiệp nhận 8 tasks (lắp đặt AMR), Thành nhận 4 tasks (cấu hình software), Minh nhận review tasks.'),
+            ('14:50', 'PM', 'Đính kèm site layout PDF + AMR spec vào phase Implementation.'),
+            ('15:00', 'Engineer (Hiệp)', 'Nhận 8 email "Task Assigned". Mở My Tasks → review deadlines → comment hỏi PM về site access schedule.'),
+            ('15:05', 'Engineer (Thành)', 'Nhận 4 email. Mở My Tasks → thấy 4 tasks NOT_STARTED. OK, bắt đầu từ task priority HIGH nhất.'),
+            ('15:10', 'SA (Minh)', 'Nhận email member added + task assigned. Mở Dashboard → thấy 17 tasks, 0% completion.'),
+            ('15:15', 'PM', 'Mở Dashboard → confirm: 17 tasks tạo, 3 members, assignments đúng. Gửi email kick-off cho team.'),
+        ],
+        'outcome': '17 tasks assigned, team nhận email, WBS sẵn sàng. Thời gian setup: ~75 phút.',
+        'lessons': 'Load template tiết kiệm ~20 phút so với tạo thủ công. Assign ngay → email ngay → team biết việc ngay.',
+    },
+    {
+        'id': 'S2',
+        'title': '🔴 Kịch bản 2: Engineer bị blocked — escalation chain',
+        'context': 'Hiệp đang lắp AMR nhưng cable tray chưa được lắp (do vendor trễ). Task "Install AMR Unit 1-5" bị kẹt 3 ngày.',
+        'actors': ['Engineer (Hiệp)', 'PM (Quý)', 'Vendor (cable tray)'],
+        'timeline': [
+            ('Thứ 2, 9:00', 'Engineer (Hiệp)', 'My Tasks → task "Install AMR 1-5" → ⚡ Quick Update → set BLOCKED. Lý do: "Chờ cable tray, vendor hẹn giao 15/4 nhưng chưa xác nhận."'),
+            ('Thứ 2, 9:01', 'Hệ thống', 'Email 🔴 [BLOCKED] gửi tự động đến PM Quý.'),
+            ('Thứ 2, 9:15', 'PM (Quý)', 'Nhận email → click "Open in ERP" → đọc lý do block. Mở Dashboard → thấy BLOCKED trong Action Required.'),
+            ('Thứ 2, 9:20', 'PM (Quý)', 'Comment trong task: "Đã liên hệ vendor, confirm giao 16/4. Hiệp chuyển sang task khác trước."'),
+            ('Thứ 2, 9:25', 'PM (Quý)', 'IL_8 → ➕ Report Issue: "Cable tray delivery delayed", severity HIGH, assign vendor contact.'),
+            ('Thứ 2, 9:30', 'Engineer (Hiệp)', 'Đọc comment PM → chuyển sang task "Configure AMR Software" (không bị block).'),
+            ('Thứ 4, 14:00', 'PM (Quý)', 'Vendor giao cable tray → comment "Đã nhận cable tray, Hiệp resume lắp đặt".'),
+            ('Thứ 4, 14:30', 'Engineer (Hiệp)', '⚡ Quick Update → task "Install AMR 1-5" → IN_PROGRESS. Bắt đầu lắp.'),
+            ('Thứ 5, 17:00', 'PM (Quý)', 'IL_8 → Edit Issue → status RESOLVED, ghi Resolution: "Vendor giao trễ 1 ngày, không ảnh hưởng milestone chính."'),
+        ],
+        'outcome': 'Block gỡ trong 2 ngày. Issue tracked. Engineer không idle (chuyển task khác). PM kiểm soát tình hình.',
+        'lessons': 'Flag BLOCKED ngay (đừng chờ) → PM biết → action nhanh. Ghi Issue để track → Lessons Learned cuối dự án.',
+    },
+    {
+        'id': 'S3',
+        'title': '📝 Kịch bản 3: Scope change — Change Order flow',
+        'context': 'Khách hàng Watson yêu cầu thêm 3 AMR (từ 10 lên 13 units). Ảnh hưởng: +cost, +schedule 2 tuần, +tasks.',
+        'actors': ['PM (Quý)', 'SA (Minh)', 'Customer (Watson)'],
+        'timeline': [
+            ('Ngày 1, AM', 'Customer', 'Email yêu cầu thêm 3 AMR units. PM nhận → bắt đầu đánh giá impact.'),
+            ('Ngày 1, PM', 'SA (Minh)', 'Đánh giá technical impact: thêm 3 stations, cần thêm 10 man-days lắp đặt, +cable +power.'),
+            ('Ngày 1, PM', 'PM (Quý)', 'IL_8 → tab COs → ➕ New Change Order: Type=SCOPE_AND_COST, Title="Add 3 AMR units".'),
+            ('Ngày 1, PM', 'PM (Quý)', 'CO details: Original 5B → Revised 5.8B (+800M), Schedule +14 days. Status = DRAFT.'),
+            ('Ngày 2, AM', 'PM (Quý)', 'Review CO → set SUBMITTED. Gửi cho management approve.'),
+            ('Ngày 2, PM', 'PM (Quý)', 'Internal approved → Edit CO → set APPROVED + Approved By.'),
+            ('Ngày 3', 'PM (Quý)', 'Gửi CO cho Watson → đàm phán → Watson ký → tick Customer Approved + ref number.'),
+            ('Ngày 4', 'PM (Quý)', 'IL_1 → Edit project → Amended Contract Value = 5.8B.'),
+            ('Ngày 4', 'PM (Quý)', 'IL_2 → Tạo Estimate V2: Pre-fill từ V1 → thêm 3 AMR line items → Activate.'),
+            ('Ngày 4', 'PM (Quý)', 'IL_6 → ➕ Add 3 tasks mới cho 3 AMR → assign engineer → update phase dates.'),
+            ('Ngày 5', 'PM (Quý)', 'IL_8 → thêm Risk: "Thêm scope có thể ảnh hưởng deadline commissioning". Mitigation: tăng allocation Hiệp lên 120%.'),
+        ],
+        'outcome': 'CO approved + tracked. Contract updated. Estimate V2 active. New tasks assigned. Risk logged.',
+        'lessons': 'CO phải tạo TRƯỚC khi thay đổi → audit trail rõ ràng. Cập nhật đồng bộ: Contract → Estimate → WBS → Risk.',
+    },
+    {
+        'id': 'S4',
+        'title': '🔴 Kịch bản 4: FAT thất bại — retest flow',
+        'context': 'FAT cho Conveyor Line 1 thất bại: 45/50 items passed, 5 items failed (alignment + speed). Cần retest.',
+        'actors': ['Engineer (Thành)', 'PM (Quý)', 'Customer witness'],
+        'timeline': [
+            ('Ngày FAT, 8:00', 'PM (Quý)', 'IL_9 → QC đã PLANNED → Thành (inspector) bắt đầu.'),
+            ('Ngày FAT, 8:00', 'Engineer (Thành)', 'Edit QC → set IN_PROGRESS. Bắt đầu kiểm tra 50 items.'),
+            ('Ngày FAT, 17:00', 'Engineer (Thành)', 'Kết quả: Total=50, Passed=45, Failed=5. Set status = FAILED.'),
+            ('Ngày FAT, 17:00', 'Engineer (Thành)', 'Remarks: "5 items failed: alignment (3), speed calibration (2)". Next Action: "Re-align + recalibrate". Retest Date: +5 days.'),
+            ('Ngày FAT, 17:05', 'Engineer (Thành)', 'Upload photos + test report PDF. Customer witness: Mr. Tanaka ghi nhận.'),
+            ('Ngày FAT+1', 'PM (Quý)', 'Dashboard → QC Failed = 1 → review details.'),
+            ('Ngày FAT+1', 'PM (Quý)', 'IL_8 → ➕ Issue: "FAT Line 1 failed — alignment & speed", severity HIGH, assign Thành.'),
+            ('Ngày FAT+1', 'PM (Quý)', 'IL_6 → ➕ Add task: "Fix FAT failures Line 1", assign Thành, due = retest date - 1.'),
+            ('Ngày FAT+3', 'Engineer (Thành)', 'Fix xong → task COMPLETED. Comment: "Aligned + recalibrated all 5 items."'),
+            ('Ngày FAT+5', 'Engineer (Thành)', 'Retest: Edit QC → Total=5 (chỉ test lại failed items), Passed=5, Failed=0 → PASSED.'),
+            ('Ngày FAT+5', 'PM (Quý)', 'Tick Customer Signed Off. Issue → CLOSED. Phase Commissioning completion tăng.'),
+        ],
+        'outcome': 'FAT passed sau retest. Issue tracked. Evidence đầy đủ: photos + reports + customer sign.',
+        'lessons': 'Ghi kết quả chi tiết (item nào fail, lý do gì) → fix đúng → retest nhanh. Track qua cả QC + Issue + Task.',
+    },
+    {
+        'id': 'S5',
+        'title': '📊 Kịch bản 5: Cuối dự án — PM đóng project đúng quy trình',
+        'context': 'Dự án IL-2026-060 hoàn thành. Tất cả tasks COMPLETED, QC passed, customer handed over. Cần close đúng quy trình.',
+        'actors': ['PM (Quý)'],
+        'timeline': [
+            ('Ngày 1', 'PM', 'IL_6 → Dashboard → confirm Overall = 100%. All phases COMPLETED.'),
+            ('Ngày 1', 'PM', 'IL_8 → confirm tất cả Issues CLOSED, Risks CLOSED, COs finalized.'),
+            ('Ngày 1', 'PM', 'IL_9 → Tạo Progress Report cuối: Type=MILESTONE, RAG=ON_TRACK, điền Accomplishments + Lessons.'),
+            ('Ngày 1', 'PM', 'IL_9 → confirm tất cả QC PASSED + Customer Signed Off.'),
+            ('Ngày 2', 'PM', 'IL_3 → Cost Tracking: approve hết Labor Logs + Expenses pending.'),
+            ('Ngày 2', 'PM', 'IL_4 → COGS Dashboard → nhập A, B, C, F (thủ công) → 🔄 Sync (D, E tự tính).'),
+            ('Ngày 2', 'PM', 'IL_4 → Tab Variance → ⚡ Generate All Variance → 7 rows auto-fill.'),
+            ('Ngày 2', 'PM', 'Điền Root Cause cho khoản lệch >5%: D lệch +12% → Root Cause: "Scope change +3 AMR, delay cable tray."'),
+            ('Ngày 3', 'PM', 'IL_4 → Finalize COGS (khóa vĩnh viễn).'),
+            ('Ngày 3', 'PM', 'IL_1 → Edit project → status COMPLETED → CLOSED.'),
+            ('Ngày 3', 'PM', 'IL_4 → Tab Benchmarks → ➕ Add → auto-fill α/β/γ + GP% → nhập Lessons Learned.'),
+        ],
+        'outcome': 'Project CLOSED. COGS finalized. Variance analyzed. Benchmark saved. Audit trail hoàn chỉnh.',
+        'lessons': 'Thứ tự: Approve hết → Sync → Variance → Finalize → Close → Benchmark. Không thể đảo ngược sau Finalize.',
+    },
+    {
+        'id': 'S6',
+        'title': '⚠️ Kịch bản 6: Dự án bị trễ — PM đánh giá lại resource',
+        'context': 'Dự án trễ 3 tuần. Phase Implementation 60% (target 90%). 2 engineer over-allocated trên nhiều dự án.',
+        'actors': ['PM (Quý)', 'Engineer (Hiệp)', 'Engineer (Thành)'],
+        'timeline': [
+            ('Review meeting', 'PM', 'IL_6 Dashboard → Overall 52% (target 75%). Phase Implementation: 60% vs plan 90%. ⏰ 5 overdue tasks.'),
+            ('Review meeting', 'PM', 'IL_7 → Workload Matrix: Hiệp 150% (over 3 dự án), Thành 130%.'),
+            ('Review meeting', 'PM', 'Quyết định: (1) Giảm Hiệp allocation dự án khác, (2) Thêm 1 engineer mới.'),
+            ('Sau meeting', 'PM', 'IL_7 → ➕ Add Member: Long (Eng, 100%). Email tự gửi.'),
+            ('Sau meeting', 'PM', 'IL_6 → Reassign 3 tasks của Hiệp cho Long. Hiệp nhận email "Task Reassigned", Long nhận "Task Assigned".'),
+            ('Sau meeting', 'PM', 'IL_6 → Edit overdue tasks: extend planned_end + ghi reason trong comment.'),
+            ('Sau meeting', 'PM', 'IL_8 → ➕ Risk: "Schedule delay risk — Implementation phase behind 30%". Mitigation: "Added 1 engineer, reassigned tasks."'),
+            ('Sau meeting', 'PM', 'IL_9 → Progress Report: RAG = AT_RISK. Narrative: recovery plan + expected back on track in 2 weeks.'),
+            ('2 tuần sau', 'PM', 'Dashboard → Implementation 85% (recovered). Overdue tasks giảm từ 5 → 1.'),
+            ('2 tuần sau', 'PM', 'IL_9 → Progress Report: RAG = ON_TRACK. Narrative: "Recovery successful."'),
+        ],
+        'outcome': 'Nhận diện bottleneck qua Dashboard + Workload Matrix → hành động: thêm resource + reassign → recovery 2 tuần.',
+        'lessons': 'Kiểm tra Workload Matrix 2 tuần/lần → phát hiện over-allocation sớm. Dashboard cho biết vấn đề, Workload Matrix cho biết nguyên nhân.',
+    },
+]
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  SECTION 9: PAGE LAYOUT                                                    ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 st.title("📚 IL Project — Hướng dẫn & Q&A")
 
-tab_quickref, tab_sop, tab_qa, tab_map = st.tabs([
+tab_quickref, tab_sop, tab_qa, tab_lifecycle, tab_scenarios, tab_map = st.tabs([
     "📋 Tham chiếu nhanh",
     "📝 SOP từng nghiệp vụ",
     "❓ Q&A tình huống thực tế",
+    "🎓 WBS Lifecycle",
+    "🎭 Kịch bản Training",
     "🗺️ Sơ đồ tổng quan",
 ])
 
@@ -1699,7 +1994,137 @@ with tab_qa:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 4 — MODULE MAP (Sơ đồ tổng quan)
+# TAB 4 — WBS LIFECYCLE (End-to-End Training)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_lifecycle:
+    st.subheader("🎓 WBS Lifecycle — Dự án từ đầu đến cuối")
+    st.markdown(
+        "Hướng dẫn toàn bộ vòng đời WBS: **ai làm gì**, **khi nào**, **ở đâu trên hệ thống**. "
+        "Dùng để training nhân viên mới và căn chỉnh phối hợp giữa PM, SA, Engineer."
+    )
+    st.divider()
+
+    # ── Role Legend ──
+    st.markdown("#### 👤 Vai trò tham gia")
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    rc1.info("**🔵 PM**\nQuản lý dự án\nFull CRUD\nDashboard + Reports")
+    rc2.success("**🟢 SA / Senior**\nLead kỹ thuật\nTạo task, review\nHỗ trợ engineer")
+    rc3.warning("**🟡 Engineer / FAE**\nThực hiện task\nQuick Update hàng ngày\nBáo cáo blocker")
+    rc4.markdown(
+        '<div style="background:#f0f0f0;padding:12px;border-radius:8px">'
+        '<b>⚪ Viewer (Sales)</b><br>Xem tiến độ<br>Read-only<br>Comment nếu cần</div>',
+        unsafe_allow_html=True
+    )
+    st.divider()
+
+    # ── Timeline Walkthrough ──
+    for i, phase in enumerate(WBS_LIFECYCLE_PHASES):
+        with st.expander(
+            f"**{phase['week']}** — {phase['phase']} {phase['title']}",
+            expanded=(i == 0),
+        ):
+            for role, actions in phase['who_what']:
+                st.markdown(f"**👤 {role}:**")
+                for action in actions:
+                    if action.startswith("  "):
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{action.strip()}")
+                    else:
+                        st.markdown(f"- {action}")
+
+            st.divider()
+            st.markdown(f"📦 **Deliverable:** {phase['deliverable']}")
+            st.caption(f"💡 {phase['tip']}")
+
+    # ── Summary Timeline ──
+    st.divider()
+    st.markdown("#### 📐 Tóm tắt Timeline")
+    st.info(
+        "**Tuần 0:** Setup WBS + Team + Assignments\n\n"
+        "**Tuần 1–2:** Kick-off, Engineers bắt đầu, PM monitor daily\n\n"
+        "**Tuần 3–6:** Vòng lặp hàng ngày (Eng 2', PM 5') + weekly review\n\n"
+        "**Tuần 7–8:** Xử lý blockers, issues, change orders\n\n"
+        "**Tuần 9–10:** Commissioning + FAT/SAT + Quality\n\n"
+        "**Tuần 11–12:** Close project + COGS + Variance + Benchmark"
+    )
+
+    st.divider()
+    st.markdown("#### ⏱️ Nhịp phối hợp khuyến nghị")
+    rh1, rh2, rh3 = st.columns(3)
+    rh1.success(
+        "**Hàng ngày**\n\n"
+        "Engineer: 2 phút\n"
+        "- My Tasks → Quick Update\n"
+        "- Flag BLOCKED ngay\n\n"
+        "PM: 5 phút\n"
+        "- Dashboard → Action Required"
+    )
+    rh2.info(
+        "**Hàng tuần**\n\n"
+        "PM: 30 phút\n"
+        "- Phase Progress review\n"
+        "- Workload Matrix check\n"
+        "- Progress Report\n"
+        "- Risk Register review"
+    )
+    rh3.warning(
+        "**2 tuần / lần**\n\n"
+        "PM: 1 giờ\n"
+        "- Workload rebalance\n"
+        "- Cost tracking (IL_3)\n"
+        "- COGS sync (IL_4)\n"
+        "- Stakeholder update"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 — TRAINING SCENARIOS (Kịch bản giả định)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_scenarios:
+    st.subheader("🎭 Kịch bản Training — Tình huống giả định")
+    st.markdown(
+        "Mỗi kịch bản mô phỏng một tình huống thực tế với **context**, **actors**, **timeline chi tiết**, "
+        "và **lessons learned**. Dùng cho training nhóm hoặc tự học."
+    )
+
+    # Quick nav
+    st.caption("Chọn kịch bản:")
+    _scenario_labels = [f"{s['id']}: {s['title']}" for s in TRAINING_SCENARIOS]
+    sc_choice = st.radio(
+        "Scenario", _scenario_labels,
+        horizontal=True, label_visibility="collapsed",
+        key="_scenario_nav",
+    )
+    sc_idx = _scenario_labels.index(sc_choice)
+    sc = TRAINING_SCENARIOS[sc_idx]
+
+    st.divider()
+
+    # ── Scenario Content ──
+    st.markdown(f"### {sc['title']}")
+
+    # Context
+    st.info(f"**📋 Bối cảnh:** {sc['context']}")
+
+    # Actors
+    st.markdown(f"**👥 Nhân vật:** {' · '.join(sc['actors'])}")
+    st.divider()
+
+    # Timeline
+    st.markdown("#### ⏱️ Diễn biến chi tiết")
+    for time, actor, action in sc['timeline']:
+        with st.container(border=True):
+            tc1, tc2 = st.columns([1, 6])
+            tc1.caption(f"**{time}**")
+            tc2.markdown(f"**{actor}** — {action}")
+
+    # Outcome + Lessons
+    st.divider()
+    st.success(f"**✅ Kết quả:** {sc['outcome']}")
+    st.warning(f"**💡 Bài học:** {sc['lessons']}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — MODULE MAP (Sơ đồ tổng quan)
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_map:
     st.subheader("🗺️ Bản đồ Module & Luồng công việc")
