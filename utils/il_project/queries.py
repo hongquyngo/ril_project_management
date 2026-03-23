@@ -19,6 +19,29 @@ from .wbs_helpers import log_perf
 logger = logging.getLogger(__name__)
 
 
+# ── Permission check helper ──────────────────────────────────────────────────
+def _check_perm(action: str, project_id, employee_id, is_admin=False):
+    """
+    Backend permission guard. Raises PermissionDenied if not allowed.
+    Only runs if employee_id is provided (backward compat).
+    """
+    if employee_id is None:
+        return  # Skip check (backward compat — caller didn't pass employee_id)
+    from .permissions import require_permission
+    require_permission(action, project_id, employee_id, is_admin)
+
+
+def _get_entity_project_id(table: str, entity_id: int) -> int:
+    """Look up project_id from entity table. Used by approve functions."""
+    rows = execute_query(
+        f"SELECT project_id FROM {table} WHERE id = :id AND delete_flag = 0 LIMIT 1",
+        {'id': entity_id},
+    )
+    if not rows:
+        raise ValueError(f"{table} record {entity_id} not found")
+    return rows[0]['project_id']
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LOOKUPS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,11 +289,13 @@ def get_active_estimate(project_id: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
-def create_estimate(data: Dict, created_by: str) -> int:
+def create_estimate(data: Dict, created_by: str,
+                    caller_employee_id: int = None, caller_is_admin: bool = False) -> int:
     """
     Insert new estimate. Caller must call activate_estimate() in same
     transaction if this should be the active one.
     """
+    _check_perm('estimate.create', data.get('project_id'), caller_employee_id, caller_is_admin)
     sql = """
         INSERT INTO il_project_cogs_estimate (
             project_id, estimate_version, estimate_label, estimate_type, is_active,
@@ -303,11 +328,13 @@ def create_estimate(data: Dict, created_by: str) -> int:
         return result.lastrowid
 
 
-def activate_estimate(project_id: int, estimate_id: int, modified_by: str) -> bool:
+def activate_estimate(project_id: int, estimate_id: int, modified_by: str,
+                      caller_employee_id: int = None, caller_is_admin: bool = False) -> bool:
     """
     Atomically deactivate all other estimates → activate the target.
     App-layer replacement for the removed trigger.
     """
+    _check_perm('estimate.activate', project_id, caller_employee_id, caller_is_admin)
     try:
         with get_transaction() as conn:
             conn.execute(text("""
@@ -443,6 +470,10 @@ def update_labor_log(log_id: int, data: Dict, modified_by: str) -> bool:
 
 
 def approve_labor_log(log_id: int, approved_by: int, status: str = 'APPROVED') -> bool:
+    """Approve labor log. Backend-enforced: only PM of project or Admin."""
+    # Permission guard: approved_by IS employee_id
+    pid = _get_entity_project_id('il_project_labor_logs', log_id)
+    _check_perm('cost.approve', pid, approved_by)
     rows = execute_update("""
         UPDATE il_project_labor_logs
         SET approval_status = :status, approved_by = :by, approved_date = NOW()
@@ -529,6 +560,9 @@ def create_expense(data: Dict, created_by: str) -> int:
 
 
 def approve_expense(expense_id: int, approved_by: int, status: str = 'APPROVED') -> bool:
+    """Approve expense. Backend-enforced: only PM of project or Admin."""
+    pid = _get_entity_project_id('il_project_expenses', expense_id)
+    _check_perm('cost.approve', pid, approved_by)
     rows = execute_update("""
         UPDATE il_project_expenses
         SET approval_status = :status, approved_by = :by, approved_date = NOW()
@@ -699,11 +733,13 @@ def get_all_cogs_summary_df() -> pd.DataFrame:
     """)
 
 
-def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
+def sync_cogs_actual(project_id: int, modified_by: str,
+                     caller_employee_id: int = None, caller_is_admin: bool = False) -> Dict:
     """
     Aggregate from detail tables → upsert il_project_cogs_actual.
     Returns the computed values dict.
     """
+    _check_perm('cogs.sync', project_id, caller_employee_id, caller_is_admin)
     try:
         with get_transaction() as conn:
             # D: direct labor (non-PRE_SALES, APPROVED)
@@ -854,8 +890,10 @@ def sync_cogs_actual(project_id: int, modified_by: str) -> Dict:
         raise
 
 
-def update_cogs_actual_fields(project_id: int, data: Dict, modified_by: str) -> bool:
+def update_cogs_actual_fields(project_id: int, data: Dict, modified_by: str,
+                              caller_employee_id: int = None, caller_is_admin: bool = False) -> bool:
     """Manual override of A, B, C, F fields."""
+    _check_perm('cogs.manual_entry', project_id, caller_employee_id, caller_is_admin)
     sql = """
         UPDATE il_project_cogs_actual SET
             a_equipment_cost = :a_equipment_cost, a_notes = :a_notes,
@@ -871,7 +909,10 @@ def update_cogs_actual_fields(project_id: int, data: Dict, modified_by: str) -> 
     return rows > 0
 
 
-def finalize_cogs_actual(project_id: int, finalized_by: str) -> bool:
+def finalize_cogs_actual(project_id: int, finalized_by: str,
+                         caller_employee_id: int = None, caller_is_admin: bool = False) -> bool:
+    """Finalize COGS. Irreversible — Admin only (backend-enforced)."""
+    _check_perm('cogs.finalize', project_id, caller_employee_id, caller_is_admin)
     rows = execute_update("""
         UPDATE il_project_cogs_actual
         SET is_finalized = 1, finalized_date = NOW(), finalized_by = :by,

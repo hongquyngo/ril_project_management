@@ -1,4 +1,4 @@
-# pages/IL_2_📊_Estimate_GP.py
+# pages/2_📊_Estimate_GP.py
 """
 Estimate GP — A→F formula + Go/No-Go + Product/Costbook integration.
 Products from DB catalog, cost from Costbooks (vendor quotes), sell from Quotations.
@@ -25,6 +25,12 @@ auth = AuthManager()
 st.set_page_config(page_title="Estimate GP", page_icon="📊", layout="wide")
 auth.require_auth()
 user_id = str(auth.get_user_id())
+user_role = st.session_state.get('user_role', '')
+is_admin = auth.is_admin()
+emp_int_id = st.session_state.get('employee_id')
+
+from utils.il_project.permissions import PermissionContext, get_role_badge
+ctx = PermissionContext(employee_id=emp_int_id, is_admin=is_admin, user_role=user_role)
 
 @st.cache_data(ttl=300)
 def _load_projects():
@@ -68,6 +74,17 @@ with st.sidebar:
     st.divider()
     st.caption(f"α={pt.get('default_alpha',0.06)} β={pt.get('default_beta',0.40)} γ={pt.get('default_gamma',0.04)}")
     st.caption(f"GO ≥{pt.get('gp_go_threshold',25)}% | COND ≥{pt.get('gp_conditional_threshold',18)}%")
+    st.divider()
+    st.caption(f"Role: {get_role_badge(ctx.role(project_id))}")
+
+# ── Page-level access check ──────────────────────────────────────────────────
+if not ctx.can('estimate.view', project_id):
+    st.warning("⛔ Bạn không có quyền xem Estimate của dự án này.")
+    st.stop()
+
+_can_view_costs = ctx.can('estimate.view_costs', project_id)
+_can_create     = ctx.can('estimate.create', project_id)
+_can_activate   = ctx.can('estimate.activate', project_id)
 
 all_estimates = _cached_estimates(project_id, _v=st.session_state.get('_est_v', 0))
 active_est = next((e for e in all_estimates if e.get('is_active')), None)
@@ -341,6 +358,9 @@ tab_new, tab_active, tab_history = st.tabs(["📝 New Estimate", "✅ Active Est
 # TAB 1 — New Estimate
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_new:
+    if not _can_create:
+        st.info("⛔ Bạn không có quyền tạo estimate cho dự án này. Chỉ PM, SA/Senior, hoặc Admin.")
+        st.caption("Chuyển sang tab **Active Estimate** để xem estimate hiện tại.")
     st.markdown(f"**Project:** `{project['project_code']}` — {project['project_name']}")
     prefill = {}
     if active_est:
@@ -370,18 +390,21 @@ with tab_new:
     with col_form:
         # ── Section 1: Line Items ────────────────────────────────────────
         st.subheader("① Line Items")
-        b1, b2, b3, b4 = st.columns(4)
-        if b1.button("🔍 Equipment (A)", use_container_width=True,
-                      help="Add equipment/hardware products from the product catalog (COGS category A)"):
-            _dialog_add_product("A")
-        if b2.button("🔧 Fabrication (C)", use_container_width=True,
-                      help="Add custom fabrication items — metalwork, racking, wiring (COGS category C)"):
-            _dialog_add_product("C")
-        if b3.button("📦 Import Costbook", use_container_width=True,
-                      help="Bulk import all products from a vendor costbook"):
-            _dialog_import_costbook("A")
-        if b4.button("🗑 Clear All", use_container_width=True,
-                     help="Remove all line items"): _clear_items(); st.rerun()
+        if not _can_create:
+            pass  # Buttons hidden — read-only mode
+        else:
+            b1, b2, b3, b4 = st.columns(4)
+            if b1.button("🔍 Equipment (A)", use_container_width=True,
+                          help="Add equipment/hardware products from the product catalog (COGS category A)"):
+                _dialog_add_product("A")
+            if b2.button("🔧 Fabrication (C)", use_container_width=True,
+                          help="Add custom fabrication items — metalwork, racking, wiring (COGS category C)"):
+                _dialog_add_product("C")
+            if b3.button("📦 Import Costbook", use_container_width=True,
+                          help="Bulk import all products from a vendor costbook"):
+                _dialog_import_costbook("A")
+            if b4.button("🗑 Clear All", use_container_width=True,
+                         help="Remove all line items"): _clear_items(); st.rerun()
         items = st.session_state["_est_items"]
         if items:
             rows = []
@@ -410,25 +433,26 @@ with tab_new:
         else:
             a_total = c_total = 0
             st.info("No items yet. Add from catalog or import costbook.")
-        with st.expander("✏️ Manual item (not in catalog)"):
-            mc1, mc2 = st.columns(2)
-            m_cat = mc1.selectbox("Category", ["A","C","SERVICE"], key="m_cat",
-                                   help="A = Equipment, C = Fabrication, SERVICE = Service items")
-            m_desc = mc2.text_input("Description *", key="m_desc")
-            md1, md2, md3 = st.columns(3)
-            m_qty = md1.number_input("Qty", value=1.0, min_value=0.01, format="%.2f", key="m_qty")
-            m_price = md2.number_input("Unit Cost (VND)", value=0.0, format="%.0f", key="m_price")
-            m_vendor = md3.text_input("Vendor", key="m_vendor")
-            if st.button("➕ Add manual", key="m_add", use_container_width=True):
-                if m_desc and m_price > 0:
-                    _add_item({'cogs_category': m_cat, 'product_id': None, 'item_description': m_desc,
-                        'brand_name': '', 'pt_code': '', 'costbook_detail_id': None, 'vendor_name': m_vendor,
-                        'vendor_quote_ref': '', 'costbook_number': '', 'unit_cost': m_price,
-                        'cost_currency_code': 'VND', 'cost_currency_id': None, 'cost_exchange_rate': 1.0,
-                        'quotation_detail_id': None, 'unit_sell': 0, 'sell_currency_code': '',
-                        'sell_currency_id': None, 'sell_exchange_rate': 1.0,
-                        'quantity': m_qty, 'uom': 'Pcs', 'notes': None})
-                    st.rerun()
+        if _can_create:
+            with st.expander("✏️ Manual item (not in catalog)"):
+                mc1, mc2 = st.columns(2)
+                m_cat = mc1.selectbox("Category", ["A","C","SERVICE"], key="m_cat",
+                                       help="A = Equipment, C = Fabrication, SERVICE = Service items")
+                m_desc = mc2.text_input("Description *", key="m_desc")
+                md1, md2, md3 = st.columns(3)
+                m_qty = md1.number_input("Qty", value=1.0, min_value=0.01, format="%.2f", key="m_qty")
+                m_price = md2.number_input("Unit Cost (VND)", value=0.0, format="%.0f", key="m_price")
+                m_vendor = md3.text_input("Vendor", key="m_vendor")
+                if st.button("➕ Add manual", key="m_add", use_container_width=True):
+                    if m_desc and m_price > 0:
+                        _add_item({'cogs_category': m_cat, 'product_id': None, 'item_description': m_desc,
+                            'brand_name': '', 'pt_code': '', 'costbook_detail_id': None, 'vendor_name': m_vendor,
+                            'vendor_quote_ref': '', 'costbook_number': '', 'unit_cost': m_price,
+                            'cost_currency_code': 'VND', 'cost_currency_id': None, 'cost_exchange_rate': 1.0,
+                            'quotation_detail_id': None, 'unit_sell': 0, 'sell_currency_code': '',
+                            'sell_currency_id': None, 'sell_exchange_rate': 1.0,
+                            'quantity': m_qty, 'uom': 'Pcs', 'notes': None})
+                        st.rerun()
 
         # ── Section 2: Coefficients & Formula ────────────────────────────
         st.divider()
@@ -527,6 +551,8 @@ with tab_new:
         else: st.error(f"### ❌ NO-GO — {result['gp_percent']:.1f}%")
         if items: st.caption(f"{len(items)} line items | A={'items' if a_override==0 else 'override'}")
     if submitted:
+        if not _can_create:
+            st.error("⛔ Bạn không có quyền tạo estimate."); st.stop()
         if eff_a <= 0 and eff_c <= 0 and man_days <= 0 and eff_sales <= 0:
             st.warning("Enter at least one cost + Sales."); st.stop()
         li_notes = "; ".join([f"{it.get('cogs_category','')}: {(it.get('item_description','') or '')[:25]} x{it.get('quantity',0):.0f}" for it in items[:10]])
@@ -601,87 +627,121 @@ with tab_active:
     if gng_a == 'GO': hc2.success("✅ GO")
     elif gng_a == 'CONDITIONAL': hc2.warning("⚠️")
     elif gng_a == 'NO_GO': hc2.error("❌")
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Sales", fmt_vnd(active_est.get('sales_value')))
-    mc2.metric("COGS", fmt_vnd(active_est.get('total_cogs')))
-    mc3.metric("GP", fmt_vnd(active_est.get('estimated_gp')))
-    mc4.metric("GP%", fmt_percent(active_est.get('estimated_gp_percent')))
+
+    if _can_view_costs:
+        # Full view: Sales, COGS, GP, GP%
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Sales", fmt_vnd(active_est.get('sales_value')))
+        mc2.metric("COGS", fmt_vnd(active_est.get('total_cogs')))
+        mc3.metric("GP", fmt_vnd(active_est.get('estimated_gp')))
+        mc4.metric("GP%", fmt_percent(active_est.get('estimated_gp_percent')))
+    else:
+        # Limited view (Sales role): only sales value + result
+        mc1, mc2 = st.columns(2)
+        mc1.metric("Sales Value", fmt_vnd(active_est.get('sales_value')))
+        mc2.metric("Result", gng_a or '—')
+        st.caption("💡 Chi tiết vendor cost / GP chỉ hiển thị cho PM, SA, và Admin.")
+
     st.divider()
     li_df = get_estimate_line_items(active_est['id'])
     if not li_df.empty:
         st.subheader(f"📋 Line Items ({len(li_df)})")
         disp = li_df.copy()
-        disp['cost_total'] = disp['amount_cost_vnd'].apply(lambda v: f"{v:,.0f}" if v and str(v) not in ('','nan','None') else '—')
-        disp['sell_total'] = disp['amount_sell_vnd'].apply(lambda v: f"{v:,.0f}" if v and str(v) not in ('','nan','None','0','0.0') else '—')
-        st.dataframe(disp, width="stretch", hide_index=True,
-            column_config={'cogs_category': st.column_config.TextColumn('Cat', width=35),
-                'item_description': st.column_config.TextColumn('Product'),
-                'brand_name': st.column_config.TextColumn('Brand', width=80),
-                'vendor_name': st.column_config.TextColumn('Vendor'),
-                'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
-                'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
-                'cost_currency': st.column_config.TextColumn('CCY', width=40),
-                'cost_total': st.column_config.TextColumn('Cost VND'),
-                'sell_total': st.column_config.TextColumn('Sell VND'),
-                'costbook_number': st.column_config.TextColumn('Costbook'),
-                'vendor_quote_ref': st.column_config.TextColumn('Quote Ref'),
-                'id': None, 'product_id': None, 'pt_code': None, 'costbook_detail_id': None,
-                'quotation_detail_id': None, 'unit_sell': None, 'sell_currency': None,
-                'sell_exchange_rate': None, 'cost_exchange_rate': None, 'uom': None,
-                'view_order': None, 'amount_cost_vnd': None, 'amount_sell_vnd': None, 'notes': None})
-    st.divider()
-    fmap = {'A':'a_equipment_cost','B':'b_logistics_import','C':'c_custom_fabrication','D':'d_direct_labor','E':'e_travel_site_oh','F':'f_warranty_reserve'}
-    tc = float(active_est.get('total_cogs',0) or 0)
-    rows = [{'Item': COGS_LABELS[k], 'Amount': f"{float(active_est.get(f,0) or 0):,.0f}",
-             '%': f"{float(active_est.get(f,0) or 0)/tc*100:.1f}%" if tc > 0 else '—'} for k, f in fmap.items()]
-    rows.append({'Item': '**TOTAL**', 'Amount': f"{tc:,.0f}", '%': ''})
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    if active_est.get('assessment_notes'): st.info(f"📝 {active_est['assessment_notes']}")
-    # Attachments (Pattern A: medias junction)
-    est_atts = get_estimate_medias(active_est['id'])
-    if est_atts:
-        st.divider()
-        st.subheader(f"📎 Attachments ({len(est_atts)})")
-        for att in est_atts:
-            s3 = _get_s3()
-            url = s3.get_presigned_url(att['s3_key'], expiration=600) if s3 else None
-            cols = st.columns([4, 1])
-            desc_text = f" — {att['description']}" if att.get('description') else ""
-            cols[0].markdown(f"📄 **{att['filename']}**{desc_text}")
-            if url:
-                cols[1].markdown(f"[⬇️ Download]({url})")
-    # Line item attachments (Pattern A: medias junction)
-    li_atts = get_line_item_medias(active_est['id'])
-    if li_atts:
-        if not est_atts:
-            st.divider(); st.subheader("📎 Line Item Attachments")
+        if _can_view_costs:
+            # Full line item table with cost details
+            disp['cost_total'] = disp['amount_cost_vnd'].apply(lambda v: f"{v:,.0f}" if v and str(v) not in ('','nan','None') else '—')
+            disp['sell_total'] = disp['amount_sell_vnd'].apply(lambda v: f"{v:,.0f}" if v and str(v) not in ('','nan','None','0','0.0') else '—')
+            st.dataframe(disp, width="stretch", hide_index=True,
+                column_config={'cogs_category': st.column_config.TextColumn('Cat', width=35),
+                    'item_description': st.column_config.TextColumn('Product'),
+                    'brand_name': st.column_config.TextColumn('Brand', width=80),
+                    'vendor_name': st.column_config.TextColumn('Vendor'),
+                    'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
+                    'unit_cost': st.column_config.NumberColumn('Cost', format="%.2f"),
+                    'cost_currency': st.column_config.TextColumn('CCY', width=40),
+                    'cost_total': st.column_config.TextColumn('Cost VND'),
+                    'sell_total': st.column_config.TextColumn('Sell VND'),
+                    'costbook_number': st.column_config.TextColumn('Costbook'),
+                    'vendor_quote_ref': st.column_config.TextColumn('Quote Ref'),
+                    'id': None, 'product_id': None, 'pt_code': None, 'costbook_detail_id': None,
+                    'quotation_detail_id': None, 'unit_sell': None, 'sell_currency': None,
+                    'sell_exchange_rate': None, 'cost_exchange_rate': None, 'uom': None,
+                    'view_order': None, 'amount_cost_vnd': None, 'amount_sell_vnd': None, 'notes': None})
         else:
-            st.caption("**Line item attachments:**")
-        # Build lookup: line_item_id → item_description
-        li_desc_map = {}
-        if not li_df.empty:
-            li_desc_map = dict(zip(li_df['id'].astype(int), li_df['item_description']))
-        for att in li_atts:
-            desc = li_desc_map.get(att.get('line_item_id', 0), '')
-            st.caption(f"📎 {desc}: **{att['filename']}**")
+            # Limited view: product + quantity only (no cost/vendor info)
+            st.dataframe(disp, width="stretch", hide_index=True,
+                column_config={'cogs_category': st.column_config.TextColumn('Cat', width=35),
+                    'item_description': st.column_config.TextColumn('Product'),
+                    'brand_name': st.column_config.TextColumn('Brand', width=80),
+                    'quantity': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
+                    'uom': st.column_config.TextColumn('UOM', width=50),
+                    'id': None, 'product_id': None, 'pt_code': None, 'costbook_detail_id': None,
+                    'quotation_detail_id': None, 'unit_cost': None, 'unit_sell': None,
+                    'cost_currency': None, 'sell_currency': None,
+                    'cost_exchange_rate': None, 'sell_exchange_rate': None,
+                    'vendor_name': None, 'vendor_quote_ref': None, 'costbook_number': None,
+                    'view_order': None, 'amount_cost_vnd': None, 'amount_sell_vnd': None, 'notes': None})
+    st.divider()
+    if _can_view_costs:
+        fmap = {'A':'a_equipment_cost','B':'b_logistics_import','C':'c_custom_fabrication','D':'d_direct_labor','E':'e_travel_site_oh','F':'f_warranty_reserve'}
+        tc = float(active_est.get('total_cogs',0) or 0)
+        rows = [{'Item': COGS_LABELS[k], 'Amount': f"{float(active_est.get(f,0) or 0):,.0f}",
+                 '%': f"{float(active_est.get(f,0) or 0)/tc*100:.1f}%" if tc > 0 else '—'} for k, f in fmap.items()]
+        rows.append({'Item': '**TOTAL**', 'Amount': f"{tc:,.0f}", '%': ''})
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        if active_est.get('assessment_notes'): st.info(f"📝 {active_est['assessment_notes']}")
+        # Attachments (Pattern A: medias junction)
+        est_atts = get_estimate_medias(active_est['id'])
+        if est_atts:
+            st.divider()
+            st.subheader(f"📎 Attachments ({len(est_atts)})")
+            for att in est_atts:
+                s3 = _get_s3()
+                url = s3.get_presigned_url(att['s3_key'], expiration=600) if s3 else None
+                cols = st.columns([4, 1])
+                desc_text = f" — {att['description']}" if att.get('description') else ""
+                cols[0].markdown(f"📄 **{att['filename']}**{desc_text}")
+                if url:
+                    cols[1].markdown(f"[⬇️ Download]({url})")
+        # Line item attachments (Pattern A: medias junction)
+        li_atts = get_line_item_medias(active_est['id'])
+        if li_atts:
+            if not est_atts:
+                st.divider(); st.subheader("📎 Line Item Attachments")
+            else:
+                st.caption("**Line item attachments:**")
+            # Build lookup: line_item_id → item_description
+            li_desc_map = {}
+            if not li_df.empty:
+                li_desc_map = dict(zip(li_df['id'].astype(int), li_df['item_description']))
+            for att in li_atts:
+                desc = li_desc_map.get(att.get('line_item_id', 0), '')
+                st.caption(f"📎 {desc}: **{att['filename']}**")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — History
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_history:
     if not all_estimates: st.info("No estimates."); st.stop()
-    hist = [{'': '✅' if e.get('is_active') else '', 'Rev': e['estimate_version'],
-        'Label': e.get('estimate_label',''), 'Type': e.get('estimate_type',''),
-        'COGS': f"{float(e.get('total_cogs',0) or 0):,.0f}", 'Sales': f"{float(e.get('sales_value',0) or 0):,.0f}",
-        'GP%': fmt_percent(e.get('estimated_gp_percent')), 'Result': e.get('go_no_go_result','—'),
-        'α': e.get('alpha_rate',''), 'β': e.get('beta_rate',''), 'γ': e.get('gamma_rate',''),
-        'Created': e.get('created_date')} for e in all_estimates]
+    if _can_view_costs:
+        hist = [{'': '✅' if e.get('is_active') else '', 'Rev': e['estimate_version'],
+            'Label': e.get('estimate_label',''), 'Type': e.get('estimate_type',''),
+            'COGS': f"{float(e.get('total_cogs',0) or 0):,.0f}", 'Sales': f"{float(e.get('sales_value',0) or 0):,.0f}",
+            'GP%': fmt_percent(e.get('estimated_gp_percent')), 'Result': e.get('go_no_go_result','—'),
+            'α': e.get('alpha_rate',''), 'β': e.get('beta_rate',''), 'γ': e.get('gamma_rate',''),
+            'Created': e.get('created_date')} for e in all_estimates]
+    else:
+        # Limited view: no COGS/Sales/GP%/coefficients
+        hist = [{'': '✅' if e.get('is_active') else '', 'Rev': e['estimate_version'],
+            'Label': e.get('estimate_label',''), 'Type': e.get('estimate_type',''),
+            'Result': e.get('go_no_go_result','—'),
+            'Created': e.get('created_date')} for e in all_estimates]
     st.dataframe(pd.DataFrame(hist), width="stretch", hide_index=True,
         column_config={'': st.column_config.TextColumn('', width=30), 'Rev': st.column_config.NumberColumn('Rev', width=50),
             'α': st.column_config.NumberColumn('α', format="%.4f", width=70),
             'β': st.column_config.NumberColumn('β', format="%.4f", width=70),
             'γ': st.column_config.NumberColumn('γ', format="%.4f", width=70)})
-    if len(all_estimates) > 1:
+    if _can_activate and len(all_estimates) > 1:
         st.divider()
         rev_opts = [f"Rev {e['estimate_version']} — {e.get('estimate_label','')}" for e in all_estimates]
         sel_est = all_estimates[rev_opts.index(st.selectbox("Activate version", rev_opts))]

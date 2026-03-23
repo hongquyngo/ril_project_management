@@ -536,8 +536,22 @@ def recalc_pr_totals(pr_id: int) -> bool:
     return rows > 0
 
 
-def cancel_pr(pr_id: int, modified_by: str) -> bool:
+def cancel_pr(pr_id: int, modified_by: str,
+              caller_employee_id: int = None, caller_is_admin: bool = False) -> bool:
     """Cancel PR. Allowed from DRAFT, REVISION_REQUESTED, PENDING_APPROVAL, or APPROVED."""
+    # Permission guard: look up project_id from PR
+    if caller_employee_id is not None:
+        pr_rows = _execute_query(
+            "SELECT project_id, requester_id FROM il_purchase_requests WHERE id = :id AND delete_flag = 0 LIMIT 1",
+            {'id': pr_id},
+        )
+        if pr_rows:
+            from .permissions import can
+            pid = pr_rows[0]['project_id']
+            is_own = (pr_rows[0]['requester_id'] == caller_employee_id)
+            # PM/Admin can cancel any; Engineer can cancel own
+            if not (can('pr.cancel', pid, caller_employee_id, caller_is_admin) or is_own):
+                return False
     rows = _execute_update("""
         UPDATE il_purchase_requests
         SET status = 'CANCELLED', modified_by = :m, version = version + 1
@@ -620,7 +634,8 @@ def get_current_approver(pr_id: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
-def submit_pr(pr_id: int, modified_by: str) -> Dict:
+def submit_pr(pr_id: int, modified_by: str,
+              caller_employee_id: int = None, caller_is_admin: bool = False) -> Dict:
     """
     Submit PR for approval.
     1. Recalc totals
@@ -640,6 +655,13 @@ def submit_pr(pr_id: int, modified_by: str) -> Dict:
 
             if not pr_row:
                 return {'success': False, 'message': 'PR not found'}
+
+            # Permission guard: only PM of project or Admin
+            if caller_employee_id is not None:
+                from .permissions import can
+                if not can('pr.submit', pr_row.project_id, caller_employee_id, caller_is_admin):
+                    return {'success': False, 'message': '⛔ Permission denied: only PM of this project can submit PR'}
+
             if pr_row.status not in ('DRAFT', 'REVISION_REQUESTED'):
                 return {'success': False, 'message': f'Cannot submit PR in status {pr_row.status}'}
 
@@ -1667,7 +1689,8 @@ def validate_po_readiness(pr_id: int) -> Dict:
 # ══════════════════════════════════════════════════════════════════════
 
 def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: str,
-                      po_settings: Optional[Dict] = None) -> Dict:
+                      po_settings: Optional[Dict] = None,
+                      caller_employee_id: int = None, caller_is_admin: bool = False) -> Dict:
     """
     Create a PO in purchase_orders + product_purchase_orders from an approved PR.
 
@@ -1704,6 +1727,8 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
                     }, ...
                 },
             }
+        caller_employee_id: for backend permission check
+        caller_is_admin: for backend permission check
 
     Returns: {success, po_id, po_number, message}
     """
@@ -1720,6 +1745,13 @@ def create_po_from_pr(pr_id: int, buyer_company_id: int, created_by_keycloak: st
 
             if not pr:
                 return {'success': False, 'message': 'PR not found or not in APPROVED status'}
+
+            # Permission guard: only PM of project or Admin
+            if caller_employee_id is not None:
+                from .permissions import can
+                if not can('pr.create_po', pr.project_id, caller_employee_id, caller_is_admin):
+                    return {'success': False, 'message': '⛔ Permission denied: only PM of this project can create PO'}
+
             if not pr.vendor_id:
                 return {'success': False, 'message': 'PR has no vendor — cannot create PO'}
 

@@ -1,4 +1,4 @@
-# pages/IL_3_⏱️_Cost_Tracking.py
+# pages/3_⏱️_Cost_Tracking.py
 """
 Cost Tracking — Labor Logs / Expenses / Pre-sales Costs
 
@@ -33,6 +33,7 @@ from utils.il_project.helpers import (
 )
 from utils.il_project.s3_il import ILProjectS3Manager
 from utils.il_project.currency import get_rate_to_vnd, rate_status, fmt_rate
+from utils.il_project.permissions import PermissionContext, get_role_badge
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
@@ -41,7 +42,11 @@ st.set_page_config(page_title="Cost Tracking", page_icon="⏱️", layout="wide"
 auth.require_auth()
 user_id    = str(auth.get_user_id())
 emp_int_id = st.session_state.get('employee_id')  # employees.id — for FK approved_by
-is_pm      = st.session_state.get('user_role') in ('admin', 'manager')
+user_role  = st.session_state.get('user_role', '')
+is_admin   = auth.is_admin()
+
+# Permission context — replaces the old global `is_pm` pattern
+ctx = PermissionContext(employee_id=emp_int_id, is_admin=is_admin, user_role=user_role)
 
 if not emp_int_id:
     st.error("⚠️ Employee ID not found in session. Please re-login.")
@@ -131,11 +136,18 @@ with st.sidebar:
     # ── Action buttons (only when specific project selected) ──
     if not is_all_projects:
         st.divider()
-        bc1, bc2 = st.columns(2)
-        if bc1.button("➕ Log Labor", type="primary", use_container_width=True):
-            st.session_state["open_add_labor"] = True
-        if bc2.button("➕ Add Expense", type="primary", use_container_width=True):
-            st.session_state["open_add_expense"] = True
+        _can_add = ctx.can('cost.create_labor', project_id)
+        if _can_add:
+            bc1, bc2 = st.columns(2)
+            if bc1.button("➕ Log Labor", type="primary", use_container_width=True):
+                st.session_state["open_add_labor"] = True
+            if bc2.button("➕ Add Expense", type="primary", use_container_width=True):
+                st.session_state["open_add_expense"] = True
+        st.divider()
+        st.caption(f"Role: {get_role_badge(ctx.role(project_id))}")
+    else:
+        st.divider()
+        st.caption(f"Role: {get_role_badge(ctx.role())}")
 
 # ── Resolve filters ──
 phase_filter    = None if f_phase == "All" else f_phase
@@ -593,7 +605,7 @@ def _render_overview(labor_df: pd.DataFrame, exp_df: pd.DataFrame):
         st.info("No cost data found for the selected filters.")
 
     # ── Pending Approvals (PM only) ──────────────────────────────────────────
-    if is_pm and (len(pending_labor) > 0 or len(pending_exp) > 0):
+    if is_admin and (len(pending_labor) > 0 or len(pending_exp) > 0):
         st.divider()
         st.subheader("⏳ Pending Approvals")
 
@@ -706,18 +718,26 @@ def _render_labor_tab(pid: int, labor_df: pd.DataFrame):
         st.markdown(f"**Selected:** ID {row['id']} — {row['worker']} ({row['phase']}, {row['approval_status']})")
         ab1, ab2, ab3, ab4 = st.columns(4)
         if row.get('approval_status') == 'PENDING':
-            if ab1.button("✏️ Edit", key="labor_edit_btn", use_container_width=True):
-                _dialog_edit_labor(row, pid)
-            if is_pm and ab2.button("✅ Approve", key="labor_approve_btn", use_container_width=True):
-                approve_labor_log(row['id'], emp_int_id)
-                st.success("Approved!")
-                st.rerun()
+            # Edit: PM can edit any, others can edit own entry only
+            _can_edit = (
+                ctx.can('cost.edit_any', pid)
+                or (ctx.can('cost.edit_own', pid) and str(row.get('created_by', '')) == user_id)
+            )
+            if _can_edit:
+                if ab1.button("✏️ Edit", key="labor_edit_btn", use_container_width=True):
+                    _dialog_edit_labor(row, pid)
+            # Approve: PM of THIS project only (not global manager)
+            if ctx.can('cost.approve', pid):
+                if ab2.button("✅ Approve", key="labor_approve_btn", use_container_width=True):
+                    approve_labor_log(row['id'], emp_int_id)
+                    st.success("Approved!")
+                    st.rerun()
         if ab3.button("✖ Deselect", key="labor_desel_btn", use_container_width=True):
             st.session_state["_labor_key"] = st.session_state.get("_labor_key", 0) + 1
             st.rerun()
 
-    # Bulk approve
-    if is_pm:
+    # Bulk approve — PM of THIS project only
+    if ctx.can('cost.bulk_approve', pid):
         pending_ids = labor_df[labor_df['approval_status'] == 'PENDING']['id'].tolist()
         if pending_ids:
             if st.button(f"✅ Approve All Pending ({len(pending_ids)})", key="bulk_approve_labor"):
@@ -776,17 +796,26 @@ def _render_expense_tab(pid: int, exp_df: pd.DataFrame):
         st.markdown(f"**Selected:** ID {row['id']} — {row.get('employee_name', '—')} ({row['category']}, {row['approval_status']})")
         ab1, ab2, ab3, ab4 = st.columns(4)
         if row.get('approval_status') == 'PENDING':
-            if ab1.button("✏️ Edit", key="exp_edit_btn", use_container_width=True):
-                _dialog_edit_expense(row, pid)
-            if is_pm and ab2.button("✅ Approve", key="exp_approve_btn", use_container_width=True):
-                approve_expense(row['id'], emp_int_id)
-                st.success("Approved!")
-                st.rerun()
+            # Edit: PM can edit any, others can edit own entry only
+            _can_edit = (
+                ctx.can('cost.edit_any', pid)
+                or (ctx.can('cost.edit_own', pid) and str(row.get('created_by', '')) == user_id)
+            )
+            if _can_edit:
+                if ab1.button("✏️ Edit", key="exp_edit_btn", use_container_width=True):
+                    _dialog_edit_expense(row, pid)
+            # Approve: PM of THIS project only
+            if ctx.can('cost.approve', pid):
+                if ab2.button("✅ Approve", key="exp_approve_btn", use_container_width=True):
+                    approve_expense(row['id'], emp_int_id)
+                    st.success("Approved!")
+                    st.rerun()
         if ab3.button("✖ Deselect", key="exp_desel_btn", use_container_width=True):
             st.session_state["_exp_key"] = st.session_state.get("_exp_key", 0) + 1
             st.rerun()
 
-    if is_pm:
+    # Bulk approve — PM of THIS project only
+    if ctx.can('cost.bulk_approve', pid):
         pending_exp = exp_df[exp_df['approval_status'] == 'PENDING']['id'].tolist()
         if pending_exp:
             if st.button(f"✅ Approve All Pending ({len(pending_exp)})", key="bulk_approve_exp"):
@@ -840,7 +869,7 @@ def _render_presales_tab(pid: int):
     else:
         st.info("No pre-sales costs yet.")
 
-    if is_pm:
+    if ctx.can('cost.presales_decide', pid):
         st.divider()
         st.markdown("**Win/Lose Decision — Layer 2 allocation**")
         dc1, dc2, _ = st.columns(3)
@@ -860,6 +889,9 @@ def _render_presales_tab(pid: int):
 
 if is_all_projects:
     # ── Overview mode ─────────────────────────────────────────────────────────
+    if not ctx.can('cost.view_overview'):
+        st.warning("⛔ Bạn không có quyền xem tổng quan cross-project. Vui lòng chọn một dự án cụ thể.")
+        st.stop()
     all_labor = get_labor_logs_df(
         phase=phase_filter,
         approval_status=approval_filter,

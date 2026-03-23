@@ -93,6 +93,30 @@ from .helpers import (
     STATUS_COLORS,
 )
 
+from .permissions import (
+    # Core API
+    can,
+    require_permission,
+    get_project_role,
+    is_pm_of_project,
+    PermissionContext,
+    PermissionDenied,
+    # Display helpers
+    get_role_badge,
+    get_role_display,
+    get_permission_matrix,
+    get_permission_matrix_by_page,
+    ACTION_LABELS,
+    # Role constants
+    ADMIN,
+    PM,
+    SA,
+    SALES,
+    ENGINEER,
+    ALL_ROLES,
+    clear_role_cache,
+)
+
 from .s3_il import ILProjectS3Manager
 
 from .currency import (
@@ -313,6 +337,12 @@ __all__ = [
     # ── Helpers ──
     'calculate_estimate', 'get_go_no_go', 'fmt_vnd', 'fmt_percent', 'pct_change',
     'COGS_LABELS', 'PHASE_LABELS', 'STATUS_COLORS',
+    # ── Permissions (RBAC) ──
+    'can', 'require_permission', 'get_project_role', 'is_pm_of_project',
+    'PermissionContext', 'PermissionDenied',
+    'get_role_badge', 'get_role_display',
+    'get_permission_matrix', 'get_permission_matrix_by_page', 'ACTION_LABELS',
+    'ADMIN', 'PM', 'SA', 'SALES', 'ENGINEER', 'ALL_ROLES', 'clear_role_cache',
     # ── S3 ──
     'ILProjectS3Manager',
     # ── Currency ──

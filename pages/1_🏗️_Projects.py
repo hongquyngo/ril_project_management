@@ -1,4 +1,4 @@
-# pages/IL_1_🏗️_Projects.py
+# pages/1_🏗️_Projects.py
 """
 IL Projects — Master list + Create / Edit
 UX: @st.dialog cho CRUD | @st.fragment cho project table | session state cho dialog chaining
@@ -18,6 +18,8 @@ from utils.il_project import (
     get_rate_to_vnd, rate_status, fmt_rate,
 )
 
+from utils.il_project.permissions import PermissionContext, get_role_badge
+
 logger = logging.getLogger(__name__)
 auth = AuthManager()
 
@@ -26,6 +28,14 @@ auth.require_auth()
 user_id   = str(auth.get_user_id())
 user_role = st.session_state.get('user_role', '')
 is_admin  = auth.is_admin()
+emp_int_id = st.session_state.get('employee_id')
+
+# ── Permission context (used throughout page) ────────────────────────────────
+ctx = PermissionContext(
+    employee_id=emp_int_id,
+    is_admin=is_admin,
+    user_role=user_role,
+)
 
 
 # ── Lookups (cached) ──────────────────────────────────────────────────────────
@@ -211,6 +221,9 @@ def _project_form_fields(proj: dict, is_create: bool):
 
 @st.dialog("➕ New Project", width="large")
 def _dialog_create_project():
+    if not ctx.can('project.create'):
+        st.warning("⛔ Bạn không có quyền tạo dự án mới.")
+        return
     with st.form("create_project_form"):
         data = _project_form_fields({}, is_create=True)
         col_save, col_cancel = st.columns(2)
@@ -235,6 +248,9 @@ def _dialog_create_project():
 
 @st.dialog("✏️ Edit Project", width="large")
 def _dialog_edit_project(project_id: int):
+    if not ctx.can('project.edit', project_id):
+        st.warning("⛔ Bạn không có quyền chỉnh sửa dự án này. Chỉ PM hoặc Admin mới có thể sửa.")
+        return
     proj = get_project(project_id) or {}
     with st.form("edit_project_form"):
         data = _project_form_fields(proj, is_create=False)
@@ -268,9 +284,10 @@ def _dialog_view_project(project_id: int):
     hcol1, hcol2 = st.columns([5, 1])
     hcol1.subheader(f"{STATUS_COLORS.get(proj['status'], '⚪')} {proj['project_code']} — {proj['project_name']}")
 
-    if hcol2.button("✏️ Edit", use_container_width=True, type="primary"):
-        st.session_state["open_edit_pid"] = project_id
-        st.rerun()
+    if ctx.can('project.edit', project_id):
+        if hcol2.button("✏️ Edit", use_container_width=True, type="primary"):
+            st.session_state["open_edit_pid"] = project_id
+            st.rerun()
 
     # KPIs
     m1, m2, m3, m4 = st.columns(4)
@@ -339,7 +356,9 @@ def _milestone_panel(project_id: int, proj: dict):
             ms_cur_id = currencies[cur_opts.index(ms_cur)]['id']
 
             if st.form_submit_button("Add Milestone", type="primary"):
-                if not ms_name:
+                if not ctx.can('project.milestones', project_id):
+                    st.error("⛔ Chỉ PM hoặc Admin mới có thể thêm milestone.")
+                elif not ms_name:
                     st.error("Name required.")
                 elif ms_bpct > 0 and ms_bamt > 0:
                     st.error("Set either Billing % OR Amount, not both.")
@@ -455,8 +474,11 @@ with st.sidebar:
     f_pm     = st.selectbox("PM", ["All"] + [e['full_name'] for e in employees])
 
     st.divider()
-    if st.button("➕ New Project", width="stretch", type="primary"):
-        st.session_state["open_create"] = True
+    if ctx.can('project.create'):
+        if st.button("➕ New Project", width="stretch", type="primary"):
+            st.session_state["open_create"] = True
+    st.divider()
+    st.caption(f"Role: {get_role_badge(ctx.role())}")
 
 # ── Resolve filters ───────────────────────────────────────────────────────────
 status_filter  = None if f_status == "All" else f_status
@@ -485,10 +507,11 @@ if selected_pid:
         if ab1.button("👁️ View", type="primary", use_container_width=True):
             st.session_state["open_view_pid"] = selected_pid
             st.rerun()
-        if ab2.button("✏️ Edit", use_container_width=True):
-            st.session_state["open_edit_pid"] = selected_pid
-            st.rerun()
-        if is_admin:
+        if ctx.can('project.edit', selected_pid):
+            if ab2.button("✏️ Edit", use_container_width=True):
+                st.session_state["open_edit_pid"] = selected_pid
+                st.rerun()
+        if ctx.can('project.delete', selected_pid):
             if ab3.button("🗑 Delete", use_container_width=True):
                 if soft_delete_project(selected_pid, user_id):
                     st.success("Project deleted.")

@@ -1,4 +1,4 @@
-# pages/IL_4_📈_COGS_Dashboard.py
+# pages/4_📈_COGS_Dashboard.py
 """
 COGS Dashboard — Actual COGS sync + Variance Analysis + Benchmarks
 
@@ -29,14 +29,19 @@ from utils.il_project import (
     fmt_vnd, fmt_percent, pct_change, COGS_LABELS,
 )
 from utils.il_project.helpers import impact_color, go_no_go_badge
+from utils.il_project.permissions import PermissionContext, get_role_badge
 
 logger = logging.getLogger(__name__)
 auth = AuthManager()
 
 st.set_page_config(page_title="COGS Dashboard", page_icon="📈", layout="wide")
 auth.require_auth()
-user_id = str(auth.get_user_id())
-is_pm   = st.session_state.get('user_role') in ('admin', 'manager')
+user_id    = str(auth.get_user_id())
+user_role  = st.session_state.get('user_role', '')
+is_admin   = auth.is_admin()
+emp_int_id = st.session_state.get('employee_id')
+
+ctx = PermissionContext(employee_id=emp_int_id, is_admin=is_admin, user_role=user_role)
 
 
 # ── Lookups ───────────────────────────────────────────────────────────────────
@@ -74,12 +79,15 @@ with st.sidebar:
 
     if is_all_projects:
         f_status = st.selectbox("Status", ["All", "IN_PROGRESS", "COMPLETED", "WARRANTY", "CLOSED"], key="cogs_status")
+        st.divider()
+        st.caption(f"Role: {get_role_badge(ctx.role())}")
     else:
         st.divider()
         if project:
             st.caption(f"**{project['project_code']}**")
             st.caption(f"{project.get('customer_name', '—')}")
             st.caption(f"Status: **{project['status']}**")
+            st.caption(f"Role: {get_role_badge(ctx.role(project_id))}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -418,18 +426,20 @@ def _render_actual_cogs_tab(pid: int, actual: dict, est: dict):
 
     # ── Toolbar ──────────────────────────────────────────────────────────────
     ac1, ac2, ac3, ac4 = st.columns([2, 2, 2, 1])
-    if ac2.button("🔄 Sync from Timesheets & Expenses", type="primary", use_container_width=True):
-        with st.spinner("Syncing..."):
-            try:
-                sync_cogs_actual(pid, user_id)
-                st.success("Sync complete!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Sync failed: {e}")
+    if ctx.can('cogs.sync', pid):
+        if ac2.button("🔄 Sync from Timesheets & Expenses", type="primary", use_container_width=True):
+            with st.spinner("Syncing..."):
+                try:
+                    sync_cogs_actual(pid, user_id)
+                    st.success("Sync complete!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Sync failed: {e}")
 
-    if is_pm:
+    if ctx.can('cogs.manual_entry', pid):
         if ac3.button("✏️ Manual Entry (A/B/C/F)", use_container_width=True):
             _dialog_cogs_manual(pid, actual or {})
+    if ctx.can('cogs.finalize', pid):
         if actual and not actual.get('is_finalized'):
             if ac4.button("🔒 Finalize"):
                 if finalize_cogs_actual(pid, user_id):
@@ -509,25 +519,27 @@ def _render_variance_tab(pid: int, actual: dict, est: dict):
 
     # ── Toolbar ──────────────────────────────────────────────────────────────
     vh1, vh2, vh3 = st.columns([3, 2, 1])
-    if vh2.button("⚡ Generate All Variance", type="primary", use_container_width=True, key="btn_gen_all_var"):
-        if not est or not actual:
-            st.warning("Need both an active Estimate and COGS Actual to generate variance.")
-        else:
-            count = 0
-            for r in cogs_rows:
-                auto_pct = r['var_pct']
-                impact = 'FAVORABLE' if (auto_pct or 0) < -5 else 'UNFAVORABLE' if (auto_pct or 0) > 5 else 'NEUTRAL'
-                ok = upsert_variance_row(
-                    pid, r['key'], r['estimated'], r['actual'],
-                    '', '', impact, None, None, None, user_id,
-                )
-                if ok:
-                    count += 1
-            st.success(f"✅ Generated {count} variance rows (A–F + TOTAL). Add Root Cause for items with >5% variance.")
-            st.rerun()
+    if ctx.can('cogs.variance_generate', pid):
+        if vh2.button("⚡ Generate All Variance", type="primary", use_container_width=True, key="btn_gen_all_var"):
+            if not est or not actual:
+                st.warning("Need both an active Estimate and COGS Actual to generate variance.")
+            else:
+                count = 0
+                for r in cogs_rows:
+                    auto_pct = r['var_pct']
+                    impact = 'FAVORABLE' if (auto_pct or 0) < -5 else 'UNFAVORABLE' if (auto_pct or 0) > 5 else 'NEUTRAL'
+                    ok = upsert_variance_row(
+                        pid, r['key'], r['estimated'], r['actual'],
+                        '', '', impact, None, None, None, user_id,
+                    )
+                    if ok:
+                        count += 1
+                st.success(f"✅ Generated {count} variance rows (A–F + TOTAL). Add Root Cause for items with >5% variance.")
+                st.rerun()
 
-    if vh3.button("➕ Add", use_container_width=True, key="btn_add_variance"):
-        _dialog_variance(pid)
+    if ctx.can('cogs.variance_generate', pid):
+        if vh3.button("➕ Add", use_container_width=True, key="btn_add_variance"):
+            _dialog_variance(pid)
 
     # ── Variance table ───────────────────────────────────────────────────────
     var_df = get_variance_df(pid)
@@ -608,10 +620,11 @@ def _render_benchmark_tab(pid: int, project_data: dict = None, actual_data: dict
         hit  = next((t for t in proj_types if t['code'] == code), None)
         type_filter = hit['id'] if hit else None
 
-    if bh3.button("➕ Add", type="primary", use_container_width=True, key="btn_add_benchmark"):
-        # Auto-populate from project data
-        auto_data = _compute_benchmark_data(pid, project_data=project_data, actual_data=actual_data)
-        _dialog_benchmark(pid, auto_data=auto_data)
+    if ctx.can('cogs.benchmark_add', pid):
+        if bh3.button("➕ Add", type="primary", use_container_width=True, key="btn_add_benchmark"):
+            # Auto-populate from project data
+            auto_data = _compute_benchmark_data(pid, project_data=project_data, actual_data=actual_data)
+            _dialog_benchmark(pid, auto_data=auto_data)
 
     bench_df = get_benchmarks_df(type_filter)
 
@@ -682,10 +695,17 @@ def _compute_benchmark_data(pid: int, project_data: dict = None, actual_data: di
 # ══════════════════════════════════════════════════════════════════════════════
 
 if is_all_projects:
+    if not ctx.can('cogs.view_portfolio'):
+        st.warning("⛔ Bạn không có quyền xem portfolio tổng quan. Vui lòng chọn một dự án cụ thể.")
+        st.stop()
     _render_portfolio()
 else:
     if not project:
         st.error("Project not found.")
+        st.stop()
+
+    if not ctx.can('cogs.view_actual', project_id):
+        st.warning("⛔ Bạn không có quyền xem COGS Dashboard cho dự án này.")
         st.stop()
 
     # ── Fetch data once for all tabs (eliminates 3× duplicate queries) ──
