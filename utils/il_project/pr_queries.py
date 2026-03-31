@@ -412,15 +412,8 @@ def create_pr_item(data: Dict, created_by: str) -> int:
     ]
     params = {col: data.get(col) for col in base_cols}
 
-    # Ensure amount_vnd is computed (caller may provide; fallback = qty × cost × rate)
-    amt_vnd = data.get('amount_vnd')
-    if amt_vnd is None:
-        qty  = float(params.get('quantity') or 0)
-        cost = float(params.get('unit_cost') or 0)
-        rate = float(params.get('exchange_rate') or 1)
-        amt_vnd = round(qty * cost * rate, 0)
-    base_cols.append('amount_vnd')
-    params['amount_vnd'] = amt_vnd
+    # NOTE: amount_vnd is a GENERATED column (quantity * unit_cost * exchange_rate)
+    # — do NOT include in INSERT; MySQL computes it automatically.
 
     # Optional FK columns — only include when not None
     optional_fks = ['estimate_line_item_id', 'costbook_detail_id',
@@ -492,15 +485,13 @@ def reduce_pr_item(item_id: int, new_quantity: float, new_unit_cost: float,
             return {'success': False, 'message': 'Quantity must be > 0. Use Cancel PR to remove entirely.'}
 
         exchange_rate = float(item.get('exchange_rate') or 1)
-        new_amount_vnd = round(new_quantity * new_unit_cost * exchange_rate, 0)
 
+        # NOTE: amount_vnd is a GENERATED column — auto-computed from qty × cost × rate
         _execute_update("""
             UPDATE il_purchase_request_items
-            SET quantity = :qty, unit_cost = :cost,
-                amount_vnd = :amt_vnd, modified_date = NOW()
+            SET quantity = :qty, unit_cost = :cost, modified_date = NOW()
             WHERE id = :iid
-        """, {'qty': new_quantity, 'cost': new_unit_cost,
-              'amt_vnd': new_amount_vnd, 'iid': item_id})
+        """, {'qty': new_quantity, 'cost': new_unit_cost, 'iid': item_id})
 
         # Recalc PR totals
         recalc_pr_totals(item['pr_id'])
