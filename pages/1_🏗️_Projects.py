@@ -136,6 +136,83 @@ def _load_completion_map() -> dict:
         return {}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_estimate_drift_map() -> dict:
+    """
+    Detect GP% drift between il_projects snapshot and actual estimates.
+
+    Returns {project_id: {
+        'snapshot_gp':   float,   # il_projects.estimated_gp_percent
+        'active_gp':     float,   # active estimate's GP%
+        'latest_gp':     float,   # latest revision GP% (may not be active)
+        'active_rev':    int,
+        'latest_rev':    int,
+        'drift_type':    str,     # 'stale' | 'newer_rev' | 'both' | None
+    }}
+
+    Drift types:
+      stale     — snapshot != active estimate (sync missed)
+      newer_rev — a newer revision exists but is not active
+      both      — stale snapshot + newer revision
+    """
+    try:
+        from utils.db import execute_query
+        rows = execute_query("""
+            SELECT
+                p.id AS project_id,
+                p.estimated_gp_percent AS snapshot_gp,
+                -- Active estimate
+                ea.estimated_gp_percent AS active_gp,
+                ea.estimate_version     AS active_rev,
+                -- Latest estimate (highest version)
+                el.estimated_gp_percent AS latest_gp,
+                el.estimate_version     AS latest_rev
+            FROM il_projects p
+            LEFT JOIN il_project_cogs_estimate ea
+                ON ea.project_id = p.id AND ea.is_active = 1 AND ea.delete_flag = 0
+            LEFT JOIN il_project_cogs_estimate el
+                ON el.project_id = p.id AND el.delete_flag = 0
+                AND el.estimate_version = (
+                    SELECT MAX(e2.estimate_version)
+                    FROM il_project_cogs_estimate e2
+                    WHERE e2.project_id = p.id AND e2.delete_flag = 0
+                )
+            WHERE p.delete_flag = 0
+              AND (ea.id IS NOT NULL OR el.id IS NOT NULL)
+        """, {})
+
+        result = {}
+        for r in rows:
+            pid = r['project_id']
+            snap  = float(r['snapshot_gp'] or 0)
+            act   = float(r['active_gp'] or 0)
+            lat   = float(r['latest_gp'] or 0)
+            a_rev = int(r['active_rev'] or 0)
+            l_rev = int(r['latest_rev'] or 0)
+
+            is_stale = abs(snap - act) > 0.1 if act > 0 else False
+            is_newer = l_rev > a_rev and abs(lat - act) > 0.1
+
+            drift = None
+            if is_stale and is_newer:
+                drift = 'both'
+            elif is_stale:
+                drift = 'stale'
+            elif is_newer:
+                drift = 'newer_rev'
+
+            if drift:
+                result[pid] = {
+                    'snapshot_gp': snap, 'active_gp': act, 'latest_gp': lat,
+                    'active_rev': a_rev, 'latest_rev': l_rev,
+                    'drift_type': drift,
+                }
+        return result
+    except Exception as e:
+        logger.warning(f"_load_estimate_drift_map: {e}")
+        return {}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HEALTH INDICATOR — composite project health score
 # ══════════════════════════════════════════════════════════════════════════════
@@ -261,6 +338,34 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default if pd.isna(f) else f
     except (TypeError, ValueError):
         return default
+
+
+def _fmt_gp_with_drift(gp_val, project_id, drift_map: dict) -> str:
+    """
+    Format GP% with drift warning indicator.
+
+    ⚠️  = snapshot stale (il_projects GP% != active estimate GP%)
+    🔄 = newer revision exists that's not active
+    ⚠️🔄 = both
+
+    Tooltip-friendly: shows actual active GP in the suffix.
+    """
+    base = fmt_percent(gp_val)
+    if base == '—':
+        return base
+
+    drift = drift_map.get(int(project_id))
+    if not drift:
+        return base
+
+    dtype = drift['drift_type']
+    if dtype == 'stale':
+        return f"{base} ⚠️"
+    elif dtype == 'newer_rev':
+        return f"{base} 🔄"
+    elif dtype == 'both':
+        return f"{base} ⚠️🔄"
+    return base
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -985,6 +1090,7 @@ def _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search,
     # ── Load supplementary data ──────────────────────────────────────────────
     pending_map    = _load_pending_counts()
     completion_map = _load_completion_map()
+    drift_map      = _load_estimate_drift_map()
 
     # ── Client-side filters (health, date range) ─────────────────────────────
     # These filter AFTER DB query because they depend on computed columns.
@@ -1092,7 +1198,9 @@ def _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search,
     # Formatted columns
     display_df['contract_value_fmt'] = display_df['effective_contract_value'].apply(
         lambda v: f"{v:,.0f}" if _is_num(v) else '—')
-    display_df['est_gp_fmt'] = display_df['estimated_gp_percent'].apply(fmt_percent)
+    display_df['est_gp_fmt'] = df.apply(
+        lambda r: _fmt_gp_with_drift(r['estimated_gp_percent'], r['project_id'], drift_map),
+        axis=1)
     display_df['act_gp_fmt'] = display_df['actual_gp_percent'].apply(fmt_percent)
     display_df['budget_pct'] = df.apply(_compute_budget_pct, axis=1)
     display_df['days_left']  = df.apply(_compute_days_left, axis=1)
@@ -1142,7 +1250,8 @@ def _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search,
             'pm_name':                  st.column_config.TextColumn('PM', width=90),
             'contract_value_fmt':       st.column_config.TextColumn('Contract Value', width=110),
             'currency_code':            st.column_config.TextColumn('CCY', width=45),
-            'est_gp_fmt':               st.column_config.TextColumn('Est GP%', width=75),
+            'est_gp_fmt':               st.column_config.TextColumn('Est GP%', width=90,
+                                            help="⚠️ = snapshot stale (re-activate estimate to sync) | 🔄 = newer revision not yet activated"),
             'act_gp_fmt':               st.column_config.TextColumn('Act GP%', width=75),
             'budget_pct':               st.column_config.TextColumn('Budget', width=75),
             'days_left':                st.column_config.TextColumn('Deadline', width=90),
@@ -1165,6 +1274,28 @@ def _render_project_table(status_filter, type_filter_id, pm_filter_id, f_search,
     # ── Legend ────────────────────────────────────────────────────────────────
     st.caption("**Health:** 🟢 On track &nbsp;|&nbsp; 🟡 Watch &nbsp;|&nbsp; 🔴 At risk &nbsp;|&nbsp; ⚪ N/A "
                "&nbsp;&nbsp;•&nbsp;&nbsp; **Status:** icon in Status column")
+
+    # ── GP Drift Warning ─────────────────────────────────────────────────────
+    if drift_map:
+        # Only warn for projects currently visible in the filtered table
+        visible_pids = set(df['project_id'].astype(int).tolist())
+        visible_drift = {pid: d for pid, d in drift_map.items() if pid in visible_pids}
+        if visible_drift:
+            drift_lines = []
+            for pid, d in visible_drift.items():
+                code = df.loc[df['project_id'] == pid, 'project_code'].iloc[0] if not df[df['project_id'] == pid].empty else f"#{pid}"
+                if d['drift_type'] == 'stale':
+                    drift_lines.append(f"**{code}** — snapshot {d['snapshot_gp']:.1f}% ≠ active estimate {d['active_gp']:.1f}% ⚠️")
+                elif d['drift_type'] == 'newer_rev':
+                    drift_lines.append(f"**{code}** — Rev {d['latest_rev']} ({d['latest_gp']:.1f}%) not activated (active: Rev {d['active_rev']}, {d['active_gp']:.1f}%) 🔄")
+                elif d['drift_type'] == 'both':
+                    drift_lines.append(f"**{code}** — stale snapshot + Rev {d['latest_rev']} pending ⚠️🔄")
+            if drift_lines:
+                st.warning(
+                    f"**GP% Drift Detected** — {len(drift_lines)} project(s) have mismatched estimate data:\n\n"
+                    + '\n'.join(f"- {l}" for l in drift_lines)
+                    + "\n\n→ Go to **Estimate GP** → **Activate** the correct revision to sync."
+                )
 
     sel = event.selection.rows
     if sel:
@@ -1267,6 +1398,7 @@ if selected_pid:
                     _load_lookups.clear()
                     _load_pending_counts.clear()
                     _load_completion_map.clear()
+                    _load_estimate_drift_map.clear()
                     st.rerun()
         if ab4.button("✖ Deselect", use_container_width=True):
             st.session_state["_tbl_key"] = st.session_state.get("_tbl_key", 0) + 1
