@@ -88,7 +88,9 @@ _can_activate   = ctx.can('estimate.activate', project_id)
 
 all_estimates = _cached_estimates(project_id, _v=st.session_state.get('_est_v', 0))
 active_est = next((e for e in all_estimates if e.get('is_active')), None)
-next_version = max((e['estimate_version'] for e in all_estimates), default=0) + 1
+# Fresh from DB — avoids duplicate key when cache is stale
+from utils.il_project.queries import get_next_estimate_version
+next_version = get_next_estimate_version(project_id)
 def_alpha = float(pt.get('default_alpha', 0.06))
 def_beta = float(pt.get('default_beta', 0.40))
 def_gamma = float(pt.get('default_gamma', 0.04))

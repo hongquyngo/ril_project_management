@@ -289,41 +289,77 @@ def get_active_estimate(project_id: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
+def get_next_estimate_version(project_id: int) -> int:
+    """
+    Get next estimate version from DB (not from cache).
+    Use for display only — create_estimate() resolves its own version atomically.
+    """
+    rows = execute_query("""
+        SELECT COALESCE(MAX(estimate_version), 0) + 1 AS next_ver
+        FROM il_project_cogs_estimate
+        WHERE project_id = :pid AND delete_flag = 0
+    """, {'pid': project_id})
+    return rows[0]['next_ver'] if rows else 1
+
+
 def create_estimate(data: Dict, created_by: str,
                     caller_employee_id: int = None, caller_is_admin: bool = False) -> int:
     """
     Insert new estimate. Caller must call activate_estimate() in same
     transaction if this should be the active one.
+
+    estimate_version is auto-resolved from DB (MAX+1) to avoid duplicate key
+    errors when Streamlit cache is stale. The caller's estimate_version is
+    used ONLY for estimate_label fallback — never for the actual DB insert.
     """
     _check_perm('estimate.create', data.get('project_id'), caller_employee_id, caller_is_admin)
-    sql = """
-        INSERT INTO il_project_cogs_estimate (
-            project_id, estimate_version, estimate_label, estimate_type, is_active,
-            a_equipment_cost, a_equipment_notes,
-            alpha_rate, b_logistics_import, b_override,
-            c_custom_fabrication, c_fabrication_notes,
-            d_man_days, d_man_day_rate, d_team_size, d_direct_labor, d_override,
-            beta_rate, e_travel_site_oh, e_override,
-            gamma_rate, f_warranty_reserve, f_override,
-            total_cogs, sales_value, estimated_gp, estimated_gp_percent,
-            go_no_go_result, assessment_notes,
-            created_by, modified_by
-        ) VALUES (
-            :project_id, :estimate_version, :estimate_label, :estimate_type, 0,
-            :a_equipment_cost, :a_equipment_notes,
-            :alpha_rate, :b_logistics_import, :b_override,
-            :c_custom_fabrication, :c_fabrication_notes,
-            :d_man_days, :d_man_day_rate, :d_team_size, :d_direct_labor, :d_override,
-            :beta_rate, :e_travel_site_oh, :e_override,
-            :gamma_rate, :f_warranty_reserve, :f_override,
-            :total_cogs, :sales_value, :estimated_gp, :estimated_gp_percent,
-            :go_no_go_result, :assessment_notes,
-            :created_by, :created_by
-        )
-    """
+
+    pid = data['project_id']
     engine = _get_engine()
     with engine.connect() as conn:
-        result = conn.execute(text(sql), {**data, 'created_by': created_by})
+        # ── Resolve next version from DB (authoritative, not from cache) ──
+        row = conn.execute(text("""
+            SELECT COALESCE(MAX(estimate_version), 0) + 1 AS next_ver
+            FROM il_project_cogs_estimate
+            WHERE project_id = :pid AND delete_flag = 0
+        """), {'pid': pid}).fetchone()
+        actual_version = row[0] if row else 1
+
+        # Update label if it was auto-generated "Rev N" with stale N
+        caller_version = data.get('estimate_version', actual_version)
+        label = data.get('estimate_label', '')
+        if label == f"Rev {caller_version}" and caller_version != actual_version:
+            label = f"Rev {actual_version}"
+            logger.info(f"Estimate version corrected: {caller_version} → {actual_version} (project {pid})")
+
+        params = {**data, 'created_by': created_by,
+                  'estimate_version': actual_version, 'estimate_label': label}
+
+        result = conn.execute(text("""
+            INSERT INTO il_project_cogs_estimate (
+                project_id, estimate_version, estimate_label, estimate_type, is_active,
+                a_equipment_cost, a_equipment_notes,
+                alpha_rate, b_logistics_import, b_override,
+                c_custom_fabrication, c_fabrication_notes,
+                d_man_days, d_man_day_rate, d_team_size, d_direct_labor, d_override,
+                beta_rate, e_travel_site_oh, e_override,
+                gamma_rate, f_warranty_reserve, f_override,
+                total_cogs, sales_value, estimated_gp, estimated_gp_percent,
+                go_no_go_result, assessment_notes,
+                created_by, modified_by
+            ) VALUES (
+                :project_id, :estimate_version, :estimate_label, :estimate_type, 0,
+                :a_equipment_cost, :a_equipment_notes,
+                :alpha_rate, :b_logistics_import, :b_override,
+                :c_custom_fabrication, :c_fabrication_notes,
+                :d_man_days, :d_man_day_rate, :d_team_size, :d_direct_labor, :d_override,
+                :beta_rate, :e_travel_site_oh, :e_override,
+                :gamma_rate, :f_warranty_reserve, :f_override,
+                :total_cogs, :sales_value, :estimated_gp, :estimated_gp_percent,
+                :go_no_go_result, :assessment_notes,
+                :created_by, :created_by
+            )
+        """), params)
         conn.commit()
         return result.lastrowid
 
