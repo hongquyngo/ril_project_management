@@ -185,7 +185,13 @@ def create_project(data: Dict, created_by: str) -> int:
         INSERT INTO il_projects (
             project_code, contract_number, project_name, project_type_id,
             customer_id, end_customer_name,
-            contract_value, amended_contract_value, currency_id, exchange_rate, billing_type,
+            contract_value,
+            contract_value_before_vat, vat_percent,
+            contract_value_vat_amount, contract_value_after_vat,
+            amended_contract_value,
+            amended_value_before_vat, amended_vat_percent,
+            amended_value_vat_amount, amended_value_after_vat,
+            currency_id, exchange_rate, billing_type,
             status, go_no_go_decision, decision_date, decision_notes,
             location, site_distance_category, environment_category, import_category,
             estimated_start_date, estimated_end_date,
@@ -195,7 +201,13 @@ def create_project(data: Dict, created_by: str) -> int:
         ) VALUES (
             :project_code, :contract_number, :project_name, :project_type_id,
             :customer_id, :end_customer_name,
-            :contract_value, :amended_contract_value, :currency_id, :exchange_rate, :billing_type,
+            :contract_value,
+            :contract_value_before_vat, :vat_percent,
+            :contract_value_vat_amount, :contract_value_after_vat,
+            :amended_contract_value,
+            :amended_value_before_vat, :amended_vat_percent,
+            :amended_value_vat_amount, :amended_value_after_vat,
+            :currency_id, :exchange_rate, :billing_type,
             :status, :go_no_go_decision, :decision_date, :decision_notes,
             :location, :site_distance_category, :environment_category, :import_category,
             :estimated_start_date, :estimated_end_date,
@@ -221,7 +233,15 @@ def update_project(project_id: int, data: Dict, modified_by: str) -> bool:
             customer_id = :customer_id,
             end_customer_name = :end_customer_name,
             contract_value = :contract_value,
+            contract_value_before_vat = :contract_value_before_vat,
+            vat_percent = :vat_percent,
+            contract_value_vat_amount = :contract_value_vat_amount,
+            contract_value_after_vat = :contract_value_after_vat,
             amended_contract_value = :amended_contract_value,
+            amended_value_before_vat = :amended_value_before_vat,
+            amended_vat_percent = :amended_vat_percent,
+            amended_value_vat_amount = :amended_value_vat_amount,
+            amended_value_after_vat = :amended_value_after_vat,
             currency_id = :currency_id,
             exchange_rate = :exchange_rate,
             billing_type = :billing_type,
@@ -732,8 +752,78 @@ def update_milestone(milestone_id: int, data: Dict, modified_by: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COGS ACTUAL — Sync + Manual override
+# MILESTONE ATTACHMENTS — Pattern A (junction → medias)
 # ══════════════════════════════════════════════════════════════════════════════
+
+MILESTONE_DOC_TYPES = [
+    'ACCEPTANCE_CERT', 'INVOICE', 'HANDOVER_REPORT',
+    'PAYMENT_PROOF', 'DELIVERY_NOTE', 'PHOTO', 'OTHER',
+]
+
+
+def create_milestone_media(
+    milestone_id: int,
+    s3_key: str,
+    filename: str,
+    document_type: str = 'OTHER',
+    description: str = None,
+    created_by: str = 'system',
+) -> Optional[int]:
+    """
+    Upload-and-attach a file to a milestone via Pattern A (junction → medias).
+
+    Steps:
+      1. INSERT into medias via _create_media() (name=filename, path=s3_key)
+      2. INSERT into il_milestone_medias (milestone_id, media_id, document_type)
+
+    Returns: il_milestone_medias.id, or None on failure.
+    """
+    try:
+        media_id = _create_media(s3_key, filename, created_by)
+        engine = _get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                INSERT INTO il_milestone_medias
+                    (milestone_id, media_id, document_type, description,
+                     delete_flag, created_by, created_date)
+                VALUES (:msid, :mid, :dtype, :desc, 0, :by, NOW())
+            """), {
+                'msid': milestone_id,
+                'mid': media_id,
+                'dtype': document_type if document_type in MILESTONE_DOC_TYPES else 'OTHER',
+                'desc': description,
+                'by': created_by,
+            })
+            conn.commit()
+            return result.lastrowid
+    except Exception as e:
+        logger.error(f"create_milestone_media failed (ms={milestone_id}): {e}")
+        return None
+
+
+def get_milestone_medias(milestone_id: int) -> List[Dict]:
+    """Get all attachments for a milestone."""
+    return execute_query("""
+        SELECT
+            mm.id AS junction_id, mm.media_id,
+            m.path AS s3_key, m.name AS filename,
+            mm.document_type, mm.description,
+            mm.created_by, mm.created_date
+        FROM il_milestone_medias mm
+        JOIN medias m ON m.id = mm.media_id
+        WHERE mm.milestone_id = :msid
+          AND mm.delete_flag = 0
+        ORDER BY mm.created_date DESC
+    """, {'msid': milestone_id})
+
+
+def delete_milestone_media(milestone_media_id: int) -> bool:
+    """Soft-delete a milestone attachment (junction row only, media preserved)."""
+    rows = execute_update(
+        "UPDATE il_milestone_medias SET delete_flag=1 WHERE id=:id",
+        {'id': milestone_media_id},
+    )
+    return rows > 0
 
 def get_cogs_actual(project_id: int) -> Optional[Dict]:
     rows = execute_query(

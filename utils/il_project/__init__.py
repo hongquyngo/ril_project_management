@@ -80,6 +80,11 @@ from .queries import (
     create_labor_media,
     get_labor_medias,
     delete_labor_media,
+    # Milestone attachments (Pattern A — junction table)
+    create_milestone_media,
+    get_milestone_medias,
+    delete_milestone_media,
+    MILESTONE_DOC_TYPES,
 )
 
 from .helpers import (
@@ -334,6 +339,9 @@ __all__ = [
     'create_line_item_media', 'get_line_item_medias', 'delete_line_item_media',
     'create_expense_media', 'get_expense_medias', 'delete_expense_media',
     'create_labor_media', 'get_labor_medias', 'delete_labor_media',
+    # ── Milestone Attachments (Pattern A) ──
+    'create_milestone_media', 'get_milestone_medias', 'delete_milestone_media',
+    'MILESTONE_DOC_TYPES',
     # ── Helpers ──
     'calculate_estimate', 'get_go_no_go', 'fmt_vnd', 'fmt_percent', 'pct_change',
     'COGS_LABELS', 'PHASE_LABELS', 'STATUS_COLORS',

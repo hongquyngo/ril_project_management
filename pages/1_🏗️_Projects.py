@@ -16,6 +16,7 @@ from utils.il_project import (
     create_milestone, update_milestone, generate_project_code,
     fmt_vnd, fmt_percent, STATUS_COLORS,
     get_rate_to_vnd, rate_status, fmt_rate,
+    ILProjectS3Manager,
 )
 
 from utils.il_project.permissions import PermissionContext, get_role_badge
@@ -435,13 +436,40 @@ def _project_form_fields(proj: dict, is_create: bool):
 
     # ── Financial tab ─────────────────────────────────────────────────────────
     with tab_financial:
-        fm1, fm2 = st.columns(2)
-        contract_val = fm1.number_input("Contract Value",
-                                         value=float(proj.get('contract_value') or 0),
-                                         min_value=0.0, format="%.0f")
-        amended_val  = fm2.number_input("Amended Value (0=none)",
-                                         value=float(proj.get('amended_contract_value') or 0),
-                                         min_value=0.0, format="%.0f")
+        st.markdown("**Contract Value (Before VAT — dùng cho COGS/GP calculation)**")
+        fv1, fv2, fv3 = st.columns(3)
+        before_vat = fv1.number_input("Before VAT *",
+                                       value=float(proj.get('contract_value_before_vat') or proj.get('contract_value') or 0),
+                                       min_value=0.0, format="%.0f",
+                                       help="Giá trị hợp đồng trước thuế GTGT. Đây là giá dùng để tính GP%.")
+        vat_pct    = fv2.number_input("VAT %",
+                                       value=float(proj.get('vat_percent') or 8.0),
+                                       min_value=0.0, max_value=100.0, format="%.2f",
+                                       help="Thuế suất VAT (mặc định 8%).")
+        vat_amount = round(before_vat * vat_pct / 100, 0) if before_vat > 0 else 0
+        fv3.metric("VAT Amount", f"{vat_amount:,.0f} ₫" if vat_amount > 0 else "—")
+        after_vat  = before_vat + vat_amount
+
+        fvr1, fvr2 = st.columns(2)
+        fvr1.metric("After VAT (auto)", f"{after_vat:,.0f} ₫" if after_vat > 0 else "—")
+        amended_before = fvr2.number_input("Amended Before VAT (0=none)",
+                                            value=float(proj.get('amended_value_before_vat') or proj.get('amended_contract_value') or 0),
+                                            min_value=0.0, format="%.0f",
+                                            help="Giá trị điều chỉnh trước thuế. Để 0 nếu không có phụ lục.")
+
+        # Compute amended VAT fields
+        amended_vat_pct = vat_pct  # same VAT rate by default
+        amended_vat_amount = round(amended_before * amended_vat_pct / 100, 0) if amended_before > 0 else 0
+        amended_after = amended_before + amended_vat_amount if amended_before > 0 else 0
+
+        if amended_before > 0:
+            amc1, amc2 = st.columns(2)
+            amc1.metric("Amended VAT", f"{amended_vat_amount:,.0f} ₫")
+            amc2.metric("Amended After VAT", f"{amended_after:,.0f} ₫")
+
+        # Backward compat: contract_value = before_vat
+        contract_val = before_vat
+        amended_val  = amended_before
 
         cur_opts    = [c['code'] for c in currencies]
         cur_idx     = next((i for i, c in enumerate(currencies) if c['id'] == proj.get('currency_id')), 0)
@@ -503,8 +531,16 @@ def _project_form_fields(proj: dict, is_create: bool):
         'project_type_id':     type_id_sel,
         'customer_id':         customer_id,
         'end_customer_name':   end_cust.strip() or None,
-        'contract_value':      contract_val or None,
-        'amended_contract_value': amended_val if amended_val > 0 else None,
+        'contract_value':          contract_val or None,
+        'contract_value_before_vat': before_vat or None,
+        'vat_percent':             vat_pct,
+        'contract_value_vat_amount': vat_amount or None,
+        'contract_value_after_vat':  after_vat or None,
+        'amended_contract_value':  amended_val if amended_val > 0 else None,
+        'amended_value_before_vat':  amended_before if amended_before > 0 else None,
+        'amended_vat_percent':       amended_vat_pct if amended_before > 0 else None,
+        'amended_value_vat_amount':  amended_vat_amount if amended_before > 0 else None,
+        'amended_value_after_vat':   amended_after if amended_before > 0 else None,
         'currency_id':         currency_id,
         'exchange_rate':       exc_rate,
         'billing_type':        billing_sel,
@@ -647,10 +683,45 @@ def _milestone_panel(project_id: int, proj: dict):
                 'status':          st.column_config.TextColumn('Status'),
             },
         )
+
+        # ── Milestone Attachments — display per milestone ────────────────
+        from utils.il_project.queries import get_milestone_medias
+        for _, ms_row in ms_df.iterrows():
+            ms_id = int(ms_row['id'])
+            atts = get_milestone_medias(ms_id)
+            if atts:
+                with st.expander(f"📎 {ms_row['milestone_name']} — {len(atts)} file(s)"):
+                    s3 = None
+                    try:
+                        s3 = ILProjectS3Manager()
+                    except Exception:
+                        pass
+                    for att in atts:
+                        ac1, ac2, ac3 = st.columns([3, 1, 1])
+                        doc_type = att.get('document_type', 'OTHER')
+                        ac1.markdown(f"📄 **{att['filename']}** — `{doc_type}`")
+                        if att.get('description'):
+                            ac1.caption(att['description'])
+                        if s3:
+                            url = s3.get_presigned_url(att['s3_key'], expiration=600)
+                            if url:
+                                ac2.markdown(f"[⬇️ Download]({url})")
     else:
         st.info("No milestones yet.")
 
     with st.expander("➕ Add Milestone"):
+        # File uploader OUTSIDE the form (Streamlit requires this)
+        ms_doc_types = ['OTHER', 'ACCEPTANCE_CERT', 'INVOICE', 'HANDOVER_REPORT',
+                        'PAYMENT_PROOF', 'DELIVERY_NOTE', 'PHOTO']
+        ms_att_file = st.file_uploader(
+            "📎 Attach document (optional)",
+            type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx", "doc", "xls", "pptx", "csv", "zip"],
+            key=f"ms_att_{project_id}",
+        )
+        ms_att_doc_type = st.selectbox(
+            "Document Type", ms_doc_types, key=f"ms_att_dt_{project_id}",
+            help="Loại tài liệu: biên bản nghiệm thu, hóa đơn, v.v."
+        )
         with st.form(f"ms_form_{project_id}"):
             mc1, mc2, mc3 = st.columns(3)
             ms_seq    = mc1.number_input("Sequence #", min_value=1, value=len(ms_df) + 1)
@@ -676,7 +747,7 @@ def _milestone_panel(project_id: int, proj: dict):
                 elif ms_bpct > 0 and ms_bamt > 0:
                     st.error("Set either Billing % OR Amount, not both.")
                 else:
-                    create_milestone({
+                    ms_id = create_milestone({
                         'project_id':     project_id,
                         'sequence_no':    ms_seq,
                         'milestone_name': ms_name,
@@ -689,7 +760,26 @@ def _milestone_panel(project_id: int, proj: dict):
                         'status':         ms_stat,
                         'completion_notes': ms_notes or None,
                     }, user_id)
-                    st.success("Milestone added!")
+                    # Upload attachment if provided
+                    if ms_id and ms_att_file:
+                        try:
+                            from utils.il_project.queries import create_milestone_media
+                            s3 = ILProjectS3Manager()
+                            ok, s3_key = s3.upload_project_file(
+                                ms_att_file.read(), ms_att_file.name, project_id)
+                            if ok:
+                                create_milestone_media(
+                                    ms_id, s3_key, ms_att_file.name,
+                                    document_type=ms_att_doc_type,
+                                    created_by=user_id)
+                                st.success(f"Milestone added with attachment!")
+                            else:
+                                st.success("Milestone added! (attachment upload failed)")
+                        except Exception as e:
+                            logger.warning(f"Milestone attachment failed: {e}")
+                            st.success("Milestone added! (attachment skipped)")
+                    else:
+                        st.success("Milestone added!")
                     st.rerun()
 
 

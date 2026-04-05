@@ -228,7 +228,7 @@ def _dialog_add_product(category):
     pc3.metric("Item GP%", f"{(sell_vnd-cost_vnd)/sell_vnd*100:.1f}%" if sell_vnd > 0 else '—')
     notes = st.text_input("Notes", placeholder="Optional")
     att_file = st.file_uploader("📎 Attach vendor quote (optional)",
-                                 type=["pdf","jpg","jpeg","png","xlsx","docx"], key="li_att")
+                                 type=["pdf","jpg","jpeg","png","xlsx","docx","doc","xls","pptx","csv","zip"], key="li_att")
     if st.button("✅ Add to Estimate", type="primary", use_container_width=True):
         # Store file bytes in session for later S3 upload on save
         att_data = None
@@ -465,8 +465,28 @@ with tab_new:
                                     help="Short name for this estimate revision")
             est_type = hc2.selectbox("Type", ["QUICK","DETAILED"], index=1 if prefill.get('estimate_type')=='DETAILED' else 0,
                                       help="QUICK = rough estimate, DETAILED = full breakdown with line items")
-            sales_value = hc3.number_input("Sales Value (VND)", value=float(prefill.get('sales_value',0) or 0), format="%.0f",
-                                            help="Contract value in VND. Set 0 to use total Sell from line items.")
+
+            # Auto-fill sales_value from project contract (before VAT, in VND)
+            _proj_before_vat = float(project.get('contract_value_before_vat') or project.get('contract_value') or 0)
+            _proj_exc_rate   = float(project.get('exchange_rate') or 1)
+            _proj_contract_vnd = _proj_before_vat * _proj_exc_rate
+            _default_sales = float(prefill.get('sales_value') or 0)
+            if _default_sales <= 0 and _proj_contract_vnd > 0:
+                _default_sales = _proj_contract_vnd  # auto-fill from contract
+
+            sales_value = hc3.number_input("Sales Value (VND)",
+                                            value=_default_sales, format="%.0f",
+                                            help="Auto-filled from contract value (before VAT × exchange rate). Override if different.")
+
+            # Warning if sales_value differs significantly from contract
+            if _proj_contract_vnd > 0 and sales_value > 0:
+                _drift_pct = abs(sales_value - _proj_contract_vnd) / _proj_contract_vnd * 100
+                if _drift_pct > 5:
+                    st.warning(
+                        f"⚠️ Sales Value ({sales_value:,.0f}) differs from "
+                        f"Contract Before VAT ({_proj_contract_vnd:,.0f}) by {_drift_pct:.1f}%. "
+                        f"Ensure this is intentional (e.g. phụ lục, giá sau thuế, or different scope)."
+                    )
 
             st.divider()
             st.markdown("**A — Equipment &nbsp;&nbsp;|&nbsp;&nbsp; C — Fabrication**")
@@ -520,7 +540,7 @@ with tab_new:
             # ── Section 3: Attachments (inside form) ─────────────────────
             st.divider()
             st.markdown("**📎 Attachments** — scope documents, BOQ, vendor quotes")
-            est_files = st.file_uploader("Drag & drop files", type=["pdf","jpg","jpeg","png","xlsx","docx"],
+            est_files = st.file_uploader("Drag & drop files", type=["pdf","jpg","jpeg","png","xlsx","docx","doc","xls","pptx","csv","zip"],
                                           accept_multiple_files=True, key="est_attachments")
 
             submitted = st.form_submit_button("💾 Save & Activate", type="primary", use_container_width=True)

@@ -179,5 +179,11 @@ class ILProjectS3Manager:
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
             "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "xls": "application/vnd.ms-excel",
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "doc": "application/msword",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "ppt": "application/vnd.ms-powerpoint",
+            "csv": "text/csv",
+            "zip": "application/zip",
         }.get(ext, "application/octet-stream")

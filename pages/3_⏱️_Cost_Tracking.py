@@ -192,7 +192,7 @@ def _dialog_add_labor(pid: int):
         description_v = st.text_input("Description")
         st.divider()
         uploaded_file = st.file_uploader("📎 Attach document (optional)",
-                                         type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx"])
+                                         type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx", "doc", "xls", "pptx", "csv", "zip"])
         submitted = st.form_submit_button("✅ Save entry", type="primary", use_container_width=True)
 
     if submitted:
@@ -322,7 +322,7 @@ def _dialog_add_expense(pid: int):
 
         st.divider()
         uploaded_file = st.file_uploader("📎 Attach document (invoice, receipt...)",
-                                          type=["pdf", "jpg", "jpeg", "png", "xlsx"])
+                                          type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx", "doc", "xls", "pptx", "csv", "zip"])
         submitted = st.form_submit_button("✅ Save expense", type="primary", use_container_width=True)
 
     if submitted:
@@ -407,7 +407,7 @@ def _dialog_edit_expense(exp: dict, pid: int):
             st.info(f"📎 Current: **{cur_medias[0]['filename']}**" +
                     (f" (+{len(cur_medias)-1} more)" if len(cur_medias) > 1 else ""))
         new_file = st.file_uploader("📎 Add attachment (existing files kept)",
-                                     type=["pdf", "jpg", "jpeg", "png", "xlsx"])
+                                     type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx", "doc", "xls", "pptx", "csv", "zip"])
 
         col_save, col_del = st.columns(2)
         save   = col_save.form_submit_button("💾 Update",  type="primary", use_container_width=True)
