@@ -83,10 +83,16 @@ st.title("📊 Estimate GP")
 if proj_df.empty:
     st.warning("No projects found."); st.stop()
 
+# ── Handle Quick Jump (must run BEFORE selectbox widget is created) ──
+_jump_label = st.session_state.pop('_est_jump_to', None)
+
 with st.sidebar:
     st.header("Filters")
     proj_options = ["All Projects"] + [f"{r.project_code} — {r.project_name}" for r in proj_df.itertuples()]
-    sel_label = st.selectbox("Project", proj_options, key="est_project")
+    _default_idx = 0
+    if _jump_label and _jump_label in proj_options:
+        _default_idx = proj_options.index(_jump_label)
+    sel_label = st.selectbox("Project", proj_options, index=_default_idx, key="est_project")
     is_all_projects = sel_label == "All Projects"
 
     if not is_all_projects:
@@ -225,7 +231,7 @@ def _render_dashboard_table(df, has_est):
         st.markdown(f"**Selected:** `{row['project_code']}` — {row['project_name']}")
         j1, j2, j3, j4 = st.columns(4)
         if j1.button("📊 Open Estimate", type="primary", use_container_width=True, key="dj1"):
-            st.session_state["est_project"] = _qj; st.rerun()
+            st.session_state["_est_jump_to"] = _qj; st.rerun()
         if j2.button("🏗️ Projects", use_container_width=True, key="dj2"):
             st.session_state["open_view_pid"] = pid; st.switch_page("pages/1_🏗️_Projects.py")
         if j3.button("📈 COGS Dashboard", use_container_width=True, key="dj3"):
@@ -281,7 +287,7 @@ def _render_analytics(df, has_est):
                     annotation_text=f"GO ≥{t.get('gp_go_threshold',25)}%", annotation_position="top right")
                 fig.add_vline(x=float(t.get('gp_conditional_threshold',18)), line_dash="dash", line_color="#ff9800",
                     annotation_text=f"COND ≥{t.get('gp_conditional_threshold',18)}%", annotation_position="top left")
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
         except ImportError: st.info("Install plotly for charts.")
     with col_gng:
         try:
@@ -296,30 +302,37 @@ def _render_analytics(df, has_est):
                 textinfo='label+value', textposition='outside')])
             fig.update_layout(height=260, margin=dict(l=10,r=10,t=5,b=30),
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', showlegend=False)
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
         except ImportError: pass
 
-    # GP% vs Contract scatter
-    if est_df['contract_value_vnd'].notna().any() and len(est_df) >= 2:
+    # GP% vs Sales Value scatter
+    if est_df['sales_value'].notna().any() and len(est_df) >= 2:
         try:
             import plotly.graph_objects as go
-            chart = est_df[est_df['contract_value_vnd'].notna() & (est_df['contract_value_vnd'] > 0)].copy()
+            chart = est_df[est_df['sales_value'].notna() & (est_df['sales_value'] > 0)].copy()
             if len(chart) >= 2:
                 st.divider()
-                st.caption("**GP% vs Contract Value**")
+                st.caption("**GP% vs Sales Value**")
                 cm = {'GO':'#4caf50','CONDITIONAL':'#ff9800','NO_GO':'#f44336'}
                 fig = go.Figure()
                 for _, r in chart.iterrows():
-                    fig.add_trace(go.Scatter(x=[r['gp_percent']], y=[r['contract_value_vnd']/1e6],
+                    _sv = float(r['sales_value'])
+                    fig.add_trace(go.Scatter(x=[r['gp_percent']], y=[_sv / 1e6],
                         mode='markers+text', marker=dict(size=12, color=cm.get(r['go_no_go_result'],'#9e9e9e'),
                             line=dict(width=1,color='white')),
                         text=[str(r['project_code'])[-3:]], textposition='top center', textfont=dict(size=9),
-                        hovertemplate=f"<b>{r['project_code']}</b><br>{str(r['project_name'])[:30]}<br>GP: {r['gp_percent']:.1f}%<br>Contract: {r['contract_value_vnd']:,.0f}<extra></extra>",
+                        hovertemplate=(
+                            f"<b>{r['project_code']}</b><br>"
+                            f"{str(r['project_name'])[:30]}<br>"
+                            f"GP: {r['gp_percent']:.1f}%<br>"
+                            f"Sales: {_sv:,.0f} VND<br>"
+                            f"<extra></extra>"
+                        ),
                         showlegend=False))
                 fig.update_layout(height=300, margin=dict(l=60,r=10,t=5,b=40),
-                    xaxis=dict(title="GP%"), yaxis=dict(title="Contract (M VND)"),
+                    xaxis=dict(title="GP%"), yaxis=dict(title="Sales (M VND)"),
                     plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
                 st.caption("🟢 GO | 🟡 Conditional | 🔴 No-Go")
         except ImportError: pass
 
