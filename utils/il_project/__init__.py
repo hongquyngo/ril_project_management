@@ -61,6 +61,8 @@ from .queries import (
     search_products,
     get_costbook_for_product,
     get_quotation_for_product,
+    # Estimate dashboard (cross-project)
+    get_estimate_dashboard_df,
     # Estimate line items
     get_estimate_line_items,
     create_estimate_line_item,
@@ -336,6 +338,8 @@ __all__ = [
     'get_benchmarks_df', 'create_benchmark',
     # ── Products & Costbook ──
     'search_products', 'get_costbook_for_product', 'get_quotation_for_product',
+    # ── Estimate Dashboard ──
+    'get_estimate_dashboard_df',
     # ── Estimate Line Items ──
     'get_estimate_line_items', 'create_estimate_line_item', 'delete_estimate_line_item',
     'get_costbook_products_for_import', 'get_active_costbooks',

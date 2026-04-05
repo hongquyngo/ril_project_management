@@ -279,6 +279,112 @@ def soft_delete_project(project_id: int, modified_by: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ESTIMATE DASHBOARD (cross-project)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@log_perf
+def get_estimate_dashboard_df(
+    status: Optional[str] = None,
+    type_id: Optional[int] = None,
+    go_no_go: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Cross-project estimate summary for dashboard.
+    Single query — no N+1. Joins projects + active estimate + latest revision.
+
+    Args:
+        status:   Filter by project status (e.g. 'IN_PROGRESS')
+        type_id:  Filter by project_type_id
+        go_no_go: Filter by Go/No-Go result ('GO', 'CONDITIONAL', 'NO_GO', 'NONE')
+
+    Returns DataFrame with columns:
+        project_id, project_code, project_name, customer_name,
+        type_name, type_code, status, pm_name,
+        active_rev, active_label, gp_percent, go_no_go_result,
+        sales_value, total_cogs, gp_amount,
+        line_item_count, estimate_created,
+        latest_rev, latest_gp, has_drift, is_stale,
+        contract_value_vnd
+    """
+    sql = """
+        SELECT
+            p.id AS project_id,
+            p.project_code,
+            p.project_name,
+            COALESCE(c.english_name, p.end_customer_name) AS customer_name,
+            pt.name AS type_name,
+            pt.code AS type_code,
+            p.status,
+            CONCAT(pm.first_name, ' ', pm.last_name) AS pm_name,
+            -- Active estimate
+            ea.estimate_version AS active_rev,
+            ea.estimate_label   AS active_label,
+            ea.estimated_gp_percent AS gp_percent,
+            ea.go_no_go_result,
+            ea.sales_value,
+            ea.total_cogs,
+            ea.estimated_gp     AS gp_amount,
+            ea.created_date     AS estimate_created,
+            -- Line item count (correlated subquery — fast with index on estimate_id)
+            (SELECT COUNT(*) FROM il_estimate_line_items li
+             WHERE li.estimate_id = ea.id AND li.delete_flag = 0) AS line_item_count,
+            -- Latest revision (may differ from active)
+            el.estimate_version AS latest_rev,
+            el.estimated_gp_percent AS latest_gp,
+            -- Drift detection: snapshot in il_projects != active estimate
+            CASE
+                WHEN ea.id IS NULL THEN NULL
+                WHEN ABS(COALESCE(p.estimated_gp_percent, 0)
+                       - COALESCE(ea.estimated_gp_percent, 0)) > 0.1
+                THEN 1 ELSE 0
+            END AS has_drift,
+            -- Stale detection: estimate created > 30 days ago
+            CASE
+                WHEN ea.id IS NOT NULL
+                 AND ea.created_date < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                THEN 1 ELSE 0
+            END AS is_stale,
+            -- Contract value in VND (for scatter chart)
+            COALESCE(
+                p.contract_value_before_vat * COALESCE(p.exchange_rate, 1),
+                p.contract_value * COALESCE(p.exchange_rate, 1),
+                0
+            ) AS contract_value_vnd
+        FROM il_projects p
+        LEFT JOIN il_project_types pt ON p.project_type_id = pt.id
+        LEFT JOIN companies c         ON p.customer_id = c.id
+        LEFT JOIN employees pm        ON p.pm_employee_id = pm.id
+        -- Active estimate (is_active = 1)
+        LEFT JOIN il_project_cogs_estimate ea
+            ON ea.project_id = p.id AND ea.is_active = 1 AND ea.delete_flag = 0
+        -- Latest revision (highest version number)
+        LEFT JOIN il_project_cogs_estimate el
+            ON el.project_id = p.id AND el.delete_flag = 0
+            AND el.estimate_version = (
+                SELECT MAX(e2.estimate_version)
+                FROM il_project_cogs_estimate e2
+                WHERE e2.project_id = p.id AND e2.delete_flag = 0
+            )
+        WHERE p.delete_flag = 0
+    """
+    params: Dict = {}
+    if status:
+        sql += " AND p.status = :status"
+        params['status'] = status
+    if type_id:
+        sql += " AND p.project_type_id = :type_id"
+        params['type_id'] = type_id
+    if go_no_go:
+        if go_no_go == 'NONE':
+            sql += " AND ea.id IS NULL"
+        else:
+            sql += " AND ea.go_no_go_result = :gng"
+            params['gng'] = go_no_go
+    sql += " ORDER BY p.created_date DESC"
+    return execute_query_df(sql, params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ESTIMATES
 # ══════════════════════════════════════════════════════════════════════════════
 
