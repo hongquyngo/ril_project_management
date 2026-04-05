@@ -83,17 +83,19 @@ st.title("📊 Estimate GP")
 if proj_df.empty:
     st.warning("No projects found."); st.stop()
 
-# ── Handle Quick Jump (set widget key BEFORE selectbox renders) ──
+# ── Handle Quick Jump (must run BEFORE selectbox widget is created) ──
+# Fix: SET value directly instead of pop+index — avoids Streamlit widget state race
 _jump_label = st.session_state.pop('_est_jump_to', None)
 if _jump_label:
-    # Safe: setting widget key BEFORE widget is created in this run
-    st.session_state['est_project'] = _jump_label
+    st.session_state['est_project'] = _jump_label  # explicit set — widget reads this
 
 with st.sidebar:
     st.header("Filters")
     proj_options = ["All Projects"] + [f"{r.project_code} — {r.project_name}" for r in proj_df.itertuples()]
-    # NO index= parameter — selectbox uses stored session_state['est_project']
-    # If key not in session_state (first load or after "Back"), defaults to first option
+    # Validate stored value still exists in current options (guard against cache refresh)
+    _stored = st.session_state.get('est_project')
+    if _stored and _stored not in proj_options:
+        st.session_state['est_project'] = "All Projects"
     sel_label = st.selectbox("Project", proj_options, key="est_project")
     is_all_projects = sel_label == "All Projects"
 
@@ -352,6 +354,7 @@ def _render_analytics(df, has_est):
 def _render_context_banner(proj, active_est):
     bc1, bc2 = st.columns([1, 8])
     if bc1.button("← All Projects", use_container_width=True, key="ctx_back"):
+        _wiz_cleanup()  # also clean wizard state to prevent ghost reopens
         st.session_state.pop('est_project', None)
         st.rerun()
 
@@ -433,7 +436,14 @@ def _wiz_items_sell_total():
     return sum(i.get('quantity', 0) * i.get('unit_sell', 0) * i.get('sell_exchange_rate', 1) for i in _wiz_items())
 
 def _wiz_init(active_est=None, pid=None):
-    """Initialize wizard state. Optionally prefill from active estimate."""
+    """Initialize wizard state. Optionally prefill from active estimate.
+    Cleans ALL old wizard keys first to prevent stale state leaks.
+    Persists project_id so dialog survives selectbox resets.
+    """
+    # Clean all old wizard keys first (Bug 4: stale state from previous attempt)
+    for k in [k for k in st.session_state if k.startswith(_WIZ)]:
+        del st.session_state[k]
+    # Init fresh state
     _wiz_set('step', 1)
     _wiz_set('items', [])
     _wiz_set('header', {})
@@ -443,6 +453,8 @@ def _wiz_init(active_est=None, pid=None):
     _wiz_set('show_manual', False)
     _wiz_set('edit_idx', -1)
     _wiz_set('tbl_ver', 0)
+    # Persist project_id (Bug 1: dialog must survive selectbox resets)
+    _wiz_set('project_id', pid)
 
 def _wiz_cleanup():
     """Remove all wizard keys from session state."""
@@ -1131,6 +1143,21 @@ def _frag_history(pid, _can_view_costs, _can_activate):
 # MAIN LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Guard: if wizard is active but selectbox reset, restore project selection ──
+# This is the core fix for Bug 1: wizard persists project_id, selectbox is fragile
+_wiz_active_pid = _wiz_get('project_id')
+if st.session_state.get('_est_open_create') and _wiz_active_pid and is_all_projects:
+    # Wizard is open but selectbox fell back to "All Projects" — restore it
+    _restore_row = proj_df[proj_df['project_id'] == _wiz_active_pid]
+    if not _restore_row.empty:
+        _r = _restore_row.iloc[0]
+        _restore_label = f"{_r['project_code']} — {_r['project_name']}"
+        if _restore_label in proj_options:
+            st.session_state['est_project'] = _restore_label
+            st.rerun()
+    # Project not in options (deleted?) — clean up stale wizard
+    _wiz_cleanup()
+
 if is_all_projects:
     _render_dashboard()
 else:
@@ -1148,6 +1175,8 @@ else:
     _render_context_banner(project, active_est)
     st.divider()
 
+    _dialog_is_open = bool(st.session_state.get('_est_open_create'))
+
     # ── 2 tabs (no separate "New Estimate" tab) ──
     tab_active, tab_history = st.tabs(["✅ Active Estimate", "🗂 History"])
 
@@ -1159,7 +1188,7 @@ else:
                 if ab1.button("➕ New Revision", type="primary", use_container_width=True, key="act_new_rev"):
                     _wiz_init(active_est, project_id)
                     st.session_state['_est_open_create'] = True
-                    # NO st.rerun() — let current run continue to dialog trigger below
+                    st.rerun()  # explicit rerun — let next run open dialog cleanly
             st.divider()
         else:
             # No active estimate — show create prompt
@@ -1168,17 +1197,39 @@ else:
                 if st.button("➕ Create First Estimate", type="primary", key="act_first_est"):
                     _wiz_init(None, project_id)
                     st.session_state['_est_open_create'] = True
+                    st.rerun()  # explicit rerun
             else:
                 st.caption("⛔ Bạn không có quyền tạo estimate. Chỉ PM, SA/Senior, hoặc Admin.")
 
         # ── Fragment: Active estimate display (isolated) ──
-        if active_est:
+        # Bug 6: skip fragment when dialog is open to prevent widget state conflicts
+        if active_est and not _dialog_is_open:
             _frag_active_estimate(project_id, _can_view_costs)
 
     with tab_history:
-        _frag_history(project_id, _can_view_costs, _can_activate)
+        if not _dialog_is_open:
+            _frag_history(project_id, _can_view_costs, _can_activate)
 
-    # ── Dialog trigger (MUST be at page bottom, OUTSIDE tabs) ──
-    # Uses get() not pop() — dialog persists across wizard step reruns
-    if st.session_state.get('_est_open_create') and project_id:
-        _dialog_create_estimate(project_id, project, pt, active_est)
+# ── Dialog trigger (OUTSIDE if/else — uses wizard-persisted project_id) ──
+# Bug 1: dialog uses persisted _wiz_project_id, NOT the selectbox-derived project_id.
+# Bug 2: detects ghost flags and cleans up.
+# Bug 5: detects stale state from dismissed dialogs (X / Escape).
+if st.session_state.get('_est_open_create'):
+    _wiz_pid = _wiz_get('project_id')
+    _wiz_step = _wiz_get('step')
+    if _wiz_pid and _wiz_step:
+        # Wizard properly initialized — resolve data and open dialog
+        _wiz_proj = get_project(_wiz_pid)
+        if _wiz_proj:
+            _wiz_pt = type_map.get(_wiz_proj.get('project_type_id', 0), {})
+            _wiz_active = get_active_estimate(_wiz_pid)
+            _dialog_create_estimate(_wiz_pid, _wiz_proj, _wiz_pt, _wiz_active)
+        else:
+            # Project deleted or inaccessible — clean up
+            logger.warning(f"Wizard project {_wiz_pid} not found — cleaning up wizard state")
+            _wiz_cleanup()
+    else:
+        # Ghost flag: _est_open_create=True but wizard state missing
+        # (dialog was dismissed via X/Escape without Cancel button)
+        logger.debug("Ghost _est_open_create detected — cleaning up")
+        _wiz_cleanup()
