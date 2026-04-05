@@ -92,10 +92,13 @@ if _jump_label:
 with st.sidebar:
     st.header("Filters")
     proj_options = ["All Projects"] + [f"{r.project_code} — {r.project_name}" for r in proj_df.itertuples()]
-    _default_idx = 0
     if _jump_label and _jump_label in proj_options:
-        _default_idx = proj_options.index(_jump_label)
-    sel_label = st.selectbox("Project", proj_options, index=_default_idx, key="est_project")
+        # Jump: force selectbox to specific project (cleared key above)
+        sel_label = st.selectbox("Project", proj_options,
+                                 index=proj_options.index(_jump_label), key="est_project")
+    else:
+        # Normal: let Streamlit use stored value from session_state (no index override)
+        sel_label = st.selectbox("Project", proj_options, key="est_project")
     is_all_projects = sel_label == "All Projects"
 
     if not is_all_projects:
