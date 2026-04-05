@@ -83,22 +83,18 @@ st.title("📊 Estimate GP")
 if proj_df.empty:
     st.warning("No projects found."); st.stop()
 
-# ── Handle Quick Jump (must run BEFORE selectbox widget is created) ──
+# ── Handle Quick Jump (set widget key BEFORE selectbox renders) ──
 _jump_label = st.session_state.pop('_est_jump_to', None)
 if _jump_label:
-    # Clear widget key so selectbox index= takes effect on this run
-    st.session_state.pop('est_project', None)
+    # Safe: setting widget key BEFORE widget is created in this run
+    st.session_state['est_project'] = _jump_label
 
 with st.sidebar:
     st.header("Filters")
     proj_options = ["All Projects"] + [f"{r.project_code} — {r.project_name}" for r in proj_df.itertuples()]
-    if _jump_label and _jump_label in proj_options:
-        # Jump: force selectbox to specific project (cleared key above)
-        sel_label = st.selectbox("Project", proj_options,
-                                 index=proj_options.index(_jump_label), key="est_project")
-    else:
-        # Normal: let Streamlit use stored value from session_state (no index override)
-        sel_label = st.selectbox("Project", proj_options, key="est_project")
+    # NO index= parameter — selectbox uses stored session_state['est_project']
+    # If key not in session_state (first load or after "Back"), defaults to first option
+    sel_label = st.selectbox("Project", proj_options, key="est_project")
     is_all_projects = sel_label == "All Projects"
 
     if not is_all_projects:
