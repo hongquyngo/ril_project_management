@@ -44,6 +44,9 @@ from .queries import (
     sync_cogs_actual,
     update_cogs_actual_fields,
     finalize_cogs_actual,
+    # Contract Alignment & Overrun (Items 12-14)
+    get_contract_alignment,
+    check_cogs_overrun,
     # Milestones
     get_milestones_df,
     create_milestone,
@@ -323,6 +326,8 @@ __all__ = [
     'get_presales_costs_df', 'create_presales_cost', 'bulk_update_presales_allocation',
     # ── COGS Actual ──
     'get_cogs_actual', 'get_all_cogs_summary_df', 'sync_cogs_actual', 'update_cogs_actual_fields', 'finalize_cogs_actual',
+    # ── Contract Alignment & Overrun ──
+    'get_contract_alignment', 'check_cogs_overrun',
     # ── Milestones ──
     'get_milestones_df', 'create_milestone', 'update_milestone',
     # ── Variance ──

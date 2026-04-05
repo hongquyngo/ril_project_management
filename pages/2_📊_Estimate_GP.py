@@ -740,6 +740,59 @@ with tab_active:
                 desc = li_desc_map.get(att.get('line_item_id', 0), '')
                 st.caption(f"📎 {desc}: **{att['filename']}**")
 
+    # ── Contract Alignment Check (Item 12) ────────────────────────────────
+    if _can_view_costs:
+        try:
+            from utils.il_project.queries import get_contract_alignment
+            align = get_contract_alignment(project_id)
+            if align and (align['contract_before_vat'] > 0 or align['estimate_sales'] > 0):
+                st.divider()
+                with st.expander("🔗 **Contract Alignment Check**", expanded=False):
+                    ac1, ac2 = st.columns(2)
+
+                    # Contract vs Estimate
+                    _cbv = align['contract_before_vat']
+                    _es = align['estimate_sales']
+                    _match = abs(_cbv - _es) / _cbv * 100 if _cbv > 0 and _es > 0 else None
+                    ac1.markdown(f"**Contract (Before VAT):** {fmt_vnd(_cbv)}")
+                    if _match is not None:
+                        if _match < 1:
+                            ac1.markdown(f"**Estimate Sales:** {fmt_vnd(_es)} ✅ Match")
+                        else:
+                            ac1.markdown(f"**Estimate Sales:** {fmt_vnd(_es)} ⚠️ {_match:.1f}% diff")
+                    else:
+                        ac1.markdown(f"**Estimate Sales:** {fmt_vnd(_es)}")
+
+                    # Milestones vs After VAT
+                    _cav = align['contract_after_vat']
+                    _mbt = align['milestone_billing_total']
+                    _mc = align['milestone_count']
+                    ac2.markdown(f"**Contract (After VAT):** {fmt_vnd(_cav)}")
+                    if _mc > 0:
+                        _ms_icon = "✅" if abs(align['milestone_pct'] - 100) < 1 else "⚠️"
+                        ac2.markdown(f"**Milestone Billing:** {fmt_vnd(_mbt)} ({_mc} milestones, {align['milestone_pct']}%) {_ms_icon}")
+                    else:
+                        ac2.markdown("**Milestones:** None yet")
+
+                    # PR vs Estimate COGS
+                    st.markdown("---")
+                    pc1, pc2, pc3 = st.columns(3)
+                    pc1.metric("Estimate COGS", fmt_vnd(align['estimate_cogs']))
+                    _pr_label = f"{align['pr_pct_of_estimate']}% of estimate" if align['pr_pct_of_estimate'] > 0 else None
+                    pc2.metric("PR Total (all active)", fmt_vnd(align['pr_all_total']),
+                               delta=_pr_label, delta_color="off")
+
+                    # COGS overrun
+                    _ov = align['cogs_overrun_pct']
+                    if _ov is not None:
+                        _ov_color = "normal" if _ov > 5 else "off"
+                        pc3.metric("Actual COGS", fmt_vnd(align['cogs_actual_total']),
+                                   delta=f"{_ov:+.1f}% vs estimate", delta_color="inverse" if _ov > 5 else "off")
+                    else:
+                        pc3.metric("Actual COGS", fmt_vnd(align['cogs_actual_total']) if align['cogs_actual_total'] > 0 else "—")
+        except Exception as e:
+            logger.debug(f"Contract alignment widget: {e}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — History
 # ══════════════════════════════════════════════════════════════════════════════

@@ -137,7 +137,37 @@ def _load_completion_map() -> dict:
         return {}
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_vat_map() -> dict:
+    """
+    Return {project_id: {before_vat, vat_pct, after_vat}} from il_projects.
+    Used for Excel export and display enrichment.
+    """
+    try:
+        from utils.db import execute_query
+        rows = execute_query("""
+            SELECT id AS project_id,
+                   contract_value_before_vat AS before_vat,
+                   vat_percent AS vat_pct,
+                   contract_value_after_vat AS after_vat
+            FROM il_projects
+            WHERE delete_flag = 0
+              AND contract_value_before_vat IS NOT NULL
+        """, {})
+        return {
+            r['project_id']: {
+                'before_vat': float(r['before_vat'] or 0),
+                'vat_pct': float(r['vat_pct'] or 0),
+                'after_vat': float(r['after_vat'] or 0),
+            }
+            for r in rows
+        }
+    except Exception as e:
+        logger.debug(f"_load_vat_map: {e}")
+        return {}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def _load_estimate_drift_map() -> dict:
     """
     Detect GP% drift between il_projects snapshot and actual estimates.
@@ -641,9 +671,22 @@ def _dialog_view_project(project_id: int):
     # KPIs
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Status",      proj['status'])
-    m2.metric("Contract",    fmt_vnd(proj.get('contract_value')))
+    # Show before-VAT as primary, after-VAT as delta
+    _bv = proj.get('contract_value_before_vat') or proj.get('contract_value')
+    _av = proj.get('contract_value_after_vat')
+    m2.metric("Contract (Before VAT)", fmt_vnd(_bv),
+              delta=f"After VAT: {fmt_vnd(_av)}" if _av else None, delta_color="off")
     m3.metric("Est. GP%",    fmt_percent(proj.get('estimated_gp_percent')))
     m4.metric("Actual GP%",  fmt_percent(proj.get('actual_gp_percent')))
+
+    # VAT detail line
+    _vp = proj.get('vat_percent')
+    if _bv and _vp:
+        st.caption(
+            f"💰 Before VAT: **{fmt_vnd(_bv)}** | VAT {_vp}%: "
+            f"**{fmt_vnd(proj.get('contract_value_vat_amount'))}** | "
+            f"After VAT: **{fmt_vnd(_av)}**"
+        )
 
     # Detail tabs
     d_tab_info, d_tab_milestones = st.tabs(["📋 Info", "🎯 Milestones"])
@@ -787,10 +830,12 @@ def _milestone_panel(project_id: int, proj: dict):
 # EXPORT HELPERS (Phase 3)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_export_df(df: pd.DataFrame, pending_map: dict, completion_map: dict) -> pd.DataFrame:
+def _build_export_df(df: pd.DataFrame, pending_map: dict, completion_map: dict, _vat_map: dict = None) -> pd.DataFrame:
     """Build a clean DataFrame for Excel export — human-readable columns, no emoji noise."""
     if df.empty:
         return df
+    if _vat_map is None:
+        _vat_map = _load_vat_map()
 
     export = pd.DataFrame({
         'Project Code':     df['project_code'],
@@ -802,6 +847,9 @@ def _build_export_df(df: pd.DataFrame, pending_map: dict, completion_map: dict) 
                                 {'🟢': 'Healthy', '🟡': 'Watch', '🔴': 'At Risk', '⚪': 'N/A'}),
         'PM':               df['pm_name'],
         'Contract Value':   df['effective_contract_value'],
+        'Before VAT':       df['project_id'].map(lambda pid: _vat_map.get(int(pid), {}).get('before_vat')),
+        'VAT %':            df['project_id'].map(lambda pid: _vat_map.get(int(pid), {}).get('vat_pct')),
+        'After VAT':        df['project_id'].map(lambda pid: _vat_map.get(int(pid), {}).get('after_vat')),
         'CCY':              df['currency_code'],
         'Est GP%':          df['estimated_gp_percent'],
         'Actual GP%':       df['actual_gp_percent'],

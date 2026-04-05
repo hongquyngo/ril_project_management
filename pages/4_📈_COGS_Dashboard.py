@@ -44,6 +44,45 @@ emp_int_id = st.session_state.get('employee_id')
 ctx = PermissionContext(employee_id=emp_int_id, is_admin=is_admin, user_role=user_role)
 
 
+# ── COGS Overrun Email Helper ────────────────────────────────────────────────
+
+def _send_cogs_overrun_email(overrun: dict):
+    """Send COGS overrun alert email to PM. Non-blocking."""
+    try:
+        from utils.il_project.email_notify import _send_email, _is_configured, _base_template
+        if not _is_configured():
+            return
+        pm_email = overrun.get('pm_email')
+        if not pm_email:
+            return
+        body = f'''
+        <p>Hi <strong>{overrun.get('pm_name', 'PM')}</strong>,</p>
+        <p>COGS overrun detected on project <strong>{overrun['project_code']}</strong>:</p>
+        <table style="width:100%;margin:16px 0;border-collapse:collapse;">
+            <tr><td style="padding:8px;border-bottom:1px solid #e5e7eb;color:#6b7280;">Estimate COGS</td>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;font-weight:600;">{overrun['estimate_cogs']:,.0f} VND</td></tr>
+            <tr><td style="padding:8px;border-bottom:1px solid #e5e7eb;color:#6b7280;">Actual COGS</td>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#dc2626;">{overrun['actual_cogs']:,.0f} VND</td></tr>
+            <tr><td style="padding:8px;border-bottom:1px solid #e5e7eb;color:#6b7280;">Overrun</td>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#dc2626;">+{overrun['overrun_pct']}%</td></tr>
+            <tr><td style="padding:8px;border-bottom:1px solid #e5e7eb;color:#6b7280;">Est GP%</td>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{overrun['estimate_gp_pct']:.1f}%</td></tr>
+            <tr><td style="padding:8px;color:#6b7280;">Actual GP%</td>
+                <td style="padding:8px;font-weight:600;">{overrun['actual_gp_pct']:.1f}%</td></tr>
+        </table>
+        <p style="color:#6b7280;font-size:13px;">
+            Please review and take corrective action. Open COGS Dashboard in ERP for details.
+        </p>'''
+        _send_email(
+            to_emails=[pm_email],
+            subject=f"[COGS Overrun] {overrun['project_code']} — +{overrun['overrun_pct']}% over estimate",
+            html_body=_base_template("COGS Overrun Alert", body),
+        )
+        logger.info(f"COGS overrun email sent: {overrun['project_code']} +{overrun['overrun_pct']}%")
+    except Exception as e:
+        logger.debug(f"COGS overrun email failed: {e}")
+
+
 # ── Lookups ───────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load():
@@ -431,6 +470,21 @@ def _render_actual_cogs_tab(pid: int, actual: dict, est: dict):
             with st.spinner("Syncing..."):
                 try:
                     sync_cogs_actual(pid, user_id)
+                    # Item 13: Check for COGS overrun and send alert
+                    try:
+                        from utils.il_project.queries import check_cogs_overrun
+                        overrun = check_cogs_overrun(pid, threshold_pct=10.0)
+                        if overrun:
+                            st.warning(
+                                f"⚠️ **COGS Overrun Alert** — Actual COGS exceeds estimate by "
+                                f"**{overrun['overrun_pct']}%** "
+                                f"(Estimate: {fmt_vnd(overrun['estimate_cogs'])} → "
+                                f"Actual: {fmt_vnd(overrun['actual_cogs'])})"
+                            )
+                            # Send email notification to PM
+                            _send_cogs_overrun_email(overrun)
+                    except Exception as oe:
+                        logger.debug(f"COGS overrun check: {oe}")
                     st.success("Sync complete!")
                     st.rerun()
                 except Exception as e:

@@ -919,10 +919,15 @@ def sync_cogs_actual(project_id: int, modified_by: str,
             """), {'pid': project_id}).fetchone()
             e_presales = float(r4.total)
 
-            # Get contract value for sales_value
+            # Get contract value for sales_value (use before_vat for GP calc)
             r5 = conn.execute(text("""
-                SELECT COALESCE(amended_contract_value, contract_value, 0) AS cv,
-                       currency_id
+                SELECT COALESCE(
+                    amended_value_before_vat,
+                    contract_value_before_vat,
+                    amended_contract_value,
+                    contract_value, 0
+                ) AS cv,
+                currency_id, exchange_rate
                 FROM il_projects WHERE id = :pid
             """), {'pid': project_id}).fetchone()
             sales_val = float(r5.cv) if r5 else 0
@@ -1369,8 +1374,152 @@ def get_active_costbooks() -> List[Dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MEDIA HELPERS — Pattern A (shared across all IL entities)
+# CONTRACT ALIGNMENT — cross-page consistency check
 # ══════════════════════════════════════════════════════════════════════════════
+
+def get_contract_alignment(project_id: int) -> Dict:
+    """
+    Compute alignment data for Contract ↔ Estimate ↔ Milestones ↔ PR.
+    Used by Page 2 Active Estimate tab widget.
+
+    Returns dict with:
+      contract_before_vat, contract_after_vat, exchange_rate,
+      estimate_sales, estimate_cogs, estimate_gp_pct,
+      milestone_billing_total, milestone_count, milestone_pct,
+      pr_approved_total, pr_all_total, pr_pct_of_estimate,
+      cogs_actual_total, cogs_overrun_pct
+    """
+    result = {
+        'contract_before_vat': 0, 'contract_after_vat': 0, 'exchange_rate': 1,
+        'estimate_sales': 0, 'estimate_cogs': 0, 'estimate_gp_pct': 0,
+        'milestone_billing_total': 0, 'milestone_count': 0, 'milestone_pct': 0,
+        'pr_approved_total': 0, 'pr_all_total': 0, 'pr_pct_of_estimate': 0,
+        'cogs_actual_total': 0, 'cogs_overrun_pct': None,
+    }
+    try:
+        # Project contract
+        rows = execute_query("""
+            SELECT
+                COALESCE(amended_value_before_vat, contract_value_before_vat,
+                         amended_contract_value, contract_value, 0) AS before_vat,
+                COALESCE(amended_value_after_vat, contract_value_after_vat, 0) AS after_vat,
+                COALESCE(exchange_rate, 1) AS exc_rate
+            FROM il_projects WHERE id = :pid AND delete_flag = 0
+        """, {'pid': project_id})
+        if rows:
+            result['contract_before_vat'] = float(rows[0]['before_vat'])
+            result['contract_after_vat'] = float(rows[0]['after_vat'])
+            result['exchange_rate'] = float(rows[0]['exc_rate'])
+
+        # Active estimate
+        est = execute_query("""
+            SELECT sales_value, total_cogs, estimated_gp_percent
+            FROM il_project_cogs_estimate
+            WHERE project_id = :pid AND is_active = 1 AND delete_flag = 0
+            LIMIT 1
+        """, {'pid': project_id})
+        if est:
+            result['estimate_sales'] = float(est[0].get('sales_value') or 0)
+            result['estimate_cogs'] = float(est[0].get('total_cogs') or 0)
+            result['estimate_gp_pct'] = float(est[0].get('estimated_gp_percent') or 0)
+
+        # Milestones billing
+        ms = execute_query("""
+            SELECT COUNT(*) AS cnt,
+                   COALESCE(SUM(billing_amount), 0) AS total
+            FROM il_project_milestones
+            WHERE project_id = :pid AND delete_flag = 0
+        """, {'pid': project_id})
+        if ms:
+            result['milestone_count'] = int(ms[0]['cnt'])
+            result['milestone_billing_total'] = float(ms[0]['total'])
+            if result['contract_after_vat'] > 0:
+                result['milestone_pct'] = round(
+                    result['milestone_billing_total'] / result['contract_after_vat'] * 100, 1)
+
+        # PR totals
+        pr = execute_query("""
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'APPROVED' THEN total_amount_vnd ELSE 0 END), 0) AS approved,
+                COALESCE(SUM(CASE WHEN status NOT IN ('CANCELLED','REJECTED') THEN total_amount_vnd ELSE 0 END), 0) AS all_active
+            FROM il_purchase_requests
+            WHERE project_id = :pid AND delete_flag = 0
+        """, {'pid': project_id})
+        if pr:
+            result['pr_approved_total'] = float(pr[0]['approved'])
+            result['pr_all_total'] = float(pr[0]['all_active'])
+            if result['estimate_cogs'] > 0:
+                result['pr_pct_of_estimate'] = round(
+                    result['pr_all_total'] / result['estimate_cogs'] * 100, 1)
+
+        # COGS actual
+        cogs = execute_query("""
+            SELECT total_cogs FROM il_project_cogs_actual
+            WHERE project_id = :pid AND delete_flag = 0
+        """, {'pid': project_id})
+        if cogs and cogs[0].get('total_cogs'):
+            result['cogs_actual_total'] = float(cogs[0]['total_cogs'])
+            if result['estimate_cogs'] > 0:
+                result['cogs_overrun_pct'] = round(
+                    (result['cogs_actual_total'] - result['estimate_cogs'])
+                    / result['estimate_cogs'] * 100, 1)
+
+    except Exception as e:
+        logger.warning(f"get_contract_alignment({project_id}): {e}")
+
+    return result
+
+
+def check_cogs_overrun(project_id: int, threshold_pct: float = 10.0) -> Optional[Dict]:
+    """
+    Check if actual COGS exceeds estimate by more than threshold.
+    Returns overrun info dict if overrun detected, None otherwise.
+
+    Used for:
+      - Item 13: COGS overrun auto-alert
+      - Page 1 health indicator enhancement
+    """
+    try:
+        rows = execute_query("""
+            SELECT
+                ca.total_cogs AS actual_cogs,
+                e.total_cogs  AS estimate_cogs,
+                ca.actual_gp_percent,
+                e.estimated_gp_percent,
+                p.project_code, p.project_name,
+                CONCAT(pm.first_name, ' ', pm.last_name) AS pm_name,
+                pm.email AS pm_email
+            FROM il_project_cogs_actual ca
+            JOIN il_projects p ON p.id = ca.project_id
+            JOIN employees pm ON pm.id = p.pm_employee_id
+            LEFT JOIN il_project_cogs_estimate e
+                ON e.project_id = ca.project_id AND e.is_active = 1 AND e.delete_flag = 0
+            WHERE ca.project_id = :pid AND ca.delete_flag = 0
+        """, {'pid': project_id})
+        if not rows:
+            return None
+        r = rows[0]
+        est = float(r.get('estimate_cogs') or 0)
+        act = float(r.get('actual_cogs') or 0)
+        if est <= 0 or act <= 0:
+            return None
+        overrun_pct = (act - est) / est * 100
+        if overrun_pct > threshold_pct:
+            return {
+                'project_id': project_id,
+                'project_code': r['project_code'],
+                'project_name': r['project_name'],
+                'estimate_cogs': est,
+                'actual_cogs': act,
+                'overrun_pct': round(overrun_pct, 1),
+                'estimate_gp_pct': float(r.get('estimated_gp_percent') or 0),
+                'actual_gp_pct': float(r.get('actual_gp_percent') or 0),
+                'pm_name': r.get('pm_name', ''),
+                'pm_email': r.get('pm_email', ''),
+            }
+    except Exception as e:
+        logger.warning(f"check_cogs_overrun({project_id}): {e}")
+    return None
 
 def _create_media(s3_key: str, filename: str, created_by: str) -> int:
     """
