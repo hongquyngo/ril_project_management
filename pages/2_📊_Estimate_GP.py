@@ -390,152 +390,587 @@ def _sanitize_item(item):
     return clean
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SESSION STATE — Line Items
+# WIZARD STATE — for Create Estimate dialog
 # ══════════════════════════════════════════════════════════════════════════════
-if "_est_items" not in st.session_state:
-    st.session_state["_est_items"] = []
-if not is_all_projects:
-    if st.session_state.get("_est_project_id") != project_id:
-        st.session_state["_est_items"] = []
-        st.session_state["_est_project_id"] = project_id
-        st.session_state["_prefill_loaded"] = False
 
-def _add_item(item): st.session_state["_est_items"].append(_sanitize_item(item))
-def _remove_item(idx):
-    if 0 <= idx < len(st.session_state["_est_items"]): st.session_state["_est_items"].pop(idx)
-def _clear_items(): st.session_state["_est_items"] = []
-def _update_item(idx, item):
-    if 0 <= idx < len(st.session_state["_est_items"]): st.session_state["_est_items"][idx] = _sanitize_item(item)
-def _items_total(cat=None):
-    items = st.session_state["_est_items"]
-    if cat: items = [i for i in items if i.get('cogs_category') == cat]
-    return sum(i.get('quantity',0)*i.get('unit_cost',0)*i.get('cost_exchange_rate',1) for i in items)
-def _items_sell_total():
-    return sum(i.get('quantity',0)*i.get('unit_sell',0)*i.get('sell_exchange_rate',1) for i in st.session_state["_est_items"])
+_WIZ = '_est_wiz_'  # prefix for all wizard keys
+
+def _wiz_get(key, default=None):
+    return st.session_state.get(f'{_WIZ}{key}', default)
+
+def _wiz_set(key, value):
+    st.session_state[f'{_WIZ}{key}'] = value
+
+def _wiz_items():
+    return st.session_state.get(f'{_WIZ}items', [])
+
+def _wiz_add_item(item):
+    st.session_state.setdefault(f'{_WIZ}items', []).append(_sanitize_item(item))
+
+def _wiz_remove_item(idx):
+    items = _wiz_items()
+    if 0 <= idx < len(items):
+        items.pop(idx)
+        _wiz_set('items', items)
+
+def _wiz_update_item(idx, item):
+    items = _wiz_items()
+    if 0 <= idx < len(items):
+        items[idx] = _sanitize_item(item)
+        _wiz_set('items', items)
+
+def _wiz_items_total(cat=None):
+    items = _wiz_items()
+    if cat:
+        items = [i for i in items if i.get('cogs_category') == cat]
+    return sum(i.get('quantity', 0) * i.get('unit_cost', 0) * i.get('cost_exchange_rate', 1) for i in items)
+
+def _wiz_items_sell_total():
+    return sum(i.get('quantity', 0) * i.get('unit_sell', 0) * i.get('sell_exchange_rate', 1) for i in _wiz_items())
+
+def _wiz_init(active_est=None, pid=None):
+    """Initialize wizard state. Optionally prefill from active estimate."""
+    _wiz_set('step', 1)
+    _wiz_set('items', [])
+    _wiz_set('header', {})
+    _wiz_set('prefill_from', None)
+    _wiz_set('show_add', False)
+    _wiz_set('show_import', False)
+    _wiz_set('show_manual', False)
+    _wiz_set('edit_idx', -1)
+    _wiz_set('tbl_ver', 0)
+
+def _wiz_cleanup():
+    """Remove all wizard keys from session state."""
+    keys = [k for k in st.session_state if k.startswith(_WIZ)]
+    for k in keys:
+        del st.session_state[k]
+    st.session_state.pop('_est_open_create', None)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DIALOGS — Add Product, Import Costbook, Edit Item
+# WIZARD DIALOG — 3-step Create Estimate
 # ══════════════════════════════════════════════════════════════════════════════
-@st.dialog("🔍 Add Product from Catalog", width="large")
-def _dialog_add_product(category):
-    is_svc = category == 'SERVICE'
-    products = search_products('', is_service=is_svc if is_svc else None, limit=99999)
-    if not products: st.info("No products found."); return
-    prod_opts = [f"{p['pt_code']} — {p['name']} [{p.get('brand_name','')}]" for p in products]
-    sel_prod = st.selectbox("🔍 Select Product", prod_opts)
-    prod = products[prod_opts.index(sel_prod)]
-    st.caption(f"UOM: {prod.get('uom','—')} | Brand: {prod.get('brand_name','—')}")
-    st.divider(); st.markdown("**💰 Vendor Cost (Costbook)**")
-    cbs = get_costbook_for_product(prod['id'])
-    cb = None; _rc = None
-    if cbs:
-        cb_opts = [f"{c['costbook_number']} | {c['vendor_name']} | {c['unit_price']:,.2f} {c['currency_code']} [{c['status']}]" for c in cbs]
-        cb = cbs[cb_opts.index(st.selectbox("Costbook Entry", cb_opts))]
-        _rc = get_rate_to_vnd(cb['currency_code'])
-    else: st.warning("No costbook. Enter cost manually.")
-    st.divider(); st.markdown("**📤 Selling Price (Quotation)**")
-    qts = get_quotation_for_product(prod['id'], customer_id=project.get('customer_id'))
-    sel_qd = None
-    if qts:
-        qt_o = ["(Skip)"] + [f"{q['quotation_number']} | {q['customer_name']} | {q['selling_unit_price']:,.2f} {q['currency_code']}" for q in qts]
-        sq = st.selectbox("Quotation Entry", qt_o)
-        if sq != "(Skip)": sel_qd = qts[qt_o.index(sq)-1]
+
+@st.dialog("📝 New Estimate", width="large")
+def _dialog_create_estimate(pid, proj, pt, active_est):
+    step = _wiz_get('step', 1)
+
+    # ── Progress indicator ──
+    cols = st.columns(3)
+    for i, (icon, label) in enumerate([(("① ", "Header")), ("② ", "Line Items"), ("③ ", "COGS Formula")], 1):
+        style = "**" if i == step else ""
+        sep = " ✓" if i < step else ""
+        cols[i - 1].markdown(f"{style}{icon}{label}{sep}{style}")
     st.divider()
-    q1, q2, q3 = st.columns(3)
-    qty = q1.number_input("Quantity", value=1.0, min_value=0.01, format="%.2f")
-    cp = float(cb['unit_price'] if cb else 0); cc = cb['currency_code'] if cb else 'VND'
-    cr = _show_rate(q2, f"Cost ({cc}→VND)", _rc) if _rc else 1.0
-    if not _rc: q2.metric(f"Cost ({cc}→VND)", "1.00"); cr = 1.0
-    sp = float(sel_qd['selling_unit_price'] if sel_qd else 0); sc = sel_qd['currency_code'] if sel_qd else 'VND'
-    sr = _show_rate(q3, f"Sell ({sc}→VND)", get_rate_to_vnd(sc)) if sel_qd else 1.0
-    if not sel_qd: q3.metric(f"Sell ({sc}→VND)", "1.00")
-    if not cb:
-        m1, m2 = st.columns(2); cp = m1.number_input("Manual Cost", value=0.0, format="%.2f")
-        cc = m2.text_input("Currency", value="VND")
-        if cc != 'VND': r2 = get_rate_to_vnd(cc); cr = r2.rate if r2.ok else 1.0
-        else: cr = 1.0
-    cvnd = qty*cp*cr; svnd = qty*sp*sr
-    p1, p2, p3 = st.columns(3)
-    p1.metric("Cost VND", fmt_vnd(cvnd)); p2.metric("Sell VND", fmt_vnd(svnd) if svnd > 0 else '—')
-    p3.metric("Item GP%", f"{(svnd-cvnd)/svnd*100:.1f}%" if svnd > 0 else '—')
-    notes = st.text_input("Notes", placeholder="Optional")
-    att = st.file_uploader("📎 Attach", type=["pdf","jpg","jpeg","png","xlsx","docx","doc","xls","pptx","csv","zip"], key="li_att")
-    if st.button("✅ Add to Estimate", type="primary", use_container_width=True):
-        ad = {'bytes': att.read(), 'name': att.name} if att else None
-        _add_item({'cogs_category': category, 'product_id': prod['id'], 'item_description': prod['name'],
-            'brand_name': prod.get('brand_name',''), 'pt_code': prod.get('pt_code',''),
-            'costbook_detail_id': cb['costbook_detail_id'] if cb else None,
-            'vendor_name': cb['vendor_name'] if cb else '', 'vendor_quote_ref': cb.get('vendor_quote_number','') if cb else '',
-            'costbook_number': cb['costbook_number'] if cb else '',
-            'unit_cost': cp, 'cost_currency_code': cc, 'cost_currency_id': cb['currency_id'] if cb else None, 'cost_exchange_rate': cr,
-            'quotation_detail_id': sel_qd['quotation_detail_id'] if sel_qd else None,
-            'unit_sell': sp, 'sell_currency_code': sc, 'sell_currency_id': sel_qd['currency_id'] if sel_qd else None, 'sell_exchange_rate': sr,
-            'quantity': qty, 'uom': prod.get('uom','Pcs'), 'notes': notes or None, '_attachment': ad})
-        st.success(f"✅ Added {prod['name']} × {qty}"); st.rerun()
 
-@st.dialog("📦 Import from Costbook", width="large")
-def _dialog_import_costbook(category):
-    costbooks = get_active_costbooks()
-    if not costbooks: st.warning("No costbooks."); return
-    cb_opts = [f"{c['costbook_number']} | {c['vendor_name']} | {c['line_count']} items [{c['status']}]" for c in costbooks]
-    cb = costbooks[cb_opts.index(st.selectbox("Costbook", cb_opts))]
-    prods = get_costbook_products_for_import(cb['id'])
-    if not prods: st.info("No products."); return
-    st.markdown(f"**{len(prods)} products** from {cb['vendor_name']}")
-    preview = pd.DataFrame([{'Product': p['product_name'][:40], 'Code': p['pt_code'],
-        'Price': f"{p['unit_price']:,.2f}" if p.get('unit_price') else '—', 'CCY': p.get('currency_code','')} for p in prods])
-    st.dataframe(preview, width="stretch", hide_index=True, height=min(35*len(prods)+38, 300))
-    cc = prods[0].get('currency_code','USD') if prods else 'USD'
-    _r = get_rate_to_vnd(cc); er = _show_rate(st, f"Rate ({cc}→VND)", _r)
-    if st.button(f"📦 Import {len(prods)} items", type="primary", use_container_width=True):
-        for p in prods:
-            cat = 'SERVICE' if p.get('is_service') else category
-            _add_item({'cogs_category': cat, 'product_id': p['product_id'], 'item_description': p['product_name'],
-                'brand_name': p.get('brand_name',''), 'pt_code': p.get('pt_code',''),
-                'costbook_detail_id': p['costbook_detail_id'], 'vendor_name': p.get('vendor_name',''),
-                'vendor_quote_ref': p.get('vendor_quote_number',''), 'costbook_number': p.get('costbook_number',''),
-                'unit_cost': float(p.get('unit_price',0) or 0), 'cost_currency_code': p.get('currency_code',''),
-                'cost_currency_id': p.get('currency_id'), 'cost_exchange_rate': er,
+    if step == 1:
+        _wiz_step1_header(pid, proj, pt, active_est)
+    elif step == 2:
+        _wiz_step2_items(pid, proj)
+    elif step == 3:
+        _wiz_step3_formula(pid, proj, pt, active_est)
+
+
+# ── Step 1: Header ──────────────────────────────────────────────────────────
+
+def _wiz_step1_header(pid, proj, pt, active_est):
+    from utils.il_project.queries import get_next_estimate_version
+    nv = get_next_estimate_version(pid)
+
+    header = _wiz_get('header', {})
+    h1, h2 = st.columns(2)
+    label = h1.text_input("Estimate Label", value=header.get('label', f"Rev {nv}"), key="wh_label")
+    est_type = h2.selectbox("Type", ["QUICK", "DETAILED"],
+                            index=1 if header.get('est_type') == 'DETAILED' else 0, key="wh_type")
+
+    # Prefill mode
+    prefill_mode = 'scratch'
+    if active_est:
+        prefill_mode = st.radio(
+            "Start from",
+            ["active", "scratch"],
+            format_func=lambda x: f"📋 Active estimate (Rev {active_est['estimate_version']})" if x == "active" else "🆕 Start from scratch",
+            horizontal=True, key="wh_prefill",
+        )
+
+    notes = st.text_area("Assessment Notes", value=header.get('notes', ''), height=80, key="wh_notes")
+
+    st.divider()
+    st.markdown("**📎 Attachments** — scope documents, BOQ, vendor quotes")
+    est_files = st.file_uploader(
+        "Drag & drop files",
+        type=["pdf", "jpg", "jpeg", "png", "xlsx", "docx", "doc", "xls", "pptx", "csv", "zip"],
+        accept_multiple_files=True, key="wh_files",
+    )
+
+    # Navigation
+    st.divider()
+    n1, _, n2 = st.columns([1, 3, 1])
+    if n1.button("✖ Cancel", use_container_width=True, key="wh_cancel"):
+        _wiz_cleanup()
+        st.rerun()
+    if n2.button("Next: Line Items →", type="primary", use_container_width=True, key="wh_next"):
+        # Save header data
+        _wiz_set('header', {'label': label, 'est_type': est_type, 'notes': notes, 'files': est_files})
+        _wiz_set('next_version', nv)
+        # Prefill items from active estimate if chosen
+        if prefill_mode == 'active' and active_est and not _wiz_items():
+            existing = get_estimate_line_items(active_est['id'])
+            if not existing.empty:
+                for _, row in existing.iterrows():
+                    _wiz_add_item(row.to_dict())
+            _wiz_set('prefill_from', active_est['id'])
+            # Carry over coefficients
+            _wiz_set('prefill_coeffs', {
+                'alpha': active_est.get('alpha_rate'), 'beta': active_est.get('beta_rate'),
+                'gamma': active_est.get('gamma_rate'), 'man_days': active_est.get('d_man_days'),
+                'day_rate': active_est.get('d_man_day_rate'), 'team_size': active_est.get('d_team_size'),
+            })
+        _wiz_set('step', 2)
+        st.rerun()
+
+
+# ── Step 2: Line Items ──────────────────────────────────────────────────────
+
+def _wiz_step2_items(pid, proj):
+    items = _wiz_items()
+
+    # ── Action buttons ──
+    b1, b2, b3, b4 = st.columns(4)
+    if b1.button("🔍 Add Equipment (A)", use_container_width=True, key="wi_add_a"):
+        _wiz_set('show_add', 'A'); _wiz_set('show_import', False); _wiz_set('show_manual', False); _wiz_set('edit_idx', -1)
+    if b2.button("🔧 Add Fabrication (C)", use_container_width=True, key="wi_add_c"):
+        _wiz_set('show_add', 'C'); _wiz_set('show_import', False); _wiz_set('show_manual', False); _wiz_set('edit_idx', -1)
+    if b3.button("📦 Import Costbook", use_container_width=True, key="wi_import"):
+        _wiz_set('show_import', True); _wiz_set('show_add', False); _wiz_set('show_manual', False); _wiz_set('edit_idx', -1)
+    if b4.button("✏️ Manual Item", use_container_width=True, key="wi_manual"):
+        _wiz_set('show_manual', True); _wiz_set('show_add', False); _wiz_set('show_import', False); _wiz_set('edit_idx', -1)
+
+    # ── Inline panels ──
+    _show_add = _wiz_get('show_add', False)
+    if _show_add:
+        _wiz_panel_add_product(_show_add, proj)
+
+    if _wiz_get('show_import', False):
+        _wiz_panel_import_costbook()
+
+    if _wiz_get('show_manual', False):
+        _wiz_panel_manual_item()
+
+    # ── Items table ──
+    st.divider()
+    items = _wiz_items()  # re-read after panel actions
+    if items:
+        rows = []
+        for i, it in enumerate(items):
+            cv = it.get('quantity', 0) * it.get('unit_cost', 0) * it.get('cost_exchange_rate', 1)
+            rows.append({
+                '#': i + 1, 'Cat': it.get('cogs_category', ''),
+                'Product': (it.get('item_description', '') or '')[:40],
+                'Vendor': (it.get('vendor_name', '') or '')[:25],
+                'Qty': it.get('quantity', 0),
+                'Cost': f"{it.get('unit_cost', 0):,.2f}",
+                'CCY': it.get('cost_currency_code', ''),
+                'Total VND': f"{cv:,.0f}",
+            })
+        tbl_key = f"wiz_li_{_wiz_get('tbl_ver', 0)}"
+        event = st.dataframe(
+            pd.DataFrame(rows), key=tbl_key, width="stretch", hide_index=True,
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                '#': st.column_config.NumberColumn('#', width=35),
+                'Cat': st.column_config.TextColumn('Cat', width=35),
+                'Qty': st.column_config.NumberColumn('Qty', format="%.1f", width=55),
+            },
+        )
+
+        # Subtotals
+        a_t = _wiz_items_total('A')
+        c_t = _wiz_items_total('C')
+        st.caption(
+            f"**{len(items)} items** | "
+            f"A: {a_t:,.0f} ₫ | C: {c_t:,.0f} ₫ | "
+            f"Sell: {_wiz_items_sell_total():,.0f} ₫"
+        )
+
+        # Row selection → Edit / Remove
+        sel = event.selection.rows
+        if sel:
+            _sel_item = items[sel[0]]
+            sc1, sc2, sc3, sc4 = st.columns([3, 1, 1, 1])
+            sc1.caption(f"**#{sel[0]+1}** — {(_sel_item.get('item_description','') or '')[:50]}")
+            if sc2.button("✏️ Edit", type="primary", use_container_width=True, key="wi_edit"):
+                _wiz_set('edit_idx', sel[0])
+                _wiz_set('show_add', False); _wiz_set('show_import', False); _wiz_set('show_manual', False)
+            if sc3.button("🗑 Remove", use_container_width=True, key="wi_rm"):
+                _wiz_remove_item(sel[0])
+                _wiz_set('tbl_ver', _wiz_get('tbl_ver', 0) + 1)
+                st.rerun()
+            if sc4.button("✖", use_container_width=True, key="wi_desel"):
+                _wiz_set('tbl_ver', _wiz_get('tbl_ver', 0) + 1)
+                st.rerun()
+
+        # Inline edit panel
+        edit_idx = _wiz_get('edit_idx', -1)
+        if 0 <= edit_idx < len(items):
+            _wiz_panel_edit_item(edit_idx)
+
+    else:
+        st.info("No items yet. Use buttons above to add products.")
+
+    # ── Navigation ──
+    st.divider()
+    n1, _, n2 = st.columns([1, 3, 1])
+    if n1.button("← Back", use_container_width=True, key="wi_back"):
+        _wiz_set('step', 1); st.rerun()
+    if items:
+        if n2.button("Next: Formula →", type="primary", use_container_width=True, key="wi_next"):
+            _wiz_set('show_add', False); _wiz_set('show_import', False)
+            _wiz_set('show_manual', False); _wiz_set('edit_idx', -1)
+            _wiz_set('step', 3); st.rerun()
+    else:
+        n2.button("Next: Formula →", disabled=True, use_container_width=True, key="wi_next_dis",
+                  help="Add at least one item")
+
+
+# ── Step 2 inline panels ────────────────────────────────────────────────────
+
+def _wiz_panel_add_product(category, proj):
+    """Inline panel: search product catalog + costbook lookup."""
+    with st.container(border=True):
+        st.markdown(f"**🔍 Add Product — Category {category}**")
+        is_svc = category == 'SERVICE'
+        products = search_products('', is_service=is_svc if is_svc else None, limit=99999)
+        if not products:
+            st.info("No products found.")
+            if st.button("Close", key="wp_close_add"): _wiz_set('show_add', False); st.rerun()
+            return
+        prod_opts = [f"{p['pt_code']} — {p['name']} [{p.get('brand_name', '')}]" for p in products]
+        prod = products[prod_opts.index(st.selectbox("Select Product", prod_opts, key="wp_prod"))]
+        st.caption(f"UOM: {prod.get('uom', '—')} | Brand: {prod.get('brand_name', '—')}")
+
+        cbs = get_costbook_for_product(prod['id'])
+        cb = None; _rc = None
+        if cbs:
+            cb_opts = [f"{c['costbook_number']} | {c['vendor_name']} | {c['unit_price']:,.2f} {c['currency_code']}" for c in cbs]
+            cb = cbs[cb_opts.index(st.selectbox("Costbook Entry", cb_opts, key="wp_cb"))]
+            _rc = get_rate_to_vnd(cb['currency_code'])
+        qc1, qc2, qc3 = st.columns(3)
+        qty = qc1.number_input("Quantity", value=1.0, min_value=0.01, format="%.2f", key="wp_qty")
+        cp = float(cb['unit_price'] if cb else 0)
+        cc = cb['currency_code'] if cb else 'VND'
+        cr = _show_rate(qc2, f"Rate ({cc}→VND)", _rc) if _rc else 1.0
+        if not cb:
+            cp = qc3.number_input("Manual Cost", value=0.0, format="%.2f", key="wp_mc")
+        else:
+            qc3.metric("Cost VND", fmt_vnd(qty * cp * cr))
+
+        ac1, ac2 = st.columns(2)
+        if ac1.button("✅ Add Item", type="primary", use_container_width=True, key="wp_add"):
+            _wiz_add_item({
+                'cogs_category': category, 'product_id': prod['id'],
+                'item_description': prod['name'], 'brand_name': prod.get('brand_name', ''),
+                'pt_code': prod.get('pt_code', ''),
+                'costbook_detail_id': cb['costbook_detail_id'] if cb else None,
+                'vendor_name': cb['vendor_name'] if cb else '',
+                'vendor_quote_ref': cb.get('vendor_quote_number', '') if cb else '',
+                'costbook_number': cb['costbook_number'] if cb else '',
+                'unit_cost': cp, 'cost_currency_code': cc,
+                'cost_currency_id': cb['currency_id'] if cb else None, 'cost_exchange_rate': cr,
                 'quotation_detail_id': None, 'unit_sell': 0, 'sell_currency_code': '',
                 'sell_currency_id': None, 'sell_exchange_rate': 1.0,
-                'quantity': 1, 'uom': p.get('uom','Pcs'), 'notes': None})
-        st.success(f"✅ Imported {len(prods)} items!"); st.rerun()
+                'quantity': qty, 'uom': prod.get('uom', 'Pcs'), 'notes': None,
+            })
+            st.success(f"✅ Added {prod['name']} × {qty}")
+            _wiz_set('show_add', False); st.rerun()
+        if ac2.button("Close", use_container_width=True, key="wp_close"):
+            _wiz_set('show_add', False); st.rerun()
 
-@st.dialog("✏️ Edit Line Item", width="large")
-def _dialog_edit_item(idx):
-    items = st.session_state["_est_items"]
-    if idx < 0 or idx >= len(items): st.error("Item not found."); return
+
+def _wiz_panel_import_costbook():
+    """Inline panel: bulk import from costbook."""
+    with st.container(border=True):
+        st.markdown("**📦 Import from Costbook**")
+        costbooks = get_active_costbooks()
+        if not costbooks:
+            st.warning("No active costbooks.")
+            if st.button("Close", key="wpi_close_e"): _wiz_set('show_import', False); st.rerun()
+            return
+        cb_opts = [f"{c['costbook_number']} | {c['vendor_name']} | {c['line_count']} items" for c in costbooks]
+        cb = costbooks[cb_opts.index(st.selectbox("Costbook", cb_opts, key="wpi_cb"))]
+        prods = get_costbook_products_for_import(cb['id'])
+        if not prods:
+            st.info("No products in this costbook.")
+            if st.button("Close", key="wpi_close_n"): _wiz_set('show_import', False); st.rerun()
+            return
+        st.caption(f"**{len(prods)} products** from {cb['vendor_name']}")
+        # Dedup: exclude items already in wizard
+        existing_pids = {it.get('product_id') for it in _wiz_items() if it.get('product_id')}
+        new_prods = [p for p in prods if p['product_id'] not in existing_pids]
+        if len(new_prods) < len(prods):
+            st.caption(f"ℹ️ {len(prods) - len(new_prods)} already in list (skipped)")
+        if not new_prods:
+            st.success("All products already added!")
+            if st.button("Close", key="wpi_close_a"): _wiz_set('show_import', False); st.rerun()
+            return
+        cc = new_prods[0].get('currency_code', 'USD')
+        _r = get_rate_to_vnd(cc)
+        er = _show_rate(st, f"Rate ({cc}→VND)", _r)
+        ic1, ic2 = st.columns(2)
+        if ic1.button(f"📦 Import {len(new_prods)} items", type="primary", use_container_width=True, key="wpi_do"):
+            for p in new_prods:
+                cat = 'SERVICE' if p.get('is_service') else 'A'
+                _wiz_add_item({
+                    'cogs_category': cat, 'product_id': p['product_id'],
+                    'item_description': p['product_name'], 'brand_name': p.get('brand_name', ''),
+                    'pt_code': p.get('pt_code', ''),
+                    'costbook_detail_id': p['costbook_detail_id'], 'vendor_name': p.get('vendor_name', ''),
+                    'vendor_quote_ref': p.get('vendor_quote_number', ''), 'costbook_number': p.get('costbook_number', ''),
+                    'unit_cost': float(p.get('unit_price', 0) or 0), 'cost_currency_code': p.get('currency_code', ''),
+                    'cost_currency_id': p.get('currency_id'), 'cost_exchange_rate': er,
+                    'quotation_detail_id': None, 'unit_sell': 0, 'sell_currency_code': '',
+                    'sell_currency_id': None, 'sell_exchange_rate': 1.0,
+                    'quantity': 1, 'uom': p.get('uom', 'Pcs'), 'notes': None,
+                })
+            st.success(f"✅ Imported {len(new_prods)} items!")
+            _wiz_set('show_import', False); st.rerun()
+        if ic2.button("Close", use_container_width=True, key="wpi_close"):
+            _wiz_set('show_import', False); st.rerun()
+
+
+def _wiz_panel_manual_item():
+    """Inline panel: add manual line item."""
+    with st.container(border=True):
+        st.markdown("**✏️ Manual Item**")
+        mc1, mc2 = st.columns(2)
+        m_cat = mc1.selectbox("Category", ["A", "C", "SERVICE"], key="wpm_cat")
+        m_desc = mc2.text_input("Description *", key="wpm_desc")
+        md1, md2, md3 = st.columns(3)
+        m_qty = md1.number_input("Qty", value=1.0, min_value=0.01, format="%.2f", key="wpm_qty")
+        m_price = md2.number_input("Unit Cost (VND)", value=0.0, format="%.0f", key="wpm_price")
+        m_vendor = md3.text_input("Vendor", key="wpm_vendor")
+        ac1, ac2 = st.columns(2)
+        if ac1.button("✅ Add", type="primary", use_container_width=True, key="wpm_add"):
+            if m_desc and m_price > 0:
+                _wiz_add_item({
+                    'cogs_category': m_cat, 'product_id': None, 'item_description': m_desc,
+                    'brand_name': '', 'pt_code': '', 'costbook_detail_id': None, 'vendor_name': m_vendor,
+                    'vendor_quote_ref': '', 'costbook_number': '', 'unit_cost': m_price,
+                    'cost_currency_code': 'VND', 'cost_currency_id': None, 'cost_exchange_rate': 1.0,
+                    'quotation_detail_id': None, 'unit_sell': 0, 'sell_currency_code': '',
+                    'sell_currency_id': None, 'sell_exchange_rate': 1.0,
+                    'quantity': m_qty, 'uom': 'Pcs', 'notes': None,
+                })
+                st.success(f"✅ Added {m_desc}")
+                _wiz_set('show_manual', False); st.rerun()
+            else:
+                st.warning("Description and Cost required.")
+        if ac2.button("Close", use_container_width=True, key="wpm_close"):
+            _wiz_set('show_manual', False); st.rerun()
+
+
+def _wiz_panel_edit_item(idx):
+    """Inline panel: edit a line item."""
+    items = _wiz_items()
     it = items[idx].copy()
-    st.markdown(f"**{it.get('item_description','—')}**")
-    if it.get('pt_code'): st.caption(f"Code: {it['pt_code']} | Brand: {it.get('brand_name','—')}")
-    e1, e2 = st.columns(2)
-    co = ['A','C','SERVICE']; ci = co.index(it.get('cogs_category','A')) if it.get('cogs_category') in co else 0
-    nc = e1.selectbox("Category", co, index=ci, key="ec"); nd = e2.text_input("Description", value=it.get('item_description',''), key="ed")
-    q1, q2, q3 = st.columns(3)
-    nq = q1.number_input("Qty", value=float(it.get('quantity',1)), min_value=0.01, format="%.2f", key="eq")
-    nco = q2.number_input("Unit Cost", value=float(it.get('unit_cost',0)), format="%.2f", key="eco")
-    ncc = q3.text_input("Cost CCY", value=it.get('cost_currency_code','VND'), key="ecc")
-    _re = get_rate_to_vnd(ncc); ncr = _re.rate if _re.ok else float(it.get('cost_exchange_rate',1))
-    r1, r2 = st.columns(2); _show_rate(r1, f"Rate ({ncc}→VND)", _re)
-    nv = r2.text_input("Vendor", value=it.get('vendor_name','') or '', key="ev")
-    st.divider()
-    s1, s2, s3 = st.columns(3)
-    ns = s1.number_input("Unit Sell", value=float(it.get('unit_sell',0)), format="%.2f", key="es")
-    nsc = s2.text_input("Sell CCY", value=it.get('sell_currency_code','VND') or 'VND', key="esc")
-    _rs = get_rate_to_vnd(nsc); nsr = _rs.rate if _rs.ok else float(it.get('sell_exchange_rate',1))
-    _show_rate(s3, f"Sell ({nsc}→VND)", _rs)
-    nn = st.text_input("Notes", value=it.get('notes','') or '', key="en")
-    cv = nq*nco*ncr; sv = nq*ns*nsr
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Cost VND", fmt_vnd(cv)); m2.metric("Sell VND", fmt_vnd(sv) if sv > 0 else '—')
-    m3.metric("Item GP%", f"{(sv-cv)/sv*100:.1f}%" if sv > 0 else '—')
-    b1, b2 = st.columns(2)
-    if b1.button("💾 Save", type="primary", use_container_width=True, key="esv"):
-        it.update({'cogs_category':nc,'item_description':nd,'quantity':nq,'unit_cost':nco,
-            'cost_currency_code':ncc,'cost_exchange_rate':ncr,'vendor_name':nv,
-            'unit_sell':ns,'sell_currency_code':nsc,'sell_exchange_rate':nsr,'notes':nn or None})
-        _update_item(idx, it); st.success("✅ Updated!"); st.rerun()
-    if b2.button("✖ Cancel", use_container_width=True, key="ecn"): st.rerun()
+    with st.container(border=True):
+        st.markdown(f"**✏️ Edit Item #{idx + 1}** — {it.get('item_description', '—')}")
+        e1, e2 = st.columns(2)
+        co = ['A', 'C', 'SERVICE']
+        ci = co.index(it.get('cogs_category', 'A')) if it.get('cogs_category') in co else 0
+        nc = e1.selectbox("Category", co, index=ci, key="wpe_cat")
+        nd = e2.text_input("Description", value=it.get('item_description', ''), key="wpe_desc")
+        q1, q2, q3 = st.columns(3)
+        nq = q1.number_input("Qty", value=float(it.get('quantity', 1)), min_value=0.01, format="%.2f", key="wpe_qty")
+        nco = q2.number_input("Unit Cost", value=float(it.get('unit_cost', 0)), format="%.2f", key="wpe_cost")
+        ncc = q3.text_input("Cost CCY", value=it.get('cost_currency_code', 'VND'), key="wpe_ccy")
+        _re = get_rate_to_vnd(ncc)
+        ncr = _re.rate if _re.ok else float(it.get('cost_exchange_rate', 1))
+        nv = st.text_input("Vendor", value=it.get('vendor_name', '') or '', key="wpe_vendor")
+        st.caption(f"Cost VND: **{fmt_vnd(nq * nco * ncr)}** | Rate: {ncr:,.2f}")
+        bc1, bc2 = st.columns(2)
+        if bc1.button("💾 Save Changes", type="primary", use_container_width=True, key="wpe_save"):
+            it.update({
+                'cogs_category': nc, 'item_description': nd, 'quantity': nq,
+                'unit_cost': nco, 'cost_currency_code': ncc, 'cost_exchange_rate': ncr,
+                'vendor_name': nv,
+            })
+            _wiz_update_item(idx, it)
+            _wiz_set('edit_idx', -1); st.success("✅ Updated!"); st.rerun()
+        if bc2.button("Cancel", use_container_width=True, key="wpe_cancel"):
+            _wiz_set('edit_idx', -1); st.rerun()
+
+
+# ── Step 3: COGS Formula + Live Preview + Save ──────────────────────────────
+
+def _wiz_step3_formula(pid, proj, pt, active_est):
+    items = _wiz_items()
+    header = _wiz_get('header', {})
+    prefill = _wiz_get('prefill_coeffs', {})
+    nv = _wiz_get('next_version', 1)
+
+    da = float(pt.get('default_alpha', 0.06))
+    db = float(pt.get('default_beta', 0.40))
+    dg = float(pt.get('default_gamma', 0.04))
+    gt = float(pt.get('gp_go_threshold', 25))
+    ct = float(pt.get('gp_conditional_threshold', 18))
+    a_total = _wiz_items_total('A')
+    c_total = _wiz_items_total('C')
+
+    # Sales value (locked from contract)
+    _bv = float(proj.get('contract_value_before_vat') or proj.get('contract_value') or 0)
+    _er = float(proj.get('exchange_rate') or 1)
+    sales_value = _bv * _er
+
+    col_form, col_result = st.columns([3, 2])
+    with col_form:
+        with st.form("wiz_cogs_form"):
+            # Sales display
+            if sales_value > 0:
+                st.metric("Sales Value (VND)", f"{sales_value:,.0f}")
+                st.caption(f"🔒 From contract" + (f" (VAT {proj.get('vat_percent', 0)}%)" if proj.get('vat_percent') else ""))
+            else:
+                st.warning("⚠️ No contract value. Set in Projects page.")
+
+            st.divider()
+            st.markdown("**A — Equipment | C — Fabrication** (0 = use line items total)")
+            ac1, ac2 = st.columns(2)
+            a_ov = ac1.number_input("A Override", value=0.0, format="%.0f", help=f"Items: {a_total:,.0f} ₫")
+            c_ov = ac2.number_input("C Override", value=0.0, format="%.0f", help=f"Items: {c_total:,.0f} ₫")
+
+            st.divider()
+            st.markdown("**B — Logistics** `B = A × α`")
+            bc1, bc2 = st.columns([1, 2])
+            alpha = bc1.number_input("α", value=float(prefill.get('alpha') or da), format="%.4f")
+            b_m = bc2.number_input("B Override", value=0.0, format="%.0f")
+
+            st.divider()
+            st.markdown("**D — Direct Labor** `D = days × rate × team`")
+            d1, d2, d3 = st.columns(3)
+            md = d1.number_input("Man-Days", value=int(prefill.get('man_days') or 0), min_value=0)
+            dr = d2.number_input("Daily Rate", value=float(prefill.get('day_rate') or 1_500_000), format="%.0f")
+            ts = d3.number_input("Team Size", value=float(prefill.get('team_size') or 1.0), format="%.1f")
+            d_m = st.number_input("D Override", value=0.0, format="%.0f")
+
+            st.divider()
+            st.markdown("**E — Travel & Site OH** `E = D × β`")
+            ec1, ec2 = st.columns([1, 2])
+            beta = ec1.number_input("β", value=float(prefill.get('beta') or db), format="%.4f")
+            e_m = ec2.number_input("E Override", value=0.0, format="%.0f")
+
+            st.divider()
+            st.markdown("**F — Warranty Reserve** `F = (A+C) × γ`")
+            fc1, fc2 = st.columns([1, 2])
+            gamma = fc1.number_input("γ", value=float(prefill.get('gamma') or dg), format="%.4f")
+            f_m = fc2.number_input("F Override", value=0.0, format="%.0f")
+
+            submitted = st.form_submit_button("💾 Save & Activate", type="primary", use_container_width=True)
+
+    # ── Live preview (right column) ──
+    with col_result:
+        st.markdown("### 📐 Live Estimate")
+        ea = a_ov if a_ov > 0 else a_total
+        ec = c_ov if c_ov > 0 else c_total
+        es = sales_value if sales_value > 0 else _wiz_items_sell_total()
+        res = calculate_estimate(
+            a_equipment=ea, alpha=alpha, c_fabrication=ec,
+            man_days=md, man_day_rate=dr, team_size=ts, beta=beta, gamma=gamma, sales_value=es,
+            b_override=b_m if b_m > 0 else None, d_override=d_m if d_m > 0 else None,
+            e_override=e_m if e_m > 0 else None, f_override=f_m if f_m > 0 else None,
+        )
+        cr = []
+        for k in ['a', 'b', 'c', 'd', 'e', 'f']:
+            v = res.get(k, 0)
+            p = (v / res['total_cogs'] * 100) if res['total_cogs'] > 0 else 0
+            cr.append({'Item': COGS_LABELS[k.upper()], 'Amount': f"{v:,.0f}", '%': f"{p:.1f}%"})
+        cr.append({'Item': '**TOTAL COGS**', 'Amount': f"{res['total_cogs']:,.0f}", '%': ''})
+        st.dataframe(pd.DataFrame(cr), width="stretch", hide_index=True,
+                     column_config={'Amount': st.column_config.TextColumn('VND'),
+                                    '%': st.column_config.TextColumn('%', width=60)})
+        st.divider()
+        r1, r2 = st.columns(2)
+        r1.metric("Sales", fmt_vnd(res['sales']))
+        r1.metric("COGS", fmt_vnd(res['total_cogs']))
+        r2.metric("GP", fmt_vnd(res['gp']))
+        r2.metric("GP%", f"{res['gp_percent']:.1f}%")
+        gng = get_go_no_go(res['gp_percent'], gt, ct)
+        st.divider()
+        if gng == 'GO':
+            st.success(f"### ✅ GO — {res['gp_percent']:.1f}%")
+        elif gng == 'CONDITIONAL':
+            st.warning(f"### ⚠️ CONDITIONAL — {res['gp_percent']:.1f}%")
+        else:
+            st.error(f"### ❌ NO-GO — {res['gp_percent']:.1f}%")
+        st.caption(f"{len(items)} items | A={'items' if a_ov == 0 else 'override'}")
+
+    # ── Back button (outside form) ──
+    if st.button("← Back to Items", key="wf_back"):
+        _wiz_set('step', 2); st.rerun()
+
+    # ── Save logic ──
+    if submitted:
+        if ea <= 0 and ec <= 0 and md <= 0 and es <= 0:
+            st.warning("Enter at least one cost + Sales.")
+            return
+        ln = "; ".join([
+            f"{it.get('cogs_category', '')}: {(it.get('item_description', '') or '')[:25]} x{it.get('quantity', 0):.0f}"
+            for it in items[:10]
+        ])
+        if len(items) > 10:
+            ln += f" (+{len(items) - 10})"
+        gs = get_go_no_go(res['gp_percent'], gt, ct)
+        notes = header.get('notes', '')
+        est_files = header.get('files', [])
+        est_data = {
+            'project_id': pid, 'estimate_version': nv,
+            'estimate_label': header.get('label', f"Rev {nv}"),
+            'estimate_type': header.get('est_type', 'DETAILED'),
+            'a_equipment_cost': ea, 'a_equipment_notes': ln[:500] or None,
+            'alpha_rate': alpha, 'b_logistics_import': res['b'], 'b_override': 1 if b_m > 0 else 0,
+            'c_custom_fabrication': ec, 'c_fabrication_notes': None,
+            'd_man_days': md, 'd_man_day_rate': dr, 'd_team_size': ts,
+            'd_direct_labor': res['d'], 'd_override': 1 if d_m > 0 else 0,
+            'beta_rate': beta, 'e_travel_site_oh': res['e'], 'e_override': 1 if e_m > 0 else 0,
+            'gamma_rate': gamma, 'f_warranty_reserve': res['f'], 'f_override': 1 if f_m > 0 else 0,
+            'total_cogs': res['total_cogs'], 'sales_value': res['sales'],
+            'estimated_gp': res['gp'], 'estimated_gp_percent': res['gp_percent'],
+            'go_no_go_result': gs, 'assessment_notes': notes or None,
+        }
+        try:
+            nid = create_estimate(est_data, user_id)
+            activate_estimate(pid, nid, user_id)
+            for i, it in enumerate(items):
+                ld = _sanitize_item({
+                    'estimate_id': nid, 'cogs_category': it.get('cogs_category', 'A'),
+                    'product_id': it.get('product_id'), 'item_description': it.get('item_description', ''),
+                    'brand_name': it.get('brand_name', ''), 'pt_code': it.get('pt_code', ''),
+                    'costbook_detail_id': it.get('costbook_detail_id'),
+                    'vendor_name': it.get('vendor_name', ''), 'vendor_quote_ref': it.get('vendor_quote_ref', ''),
+                    'costbook_number': it.get('costbook_number', ''),
+                    'unit_cost': it.get('unit_cost', 0), 'cost_currency_id': it.get('cost_currency_id'),
+                    'cost_exchange_rate': it.get('cost_exchange_rate', 1),
+                    'quotation_detail_id': it.get('quotation_detail_id'),
+                    'unit_sell': it.get('unit_sell', 0), 'sell_currency_id': it.get('sell_currency_id'),
+                    'sell_exchange_rate': it.get('sell_exchange_rate', 1),
+                    'quantity': it.get('quantity', 1), 'uom': it.get('uom', 'Pcs'),
+                    'notes': it.get('notes'), 'view_order': i,
+                })
+                create_estimate_line_item(ld, user_id)
+            s3 = _get_s3()
+            if s3 and est_files:
+                for f in est_files:
+                    ok, sk = s3.upload_project_file(f.read(), f.name, pid)
+                    if ok:
+                        create_estimate_media(nid, sk, f.name, document_type='OTHER', created_by=user_id)
+            st.success(f"✅ Rev {nv} saved with {len(items)} line items!")
+            _wiz_cleanup()
+            _invalidate_estimates()
+            _invalidate_dashboard()
+            _load_projects.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Save failed: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FRAGMENT: Active Estimate
@@ -689,208 +1124,33 @@ def _frag_history(pid, _can_view_costs, _can_activate):
                 _invalidate_estimates(); _invalidate_dashboard(); _load_projects.clear(); st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NEW ESTIMATE TAB — inline form (Phase 2 will convert to dialog)
+# NEW ESTIMATE TAB — button opens wizard dialog
 # ══════════════════════════════════════════════════════════════════════════════
 def _render_new_estimate_tab(pid, proj, pt, active_est, _can_create, _can_view_costs):
     if not _can_create:
         st.info("⛔ Bạn không có quyền tạo estimate. Chỉ PM, SA/Senior, hoặc Admin.")
-        st.caption("Chuyển sang tab **✅ Active Estimate** để xem."); return
-
-    from utils.il_project.queries import get_next_estimate_version
-    nv = get_next_estimate_version(pid)
-    da = float(pt.get('default_alpha',0.06)); db = float(pt.get('default_beta',0.40))
-    dg = float(pt.get('default_gamma',0.04)); gt = float(pt.get('gp_go_threshold',25))
-    ct = float(pt.get('gp_conditional_threshold',18))
+        st.caption("Chuyển sang tab **✅ Active Estimate** để xem.")
+        return
 
     st.markdown(f"**Project:** `{proj['project_code']}` — {proj['project_name']}")
-    prefill = {}
+
     if active_est:
-        fresh = st.checkbox("🔄 Start from scratch", value=False, key="prefill_fresh_chk",
-            help="Uncheck = build on active estimate. Check = empty slate.")
-        if not fresh:
-            prefill = active_est
-            if not st.session_state["_est_items"]:
-                ex = get_estimate_line_items(active_est['id'])
-                if not ex.empty:
-                    for _, row in ex.iterrows(): _add_item(row.to_dict())
-                    st.toast(f"📋 Loaded {len(ex)} items from Rev {active_est['estimate_version']}")
-        else:
-            if st.session_state.get("_prefill_loaded"): _clear_items()
-            st.session_state["_prefill_loaded"] = False
-        if not fresh: st.session_state["_prefill_loaded"] = True
+        from utils.il_project.helpers import go_no_go_badge
+        gng = active_est.get('go_no_go_result', '')
+        _badge = go_no_go_badge(gng)
+        st.info(
+            f"📋 Current active: **Rev {active_est['estimate_version']}** — "
+            f"{active_est.get('estimate_label', '')} | "
+            f"GP: {fmt_percent(active_est.get('estimated_gp_percent'))} | "
+            f"{_badge}"
+        )
+        st.caption("Creating a new revision will build on the active estimate's data (items + coefficients).")
 
     st.divider()
-    col_form, col_result = st.columns([3, 2])
-    with col_form:
-        st.subheader("① Line Items")
-        b1, b2, b3, b4 = st.columns(4)
-        if b1.button("🔍 Equipment (A)", use_container_width=True): _dialog_add_product("A")
-        if b2.button("🔧 Fabrication (C)", use_container_width=True): _dialog_add_product("C")
-        if b3.button("📦 Import Costbook", use_container_width=True): _dialog_import_costbook("A")
-        if b4.button("🗑 Clear All", use_container_width=True): _clear_items(); st.rerun()
-        items = st.session_state["_est_items"]
-        if items:
-            rows = []
-            for i, it in enumerate(items):
-                cv = it.get('quantity',0)*it.get('unit_cost',0)*it.get('cost_exchange_rate',1)
-                rows.append({'📎':'📎' if it.get('_attachment') else '','#':i+1,'Cat':it.get('cogs_category',''),
-                    'Product':(it.get('item_description','') or '')[:35],'Vendor':(it.get('vendor_name','') or '')[:20],
-                    'Qty':it.get('quantity',0),'Cost':f"{it.get('unit_cost',0):,.2f}",
-                    'CCY':it.get('cost_currency_code',''),'Total VND':f"{cv:,.0f}",
-                    'Ref':(it.get('costbook_number','') or '')[:15]})
-            tk = f"li_tbl_{st.session_state.get('_li_key',0)}"
-            ev = st.dataframe(pd.DataFrame(rows), key=tk, width="stretch", hide_index=True,
-                on_select="rerun", selection_mode="single-row",
-                column_config={'#':st.column_config.NumberColumn('#',width=35),
-                    'Cat':st.column_config.TextColumn('',width=30),
-                    'Qty':st.column_config.NumberColumn('Qty',format="%.1f",width=55)})
-            sel = ev.selection.rows
-            if sel:
-                s1, s2, s3 = st.columns(3)
-                if s1.button("✏️ Edit", type="primary", use_container_width=True): _dialog_edit_item(sel[0])
-                if s2.button("🗑 Remove", use_container_width=True):
-                    _remove_item(sel[0]); st.session_state["_li_key"]=st.session_state.get("_li_key",0)+1; st.rerun()
-                if s3.button("✖ Deselect", use_container_width=True):
-                    st.session_state["_li_key"]=st.session_state.get("_li_key",0)+1; st.rerun()
-            a_total = _items_total('A'); c_total = _items_total('C')
-            st.caption(f"**A:** {a_total:,.0f} ₫ | **C:** {c_total:,.0f} ₫ | **Sell:** {_items_sell_total():,.0f} ₫")
-        else:
-            a_total = c_total = 0; st.info("No items. Add from catalog or import costbook.")
-        with st.expander("✏️ Manual item"):
-            mc1, mc2 = st.columns(2)
-            m_cat = mc1.selectbox("Category",["A","C","SERVICE"],key="m_cat")
-            m_desc = mc2.text_input("Description *",key="m_desc")
-            md1, md2, md3 = st.columns(3)
-            m_qty = md1.number_input("Qty",value=1.0,min_value=0.01,format="%.2f",key="m_qty")
-            m_price = md2.number_input("Unit Cost (VND)",value=0.0,format="%.0f",key="m_price")
-            m_vendor = md3.text_input("Vendor",key="m_vendor")
-            if st.button("➕ Add manual", key="m_add", use_container_width=True):
-                if m_desc and m_price > 0:
-                    _add_item({'cogs_category':m_cat,'product_id':None,'item_description':m_desc,
-                        'brand_name':'','pt_code':'','costbook_detail_id':None,'vendor_name':m_vendor,
-                        'vendor_quote_ref':'','costbook_number':'','unit_cost':m_price,
-                        'cost_currency_code':'VND','cost_currency_id':None,'cost_exchange_rate':1.0,
-                        'quotation_detail_id':None,'unit_sell':0,'sell_currency_code':'',
-                        'sell_currency_id':None,'sell_exchange_rate':1.0,
-                        'quantity':m_qty,'uom':'Pcs','notes':None}); st.rerun()
-
-        st.divider()
-        with st.form("estimate_form"):
-            st.subheader("② COGS Formula")
-            h1, h2, h3 = st.columns(3)
-            label = h1.text_input("Label", value=f"Rev {nv}")
-            est_type = h2.selectbox("Type",["QUICK","DETAILED"],index=1 if prefill.get('estimate_type')=='DETAILED' else 0)
-            _bv = float(proj.get('contract_value_before_vat') or proj.get('contract_value') or 0)
-            _er = float(proj.get('exchange_rate') or 1)
-            sales_value = _bv * _er
-            if sales_value > 0:
-                h3.metric("Sales (VND)", f"{sales_value:,.0f}")
-                h3.caption(f"🔒 From contract" + (f" (VAT {proj.get('vat_percent',0)}%)" if proj.get('vat_percent') else ""))
-            else: h3.metric("Sales (VND)","—"); h3.caption("⚠️ Set contract in Projects page")
-            st.divider(); st.markdown("**A — Equipment | C — Fabrication**")
-            ac1, ac2 = st.columns(2)
-            a_ov = ac1.number_input("A Override",value=0.0,format="%.0f",help=f"Items: {a_total:,.0f}")
-            c_ov = ac2.number_input("C Override",value=0.0,format="%.0f",help=f"Items: {c_total:,.0f}")
-            st.divider(); st.markdown("**B — Logistics** `B = A × α`")
-            bc1, bc2 = st.columns([1,2])
-            alpha = bc1.number_input("α",value=float(prefill.get('alpha_rate',da) or da),format="%.4f")
-            b_m = bc2.number_input("B Override",value=0.0,format="%.0f")
-            st.divider(); st.markdown("**D — Labor** `D = days × rate × team`")
-            d1, d2, d3 = st.columns(3)
-            md = d1.number_input("Man-Days",value=int(prefill.get('d_man_days',0) or 0),min_value=0)
-            dr = d2.number_input("Daily Rate",value=float(prefill.get('d_man_day_rate',1500000) or 1500000),format="%.0f")
-            ts = d3.number_input("Team Size",value=float(prefill.get('d_team_size',1.0) or 1.0),format="%.1f")
-            d_m = st.number_input("D Override",value=0.0,format="%.0f")
-            st.divider(); st.markdown("**E — Travel** `E = D × β`")
-            ec1, ec2 = st.columns([1,2])
-            beta = ec1.number_input("β",value=float(prefill.get('beta_rate',db) or db),format="%.4f")
-            e_m = ec2.number_input("E Override",value=0.0,format="%.0f")
-            st.divider(); st.markdown("**F — Warranty** `F = (A+C) × γ`")
-            fc1, fc2 = st.columns([1,2])
-            gamma = fc1.number_input("γ",value=float(prefill.get('gamma_rate',dg) or dg),format="%.4f")
-            f_m = fc2.number_input("F Override",value=0.0,format="%.0f")
-            st.divider()
-            notes = st.text_area("Assessment Notes",value=prefill.get('assessment_notes') or '',height=70)
-            st.divider(); st.markdown("**📎 Attachments**")
-            est_files = st.file_uploader("Files",type=["pdf","jpg","jpeg","png","xlsx","docx","doc","xls","pptx","csv","zip"],
-                accept_multiple_files=True,key="est_att")
-            submitted = st.form_submit_button("💾 Save & Activate", type="primary", use_container_width=True)
-
-    with col_result:
-        st.markdown("### 📐 Live Estimate")
-        ea = a_ov if a_ov > 0 else a_total; ec = c_ov if c_ov > 0 else c_total
-        es = sales_value if sales_value > 0 else _items_sell_total()
-        res = calculate_estimate(a_equipment=ea, alpha=alpha, c_fabrication=ec,
-            man_days=md, man_day_rate=dr, team_size=ts, beta=beta, gamma=gamma, sales_value=es,
-            b_override=b_m if b_m>0 else None, d_override=d_m if d_m>0 else None,
-            e_override=e_m if e_m>0 else None, f_override=f_m if f_m>0 else None)
-        cr = []
-        for k in ['a','b','c','d','e','f']:
-            v = res.get(k,0); p = (v/res['total_cogs']*100) if res['total_cogs']>0 else 0
-            cr.append({'Item':COGS_LABELS[k.upper()],'Amount':f"{v:,.0f}",'%':f"{p:.1f}%"})
-        cr.append({'Item':'**TOTAL COGS**','Amount':f"{res['total_cogs']:,.0f}",'%':''})
-        st.dataframe(pd.DataFrame(cr), width="stretch", hide_index=True,
-            column_config={'Amount':st.column_config.TextColumn('VND'),'%':st.column_config.TextColumn('%',width=60)})
-        st.divider()
-        r1, r2 = st.columns(2)
-        r1.metric("Sales",fmt_vnd(res['sales'])); r1.metric("COGS",fmt_vnd(res['total_cogs']))
-        r2.metric("GP",fmt_vnd(res['gp'])); r2.metric("GP%",f"{res['gp_percent']:.1f}%")
-        gng = get_go_no_go(res['gp_percent'], gt, ct); st.divider()
-        if gng == 'GO': st.success(f"### ✅ GO — {res['gp_percent']:.1f}%")
-        elif gng == 'CONDITIONAL': st.warning(f"### ⚠️ CONDITIONAL — {res['gp_percent']:.1f}%")
-        else: st.error(f"### ❌ NO-GO — {res['gp_percent']:.1f}%")
-        if items: st.caption(f"{len(items)} items | A={'items' if a_ov==0 else 'override'}")
-
-    if submitted:
-        if ea<=0 and ec<=0 and md<=0 and es<=0: st.warning("Enter at least one cost + Sales."); st.stop()
-        ln = "; ".join([f"{it.get('cogs_category','')}: {(it.get('item_description','') or '')[:25]} x{it.get('quantity',0):.0f}" for it in items[:10]])
-        if len(items)>10: ln += f" (+{len(items)-10})"
-        gs = get_go_no_go(res['gp_percent'], gt, ct)
-        ed = {'project_id':pid,'estimate_version':nv,'estimate_label':label,'estimate_type':est_type,
-            'a_equipment_cost':ea,'a_equipment_notes':ln[:500] or None,
-            'alpha_rate':alpha,'b_logistics_import':res['b'],'b_override':1 if b_m>0 else 0,
-            'c_custom_fabrication':ec,'c_fabrication_notes':None,
-            'd_man_days':md,'d_man_day_rate':dr,'d_team_size':ts,'d_direct_labor':res['d'],'d_override':1 if d_m>0 else 0,
-            'beta_rate':beta,'e_travel_site_oh':res['e'],'e_override':1 if e_m>0 else 0,
-            'gamma_rate':gamma,'f_warranty_reserve':res['f'],'f_override':1 if f_m>0 else 0,
-            'total_cogs':res['total_cogs'],'sales_value':res['sales'],
-            'estimated_gp':res['gp'],'estimated_gp_percent':res['gp_percent'],
-            'go_no_go_result':gs,'assessment_notes':notes or None}
-        try:
-            nid = create_estimate(ed, user_id)
-            activate_estimate(pid, nid, user_id)
-            for i, it in enumerate(items):
-                ld = _sanitize_item({'estimate_id':nid,'cogs_category':it.get('cogs_category','A'),
-                    'product_id':it.get('product_id'),'item_description':it.get('item_description',''),
-                    'brand_name':it.get('brand_name',''),'pt_code':it.get('pt_code',''),
-                    'costbook_detail_id':it.get('costbook_detail_id'),
-                    'vendor_name':it.get('vendor_name',''),'vendor_quote_ref':it.get('vendor_quote_ref',''),
-                    'costbook_number':it.get('costbook_number',''),
-                    'unit_cost':it.get('unit_cost',0),'cost_currency_id':it.get('cost_currency_id'),
-                    'cost_exchange_rate':it.get('cost_exchange_rate',1),
-                    'quotation_detail_id':it.get('quotation_detail_id'),
-                    'unit_sell':it.get('unit_sell',0),'sell_currency_id':it.get('sell_currency_id'),
-                    'sell_exchange_rate':it.get('sell_exchange_rate',1),
-                    'quantity':it.get('quantity',1),'uom':it.get('uom','Pcs'),
-                    'notes':it.get('notes'),'view_order':i})
-                create_estimate_line_item(ld, user_id)
-            s3 = _get_s3()
-            if s3:
-                for i, it in enumerate(items):
-                    att = it.get('_attachment')
-                    if att and att.get('bytes'):
-                        ok, sk = s3.upload_project_file(att['bytes'], att['name'], pid)
-                        if ok:
-                            ls = get_estimate_line_items(nid)
-                            if not ls.empty and i < len(ls):
-                                create_line_item_media(int(ls.iloc[i]['id']), sk, att['name'], created_by=user_id)
-                if est_files:
-                    for f in est_files:
-                        ok, sk = s3.upload_project_file(f.read(), f.name, pid)
-                        if ok: create_estimate_media(nid, sk, f.name, document_type='OTHER', created_by=user_id)
-            st.success(f"✅ Rev {nv} saved with {len(items)} line items!")
-            _clear_items(); _invalidate_estimates(); _invalidate_dashboard(); _load_projects.clear(); st.rerun()
-        except Exception as e: st.error(f"Save failed: {e}")
+    if st.button("➕ Create New Estimate Revision", type="primary", use_container_width=True):
+        _wiz_init(active_est, pid)
+        st.session_state['_est_open_create'] = True
+        st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN LAYOUT
@@ -921,3 +1181,7 @@ else:
         _render_new_estimate_tab(project_id, project, pt, active_est, _can_create, _can_view_costs)
     with tab_history:
         _frag_history(project_id, _can_view_costs, _can_activate)
+
+    # ── Dialog trigger (use get, not pop — dialog survives st.rerun in wizard steps) ──
+    if st.session_state.get('_est_open_create') and project_id:
+        _dialog_create_estimate(project_id, project, pt, active_est)
