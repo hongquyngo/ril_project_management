@@ -466,27 +466,21 @@ with tab_new:
             est_type = hc2.selectbox("Type", ["QUICK","DETAILED"], index=1 if prefill.get('estimate_type')=='DETAILED' else 0,
                                       help="QUICK = rough estimate, DETAILED = full breakdown with line items")
 
-            # Auto-fill sales_value from project contract (before VAT, in VND)
+            # Sales Value: LOCKED from project contract (before VAT × exchange rate)
+            # Not editable here — contract value is defined at Project level (Page 1)
             _proj_before_vat = float(project.get('contract_value_before_vat') or project.get('contract_value') or 0)
             _proj_exc_rate   = float(project.get('exchange_rate') or 1)
             _proj_contract_vnd = _proj_before_vat * _proj_exc_rate
-            _default_sales = float(prefill.get('sales_value') or 0)
-            if _default_sales <= 0 and _proj_contract_vnd > 0:
-                _default_sales = _proj_contract_vnd  # auto-fill from contract
+            sales_value = _proj_contract_vnd
 
-            sales_value = hc3.number_input("Sales Value (VND)",
-                                            value=_default_sales, format="%.0f",
-                                            help="Auto-filled from contract value (before VAT × exchange rate). Override if different.")
-
-            # Warning if sales_value differs significantly from contract
-            if _proj_contract_vnd > 0 and sales_value > 0:
-                _drift_pct = abs(sales_value - _proj_contract_vnd) / _proj_contract_vnd * 100
-                if _drift_pct > 5:
-                    st.warning(
-                        f"⚠️ Sales Value ({sales_value:,.0f}) differs from "
-                        f"Contract Before VAT ({_proj_contract_vnd:,.0f}) by {_drift_pct:.1f}%. "
-                        f"Ensure this is intentional (e.g. phụ lục, giá sau thuế, or different scope)."
-                    )
+            if sales_value > 0:
+                _vat_pct = project.get('vat_percent') or 0
+                _after_info = f" (VAT {_vat_pct}%)" if _vat_pct else ""
+                hc3.metric("Sales Value (VND)", f"{sales_value:,.0f}")
+                hc3.caption(f"From contract before VAT{_after_info}")
+            else:
+                hc3.metric("Sales Value (VND)", "—")
+                hc3.caption("Set contract value in Projects page")
 
             st.divider()
             st.markdown("**A — Equipment &nbsp;&nbsp;|&nbsp;&nbsp; C — Fabrication**")
