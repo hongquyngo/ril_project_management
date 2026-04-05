@@ -85,6 +85,9 @@ if proj_df.empty:
 
 # ── Handle Quick Jump (must run BEFORE selectbox widget is created) ──
 _jump_label = st.session_state.pop('_est_jump_to', None)
+if _jump_label:
+    # Clear widget key so selectbox index= takes effect on this run
+    st.session_state.pop('est_project', None)
 
 with st.sidebar:
     st.header("Filters")
