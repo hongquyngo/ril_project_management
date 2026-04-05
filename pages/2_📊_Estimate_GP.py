@@ -351,6 +351,11 @@ def _render_analytics(df, has_est):
 # CONTEXT BANNER
 # ══════════════════════════════════════════════════════════════════════════════
 def _render_context_banner(proj, active_est):
+    bc1, bc2 = st.columns([1, 8])
+    if bc1.button("← All Projects", use_container_width=True, key="ctx_back"):
+        st.session_state.pop('est_project', None)
+        st.rerun()
+
     c1, c2, c3, c4, c5 = st.columns([3, 2, 1, 1, 1])
     c1.markdown(f"**{proj['project_code']}** — {proj['project_name']}")
     c2.caption(f"Customer: {proj.get('customer_name') or proj.get('end_customer_name','—')} | Status: **{proj['status']}**")
@@ -979,7 +984,7 @@ def _wiz_step3_formula(pid, proj, pt, active_est):
 def _frag_active_estimate(pid, _can_view_costs):
     est = get_active_estimate(pid)
     if not est:
-        st.info("No active estimate. Go to **📝 New Estimate** tab to create one."); return
+        return
     gng = est.get('go_no_go_result','')
     h1, h2 = st.columns([4,1])
     h1.markdown(f"### Rev {est['estimate_version']} — {est.get('estimate_label','')}")
@@ -1124,35 +1129,6 @@ def _frag_history(pid, _can_view_costs, _can_activate):
                 _invalidate_estimates(); _invalidate_dashboard(); _load_projects.clear(); st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NEW ESTIMATE TAB — button opens wizard dialog
-# ══════════════════════════════════════════════════════════════════════════════
-def _render_new_estimate_tab(pid, proj, pt, active_est, _can_create, _can_view_costs):
-    if not _can_create:
-        st.info("⛔ Bạn không có quyền tạo estimate. Chỉ PM, SA/Senior, hoặc Admin.")
-        st.caption("Chuyển sang tab **✅ Active Estimate** để xem.")
-        return
-
-    st.markdown(f"**Project:** `{proj['project_code']}` — {proj['project_name']}")
-
-    if active_est:
-        from utils.il_project.helpers import go_no_go_badge
-        gng = active_est.get('go_no_go_result', '')
-        _badge = go_no_go_badge(gng)
-        st.info(
-            f"📋 Current active: **Rev {active_est['estimate_version']}** — "
-            f"{active_est.get('estimate_label', '')} | "
-            f"GP: {fmt_percent(active_est.get('estimated_gp_percent'))} | "
-            f"{_badge}"
-        )
-        st.caption("Creating a new revision will build on the active estimate's data (items + coefficients).")
-
-    st.divider()
-    if st.button("➕ Create New Estimate Revision", type="primary", use_container_width=True):
-        _wiz_init(active_est, pid)
-        st.session_state['_est_open_create'] = True
-        st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
 # MAIN LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1173,15 +1149,37 @@ else:
     _render_context_banner(project, active_est)
     st.divider()
 
-    tab_active, tab_new, tab_history = st.tabs(["✅ Active Estimate", "📝 New Estimate", "🗂 History"])
+    # ── 2 tabs (no separate "New Estimate" tab) ──
+    tab_active, tab_history = st.tabs(["✅ Active Estimate", "🗂 History"])
 
     with tab_active:
-        _frag_active_estimate(project_id, _can_view_costs)
-    with tab_new:
-        _render_new_estimate_tab(project_id, project, pt, active_est, _can_create, _can_view_costs)
+        # ── Action bar (OUTSIDE fragment — buttons that trigger dialog) ──
+        if active_est:
+            ab1, ab2, ab3 = st.columns([1, 1, 4])
+            if _can_create:
+                if ab1.button("➕ New Revision", type="primary", use_container_width=True, key="act_new_rev"):
+                    _wiz_init(active_est, project_id)
+                    st.session_state['_est_open_create'] = True
+                    # NO st.rerun() — let current run continue to dialog trigger below
+            st.divider()
+        else:
+            # No active estimate — show create prompt
+            st.info("No active estimate for this project.")
+            if _can_create:
+                if st.button("➕ Create First Estimate", type="primary", key="act_first_est"):
+                    _wiz_init(None, project_id)
+                    st.session_state['_est_open_create'] = True
+            else:
+                st.caption("⛔ Bạn không có quyền tạo estimate. Chỉ PM, SA/Senior, hoặc Admin.")
+
+        # ── Fragment: Active estimate display (isolated) ──
+        if active_est:
+            _frag_active_estimate(project_id, _can_view_costs)
+
     with tab_history:
         _frag_history(project_id, _can_view_costs, _can_activate)
 
-    # ── Dialog trigger (use get, not pop — dialog survives st.rerun in wizard steps) ──
+    # ── Dialog trigger (MUST be at page bottom, OUTSIDE tabs) ──
+    # Uses get() not pop() — dialog persists across wizard step reruns
     if st.session_state.get('_est_open_create') and project_id:
         _dialog_create_estimate(project_id, project, pt, active_est)
